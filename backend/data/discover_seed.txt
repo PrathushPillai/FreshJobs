@@ -1,0 +1,320 @@
+Abnormal Security
+Addepar
+Affinity
+Alation
+Algolia
+Alchemy
+Amplitude
+Apollo GraphQL
+AppLovin
+Arcadia
+Asana
+Astronomer
+Attentive
+Aurora Innovation
+Benchling
+BetterUp
+Bitwarden
+Blend
+Bloomreach
+Bolt
+Box
+Braze
+Brex
+BuzzFeed
+Canva
+Cerebras
+Chainguard
+Checkr
+Circle
+CircleCI
+Clari
+ClickHouse
+Clio
+Coalition
+Codecademy
+Cohere
+Collibra
+Common Room
+Contentful
+Coursera
+Cribl
+Crusoe
+Cockroach Labs
+Customer.io
+Dagster
+Databento
+Dataiku
+DataRobot
+Degreed
+Descript
+DigitalOcean
+Docker
+DoubleVerify
+Drata
+Dremio
+EarnIn
+Eight Sleep
+Elastic
+Epic Games
+Etsy
+Eventbrite
+Expensify
+Faire
+Fanatics
+Fireblocks
+Flatiron Health
+Flock Safety
+Forter
+Front
+Gem
+GitHub
+Glean
+GoodRx
+Gopuff
+Grafana Labs
+Greenhouse
+Gusto
+Handshake
+Headway
+Heap
+Hightouch
+Hims & Hers
+Hinge Health
+HubSpot
+Imply
+Inflection AI
+Instabase
+Intercom
+Iterable
+Jasper
+JFrog
+Justworks
+Kaggle
+Kandji
+Klaviyo
+Komodo Health
+LaunchDarkly
+Lattice
+LinkedIn
+Lime
+Lob
+Lucid
+Machinify
+Magic Leap
+Mapbox
+Masterclass
+Medium
+Mercury
+Meter
+Metabase
+Miro
+Mixpanel
+Monte Carlo
+Motive
+Mozilla
+Neo4j
+Netlify
+New Relic
+Niantic
+Notion
+Nuro
+Okta
+Omada Health
+OneSignal
+Opendoor
+OpenSea
+Oscar Health
+Outreach
+Palantir
+Panther Labs
+Patreon
+PathAI
+Pendo
+Persona
+Pilot
+PlanetScale
+Plaid
+Podium
+PostHog
+Postman
+Prefect
+Quizlet
+Radiant
+Rapid7
+Recharge
+Redis
+Relativity Space
+Remitly
+Rescale
+Retool
+Rippling
+Riot Games
+Robinhood
+Roku
+Rubrik
+Runway
+Sardine
+Scale AI
+Seatgeek
+Segment
+Sentry
+ServiceTitan
+Shift4
+ShipBob
+Sigma Computing
+Skydio
+Slack
+Smartsheet
+Snyk
+SoFi
+Sourcegraph
+SpaceX
+Splunk
+Spotify
+Sprout Social
+Square
+Squarespace
+StockX
+Stord
+Strava
+Sumo Logic
+Superhuman
+Sweetgreen
+Tabs
+Tailscale
+Teleport
+Temporal
+Tempus
+Thoughtspot
+Thumbtack
+Tinder
+Truework
+Turo
+Twilio
+Udemy
+UiPath
+Unity
+Upstart
+Vanta
+Varo
+Vercel
+Via
+Vimeo
+Waymo
+Wealthfront
+Webflow
+Whatnot
+Wish
+Wiz
+Wolt
+Workato
+Yext
+Zapier
+Zendesk
+Zip
+Zocdoc
+Zuora
+Bain Capital
+Jane Street
+Jump Trading
+Citadel Securities
+DRW
+Five Rings
+Tower Research Capital
+Virtu Financial
+Point72
+D. E. Shaw
+Squarepoint
+Chime
+Marqeta
+Mercury
+Nerdwallet
+Betterment
+Acorns
+Credit Karma
+Lending Club
+Bilt Rewards
+Ramp
+Navan
+Airwallex
+Deel
+Remote
+Oyster
+Papaya Global
+Doximity
+Ro
+Cityblock Health
+Devoted Health
+Included Health
+Spring Health
+Lyra Health
+Calm
+Headspace
+Noom
+Peloton
+Whoop
+Oura
+Grammarly
+Duolingo
+Chegg
+Khan Academy
+Outschool
+ClassDojo
+Instacart
+Gopuff
+Shipt
+Flexport
+project44
+Samsara
+Convoy
+KeepTruckin
+Toast
+Olo
+Lightspeed
+Shopify
+Faire
+Poshmark
+ThredUp
+Rent the Runway
+Warby Parker
+Allbirds
+Glossier
+Figure
+Anduril
+Shield AI
+Saronic
+Hadrian
+Hermeus
+Varda
+Astranis
+Rocket Lab
+Zipline
+Wing
+Joby Aviation
+Archer Aviation
+Rivian
+Lucid Motors
+Tesla
+Nvidia
+AMD
+Qualcomm
+Arm
+Intel
+Micron
+Western Digital
+Seagate
+NetApp
+Pure Storage
+Nutanix
+VMware
+Arista Networks
+Juniper Networks
+Fortinet
+Palo Alto Networks
+CrowdStrike
+SentinelOne
+Zscaler
+Cloudflare
+Akamai
+Fastly

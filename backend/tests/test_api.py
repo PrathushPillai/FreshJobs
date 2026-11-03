@@ -1,0 +1,134 @@
+from datetime import timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.models import Company
+from app.pipeline.poller import process_company
+from app.prefs import get_prefs
+from app.sources import NormalizedJob
+
+
+def nj(ext_id, title, location="New York, NY", description="", company_name=""):
+    return NormalizedJob(external_id=ext_id, title=title, url=f"https://x/{ext_id}", locations=[location],
+                         description=description, company_name=company_name)
+
+
+@pytest.fixture()
+def client(session, now):
+    acme = Company(name="Acme", ats="greenhouse", slug="acme")
+    session.add(acme)
+    session.flush()
+    prefs = get_prefs(session)
+    process_company(session, acme, [], prefs, now - timedelta(hours=1))  # baseline poll
+    process_company(session, acme, [
+        nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
+        nj("2", "Business Intelligence Developer", "Toronto, ON"),
+        nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
+        nj("4", "Registered Nurse", "London, UK"),
+        nj("5", "Data Engineer", "Remote", "Must be a US citizen."),
+    ], prefs, now)
+    session.commit()
+    with TestClient(app) as c:
+        yield c
+
+
+def titles(resp):
+    assert resp.status_code == 200, resp.text
+    return sorted(j["title"] for j in resp.json()["items"])
+
+
+def test_any_role_searchable(client):
+    assert titles(client.get("/api/jobs", params={"q": "nurse"})) == ["Registered Nurse"]
+
+
+def test_related_role_search(client):
+    resp = client.get("/api/jobs", params={"q": "data analyst"})
+    assert titles(resp) == ["Business Intelligence Developer", "Data Analyst"]
+    assert "business intelligence" in resp.json()["related_terms"]
+    assert titles(client.get("/api/jobs", params={"q": "data analyst", "related": False})) == ["Data Analyst"]
+
+
+def test_no_sponsor_hidden_by_default(client):
+    assert "Data Engineer" not in titles(client.get("/api/jobs"))
+    assert "Data Engineer" in titles(client.get("/api/jobs", params={"hide_no_sponsor": False}))
+
+
+def test_location_filters(client):
+    assert titles(client.get("/api/jobs", params={"countries": "Canada"})) == ["Business Intelligence Developer"]
+    assert titles(client.get("/api/jobs", params={"countries": "United States", "states": "TX"})) == ["Data Analyst"]
+    assert titles(client.get("/api/jobs", params={"countries": "United States", "cities": "Seattle"})) == ["Senior Software Engineer"]
+    assert titles(client.get("/api/jobs", params=[("countries", "Canada"), ("countries", "United Kingdom")])) == [
+        "Business Intelligence Developer", "Registered Nurse"]
+
+
+def test_location_facets(client):
+    facets = client.get("/api/facets/locations", params={"country": "United States"}).json()
+    assert {c["name"] for c in facets["countries"]} >= {"United States", "Canada", "United Kingdom"}
+    assert {s["name"] for s in facets["states"]} == {"TX", "WA"}
+
+
+def test_experience_filters(client):
+    assert titles(client.get("/api/jobs", params={"exp_levels": "senior"})) == ["Senior Software Engineer"]
+    assert titles(client.get("/api/jobs", params={"exp_levels": "entry"})) == ["Data Analyst"]
+    jobs = client.get("/api/jobs", params={"max_years": 3}).json()["items"]
+    assert "Senior Software Engineer" not in [j["title"] for j in jobs]
+    analyst = next(j for j in jobs if j["title"] == "Data Analyst")
+    assert analyst["min_years"] == 1 and analyst["exp_level"] == "entry"
+
+
+def test_tracker_flow(client):
+    job = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    created = client.post("/api/applications", json={"job_id": job["id"], "status": "applied"})
+    assert created.status_code == 201
+    app_id = created.json()["id"]
+    assert created.json()["applied_at"] is not None
+    assert client.post("/api/applications", json={"job_id": job["id"]}).status_code == 409
+
+    tracked = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    assert tracked["application"] == {"id": app_id, "status": "applied"}
+    assert titles(client.get("/api/jobs", params={"tracked": "untracked", "q": "nurse"})) == []
+
+    patched = client.patch(f"/api/applications/{app_id}", json={"status": "interviewing", "notes": "Phone screen Fri"})
+    assert patched.json()["status"] == "interviewing" and patched.json()["notes"] == "Phone screen Fri"
+    assert client.patch(f"/api/applications/{app_id}", json={"status": "bogus"}).status_code == 400
+
+    manual = client.post("/api/applications", json={"company": "Elsewhere", "title": "Analyst", "status": "saved"})
+    assert manual.status_code == 201 and manual.json()["applied_at"] is None
+    assert len(client.get("/api/applications").json()) == 2
+    assert client.delete(f"/api/applications/{app_id}").status_code == 204
+    assert len(client.get("/api/applications").json()) == 1
+
+
+def test_recruiter_links_without_hunter(client, monkeypatch):
+    monkeypatch.setattr("app.recruiters.settings.hunter_api_key", "")
+    job = client.get("/api/jobs", params={"q": "data analyst", "related": False}).json()["items"][0]
+    data = client.get(f"/api/jobs/{job['id']}/recruiters").json()
+    assert data["hunter_configured"] is False and data["hunter"] is None
+    assert any("linkedin.com/search/results/people" in link["url"] and "Acme" in link["url"] for link in data["links"])
+    looked_up = client.get(f"/api/jobs/{job['id']}/recruiters", params={"lookup": True}).json()
+    assert "HUNTER_API_KEY" in looked_up["hunter"]["error"]
+
+
+def test_cross_source_duplicate_flagged(session, now):
+    prefs = get_prefs(session)
+    acme = Company(name="Acme", ats="greenhouse", slug="acme")
+    agg = Company(name="Adzuna", ats="themuse", slug="us")
+    session.add_all([acme, agg])
+    session.flush()
+    for c in (acme, agg):
+        process_company(session, c, [], prefs, now - timedelta(hours=1))
+    [original] = process_company(session, acme, [nj("1", "Data Analyst")], prefs, now)
+    [dup] = process_company(session, agg, [nj("z9", "Data Analyst", company_name="Acme, Inc.")], prefs, now,
+                            complete=False)
+    assert dup.is_repost and dup.repost_of_id == original.id
+    assert dup.events[0].kind == "duplicate"
+
+
+def test_add_company_from_careers_url(client):
+    r = client.post("/api/companies/from-url", json={"url": "https://jobs.lever.co/acme-labs/abc-123"})
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] is True and r.json()["company"]["ats"] == "lever" and r.json()["company"]["slug"] == "acme-labs"
+    again = client.post("/api/companies/from-url", json={"url": "jobs.lever.co/acme-labs"})
+    assert again.json()["added"] is False
