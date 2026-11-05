@@ -41,6 +41,13 @@ ROLE_FAMILIES: dict[str, list[str]] = {
                   "brand", "social media", "communications"],
     "sales": ["sales", "account executive", "business development", "sales development", "sdr", "bdr",
               "account manager", "solutions engineer", "sales engineer", "partnerships"],
+    "it support": [
+        "it support", "help desk", "helpdesk", "service desk", "desktop support", "deskside support",
+        "technical support", "tech support", "end user support", "end user computing", "support technician",
+        "it technician", "it specialist", "it analyst", "it administrator", "it coordinator", "it engineer",
+        "it operations", "systems administrator", "system administrator", "sysadmin", "network administrator",
+        "noc technician", "noc engineer", "field technician", "computer technician", "it associate",
+    ],
     "customer": ["customer success", "customer support", "support engineer", "technical support", "customer experience",
                  "implementation", "onboarding specialist"],
     "finance": ["finance", "financial analyst", "accountant", "accounting", "fp&a", "controller", "treasury",

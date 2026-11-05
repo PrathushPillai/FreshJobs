@@ -43,6 +43,7 @@ class Company(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_status: Mapped[str | None] = mapped_column(String(300))  # "ok (42 jobs)" or the error
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # last successful fetch
     poll_count: Mapped[int] = mapped_column(Integer, default=0)
 
     jobs: Mapped[list["Job"]] = relationship(back_populates="company")
@@ -56,6 +57,12 @@ class Job(Base):
         # (descriptions make the table ~1 GB), which makes a search ~10x faster.
         Index("ix_jobs_feed_v2", "closed_at", "is_repost", "no_sponsor", "title", "company_name", "first_seen_at",
               "listed_at", "posted_at", "remote", "exp_level", "min_years", "h1b_filings", "role_match"),
+        # The feed's two main sorts ("newest found", "most recently posted") read these in order and stop
+        # after a page, instead of sorting every open job (~800k) on each request.
+        Index("ix_jobs_by_found", "closed_at", "is_repost", "no_sponsor", "first_seen_at", "listed_at", "remote",
+              "exp_level", "min_years", "h1b_filings", "role_match"),
+        Index("ix_jobs_by_listed", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
+              "exp_level", "min_years", "h1b_filings", "role_match"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -77,6 +84,12 @@ class Job(Base):
     # Best estimate of when the job went live (pipeline/normalize.listed_at): the source's timestamp when it
     # has one, our detection time when the source only gives a date. "Date posted" filters/sorts use this.
     listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # Set when listed_at is only a window start: the job went live between listed_at and listed_until
+    # (caught after a gap in checking, e.g. the server was off). listed_earliest is the input to that.
+    listed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    listed_earliest: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Last time its apply page was opened to see if it's still open (pipeline/liveness.py).
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     missed_polls: Mapped[int] = mapped_column(Integer, default=0)
@@ -107,6 +120,12 @@ class JobLocation(Base):
     """One parsed location of a job (a job can list several)."""
 
     __tablename__ = "job_locations"
+    __table_args__ = (
+        # Covering indexes for the feed's location filters: "is this job in the US?" per job, and
+        # "which jobs are in Boston?" for a city or state (see main.list_jobs).
+        Index("ix_job_locations_job_place", "job_id", "country", "state", "city"),
+        Index("ix_job_locations_place_job", "country", "state", "city", "job_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)

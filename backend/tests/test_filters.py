@@ -153,3 +153,20 @@ def test_listed_at_prefers_detection_time_for_date_only_postings():
     assert listed_at(None, found, baseline=True) is None  # undated and already listed: unknown
     old_date = datetime(2026, 10, 1, tzinfo=timezone.utc)
     assert listed_at(old_date, found, baseline=False) == old_date  # re-listed old job keeps its date
+
+
+def test_listed_window_after_a_gap_in_checking():
+    from datetime import datetime, timezone
+
+    from app.pipeline.normalize import listed_window
+
+    prev = datetime(2026, 11, 3, 8, 0, tzinfo=timezone.utc)
+    found = datetime(2026, 11, 3, 14, 5, tzinfo=timezone.utc)
+    midnight = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    exact = datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)
+    assert listed_window(midnight, found, False, prev) == (prev, found)  # date-only: sometime since 8 am
+    assert listed_window(None, found, False, prev) == (prev, found)
+    assert listed_window(exact, found, False, prev) == (exact, None)  # an exact time needs no window
+    late_prev = datetime(2026, 11, 2, 20, 0, tzinfo=timezone.utc)
+    assert listed_window(midnight, found, False, late_prev) == (midnight, found)  # not before the posted date
+    assert listed_window(None, found, True, prev) == (None, None)  # baseline stays unknown

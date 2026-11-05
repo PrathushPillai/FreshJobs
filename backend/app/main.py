@@ -16,12 +16,13 @@ from sqlalchemy import and_, case, exists, func, or_, select, text, true
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.db import SessionLocal, get_session, init_db, is_sqlite
+from app.db import SessionLocal, engine, get_session, init_db, is_sqlite
 from app.h1b import sponsor_index
 from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobLocation
 from app.notify.email import email_configured
 from app.pipeline.detect import detect_from_page
 from app.pipeline.filters import role_matches
+from app.pipeline import liveness
 from app.pipeline.poller import USER_AGENT, backfill, poll_once
 from app.pipeline.search import expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
@@ -39,6 +40,21 @@ _poll_locks = {lane: threading.Lock() for lane in LANES}
 _last_poll: dict[str, dict] = {}
 
 
+COUNT_CAP = 10_000
+
+
+def _checkpoint() -> None:
+    """Fold the WAL back into the database. With the API reading nonstop, SQLite's automatic checkpoints
+    never get to reset it, and a WAL that grows to gigabytes slows every read."""
+    if not is_sqlite:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        log.warning("WAL checkpoint failed", exc_info=True)
+
+
 def run_poll(lane: str) -> dict:
     """Run one poll of a lane in this thread; skip if that lane is already polling."""
     lock = _poll_locks[lane]
@@ -48,6 +64,7 @@ def run_poll(lane: str) -> dict:
         started = datetime.now(timezone.utc)
         summary = asyncio.run(poll_once(lane))
         _last_poll[lane] = {**summary, "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat()}
+        _checkpoint()
         return summary
     except Exception:
         log.exception("Poll of %s lane failed", lane)
@@ -105,6 +122,8 @@ class JobOut(BaseModel):
     posted_at: datetime | None
     first_seen_at: datetime
     listed_at: datetime | None
+    listed_until: datetime | None
+    checked_at: datetime | None
     closed_at: datetime | None
     is_repost: bool
     repost_of_id: int | None
@@ -138,6 +157,7 @@ class JobDetailOut(JobOut):
 
 class JobPage(BaseModel):
     total: int
+    total_capped: bool = False  # more than COUNT_CAP matches; total is COUNT_CAP
     related_terms: list[str]
     items: list[JobOut]
 
@@ -282,7 +302,7 @@ def list_jobs(
     limit: int = Query(50, le=200),
     offset: int = 0,
 ):
-    stmt = select(Job).join(Company, Job.company_id == Company.id)
+    stmt = select(Job)
     if status == "open":
         stmt = stmt.where(Job.closed_at.is_(None))
     elif status == "closed":
@@ -301,7 +321,7 @@ def list_jobs(
         stmt = stmt.where(Job.first_seen_at >= datetime.now(timezone.utc) - timedelta(hours=since_hours))
     if posted_within_hours:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=posted_within_hours)
-        stmt = stmt.where(func.coalesce(Job.listed_at, Job.posted_at) >= cutoff)  # undated jobs can't qualify
+        stmt = stmt.where(Job.listed_at >= cutoff)  # undated jobs can't qualify
     if company_id:
         stmt = stmt.where(Job.company_id == company_id)
 
@@ -317,14 +337,17 @@ def list_jobs(
         relevance = case((phrase, 0), (typed, 1), else_=2)
 
     if countries or states or cities:
-        place = [JobLocation.job_id == Job.id]
+        place = []
         if countries:
             place.append(JobLocation.country.in_(countries))
         if states:
             place.append(JobLocation.state.in_(states))
         if cities:
             place.append(JobLocation.city.in_(cities))
-        in_place = exists().where(*place)
+        # A state or city matches few jobs: look those up first (Boston: 15 s -> 0.5 s). A country matches
+        # most, so check each job as the feed's index walks them, and stop after a page.
+        in_place = (Job.id.in_(select(JobLocation.job_id).where(*place)) if states or cities
+                    else exists().where(JobLocation.job_id == Job.id, *place))
         if include_unplaced_remote and not (states or cities):
             # "Remote" with no stated country: keep it, the country may still fit.
             unplaced_remote = and_(Job.remote.is_(True), ~exists().where(JobLocation.job_id == Job.id))
@@ -344,11 +367,12 @@ def list_jobs(
     # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
     # (descriptions), then load just the page's jobs. Selecting full rows made a search take ~6 s.
     ids = stmt.with_only_columns(Job.id)
-    total = session.scalar(select(func.count()).select_from(ids.subquery()))
+    # Counting every match of a broad query (800k open jobs) takes seconds, so stop at COUNT_CAP ("10,000+").
+    total = session.scalar(select(func.count()).select_from(ids.limit(COUNT_CAP + 1).subquery()))
     order = {
         "newest": (Job.first_seen_at.desc(), Job.id.desc()),
-        # Undated jobs last: our first-scan time would wrongly put them at the top.
-        "posted": (func.coalesce(Job.listed_at, Job.posted_at).is_(None), func.coalesce(Job.listed_at, Job.posted_at).desc(), Job.id.desc()),
+        # listed_at is set whenever the source gives a date; undated jobs (NULL) sort last in DESC order.
+        "posted": (Job.listed_at.desc(), Job.id.desc()),
         "company": (Job.company_name, Job.first_seen_at.desc()),
         "sponsor": (func.coalesce(Job.h1b_filings, 0).desc(), Job.first_seen_at.desc()),
     }[sort]
@@ -363,7 +387,7 @@ def list_jobs(
         )
     }
     items = [_job_out(loaded[i]) for i in page_ids if i in loaded]
-    return {"total": total, "related_terms": related_terms, "items": items}
+    return {"total": min(total, COUNT_CAP), "total_capped": total > COUNT_CAP, "related_terms": related_terms, "items": items}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobDetailOut)
@@ -390,6 +414,22 @@ def _sponsor_info(session: Session, company: str) -> dict | None:
         "top_titles": biggest.top_titles if biggest else [],
         "source": biggest.source if biggest else "",
     }
+
+
+@app.post("/api/jobs/{job_id}/verify")
+async def verify_job(job_id: int, session: Session = Depends(get_session)):
+    """Open the job's apply page now and close the job if it's gone (pipeline/liveness.py)."""
+    job = session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        is_open, why = await liveness.check(client, job.url)
+    now = datetime.now(timezone.utc)
+    job.checked_at = now
+    if is_open is False and job.closed_at is None:
+        liveness.close(session, job, why, now)
+    session.commit()
+    return {"open": is_open, "detail": why, "checked_at": now, "closed_at": job.closed_at}
 
 
 @app.get("/api/jobs/{job_id}/recruiters")

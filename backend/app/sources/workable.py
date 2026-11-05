@@ -21,7 +21,9 @@ def _place(loc: dict) -> str:
 
 class WorkableAdapter(Adapter):
     ats = "workable"
-    min_interval_minutes = 30
+    # New jobs come in within minutes through Workable's own job search (workable_search.py); polling
+    # each board, for closings and full listings, every 3 hours keeps under Workable's rate limit.
+    min_interval_minutes = 180
     max_concurrency = 2  # thousands of discovered Workable boards at 10 at once got HTTP 429 for most
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:

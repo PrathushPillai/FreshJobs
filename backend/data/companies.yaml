@@ -545,6 +545,9 @@
 - name: Sweep360
   ats: workable
   slug: sweep360
+- name: Workable job search (US)
+  ats: workable_search
+  slug: location=United States
 - name: The Muse
   ats: themuse
   slug: "category=Software Engineering&category=Data and Analytics&category=Computer and IT&level=Entry Level&level=Mid Level"

@@ -132,3 +132,23 @@ def test_job_saved_without_description_is_enriched_later(session, now):
     process_company(session, company, [detailed], prefs, now + timedelta(minutes=10))
     assert job.no_sponsor and "Green Card" in job.description
     assert job.posted_at == now - timedelta(days=1) and job.listed_at == job.posted_at
+
+
+def test_job_found_after_a_gap_gets_a_posted_window(session, now):
+    company, prefs = make_company(session), get_prefs(session)
+    process_company(session, company, [nj("1")], prefs, now)
+    soon = now + timedelta(minutes=5)
+    [quick] = process_company(session, company, [nj("1"), nj("2", title="Data Analyst")], prefs, soon)
+    assert quick.listed_at == soon and quick.listed_until is None  # normal polling: found minutes after it went live
+
+    # The server was off for 6 hours: an undated job went live some time in that gap, not "just now".
+    later = soon + timedelta(hours=6)
+    [gap] = process_company(session, company, [nj("1"), nj("2", title="Data Analyst"), nj("3", title="ML Engineer")], prefs, later)
+    assert gap.first_seen_at == later
+    assert gap.listed_at == soon and gap.listed_until == later
+
+    # A failed check in between doesn't count as having looked.
+    company.last_polled_at, company.last_status = later + timedelta(hours=1), "error: timeout"
+    after_error = later + timedelta(hours=1, minutes=5)
+    [job] = process_company(session, company, [nj("1"), nj("2", title="Data Analyst"), nj("3", title="ML Engineer"), nj("4", title="Data Engineer")], prefs, after_error)
+    assert job.listed_at == later and job.listed_until == after_error

@@ -148,3 +148,23 @@ def test_posted_within_filter(client, session, now):
     recent = titles(client.get("/api/jobs", params={"posted_within_hours": 72}))
     assert "Data Analyst" not in recent and "Business Intelligence Developer" in recent
     assert "Data Analyst" in titles(client.get("/api/jobs", params={"posted_within_hours": 24 * 30}))
+
+
+def test_verify_closes_a_job_whose_apply_page_is_gone(client):
+    import httpx
+    import respx
+
+    job = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    with respx.mock:
+        respx.get(job["url"]).mock(return_value=httpx.Response(404))
+        resp = client.post(f"/api/jobs/{job['id']}/verify").json()
+    assert resp["open"] is False and resp["closed_at"]
+    assert job["id"] not in [j["id"] for j in client.get("/api/jobs").json()["items"]]
+
+
+def test_job_list_reports_when_its_count_is_capped(client, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "COUNT_CAP", 1)
+    page = client.get("/api/jobs").json()
+    assert page["total"] == 1 and page["total_capped"] is True

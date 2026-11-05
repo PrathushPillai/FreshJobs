@@ -29,8 +29,13 @@ class Settings(BaseSettings):
     harvest_per_poll: int = 200
     # Minutes between polls of a board that had no open jobs, or failed, last time.
     idle_poll_minutes: int = 180
+    # A job found more than this long after the source's previous successful check gets a
+    # "posted between" window instead of "posted when we found it" (date-only and undated sources).
+    listed_exact_gap_minutes: int = 45
     # Jobs per source per poll whose missing details are fetched again (poller.poll_once).
     enrich_per_poll: int = 200
+    # Jobs per fast poll whose apply page is opened to catch ones taken down (pipeline/liveness.py). 0 = off.
+    verify_per_poll: int = 150
     # Hours between syncs of hiring Y Combinator startups into sources (pipeline/startups.py). 0 = off.
     yc_sync_hours: int = 24
 

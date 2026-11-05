@@ -21,10 +21,11 @@ from app.notify.email import send_alert
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
+from app.pipeline.liveness import verify_due
 from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
-from app.pipeline.normalize import company_key, experience_level, experience_years, listed_at, seniority
+from app.pipeline.normalize import company_key, experience_level, experience_years, listed_window, seniority
 from app.pipeline.sponsorship import find_no_sponsor_phrase
 from app.prefs import get_prefs, sync_companies
 from app.sources import ADAPTERS, NormalizedJob
@@ -46,7 +47,7 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.no_sponsor = find_no_sponsor_phrase(job.description) is not None
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
-    job.listed_at = listed_at(job.posted_at, job.first_seen_at, job.baseline)
+    job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -70,6 +71,11 @@ def process_company(
     complete: the listing contains every open job, so jobs missing from it can be closed.
     """
     first_poll = company.poll_count == 0
+    # After a gap in checking (server off, source polled rarely), new jobs went live some time since the
+    # previous successful check, not just now (see normalize.listed_window).
+    gap_start = company.last_ok_at or (company.last_polled_at if (company.last_status or "").startswith("ok") else None)
+    if gap_start is not None and now - gap_start <= timedelta(minutes=settings.listed_exact_gap_minutes):
+        gap_start = None
     existing = {j.external_id: j for j in session.scalars(select(Job).where(Job.company_id == company.id))}
     seen_ids = set()
     new_jobs: list[Job] = []
@@ -109,6 +115,7 @@ def process_company(
             # On a source's first scan we can't tell when jobs appeared, so fall back to the posted date.
             first_seen_at=min(nj.posted_at, now) if first_poll and nj.posted_at else now,
             last_seen_at=now,
+            listed_earliest=None if first_poll else gap_start,
             baseline=first_poll,
             alerted=first_poll,
         )
@@ -155,6 +162,7 @@ def process_company(
 
     company.poll_count += 1
     company.last_polled_at = now
+    company.last_ok_at = now
     company.last_status = f"ok ({len(seen_ids)} {'open' if complete else 'fetched'})"
     return new_jobs
 
@@ -265,9 +273,12 @@ async def poll_once(lane: str | None = None) -> dict:
             session.commit()
 
             harvested = []
-            if lane != "slow":  # only the fast lane adds sources
+            verified_closed = 0
+            if lane != "slow":  # only the fast lane adds sources and checks apply pages
                 harvested = harvest(session, links, settings.harvest_per_poll)
                 harvested += await maybe_sync_yc(session, client)
+                session.commit()
+                verified_closed = await verify_due(session, client, settings.verify_per_poll, now)
             session.commit()
 
             discovered = []
@@ -285,7 +296,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
-        "harvested": len(harvested),
+        "harvested": len(harvested), "closed_by_check": verified_closed,
     }
     log.info("Poll finished: %s", summary)
     return summary
@@ -306,6 +317,9 @@ def backfill(batch: int = 500) -> int:
                     apply_flags(session, job, prefs)
             session.commit()
             done += len(jobs)
+    with SessionLocal() as session:  # last_ok_at (added later): the last poll, if it succeeded
+        session.execute(text("UPDATE companies SET last_ok_at = last_polled_at WHERE last_ok_at IS NULL AND last_status LIKE 'ok%'"))
+        session.commit()
     with SessionLocal() as session:  # listed_at (added later) for older jobs, same rule as normalize.listed_at
         filled = session.execute(text("""
             UPDATE jobs SET listed_at = CASE

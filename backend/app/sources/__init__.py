@@ -24,6 +24,7 @@ from app.sources.smartrecruiters import SmartRecruitersAdapter
 from app.sources.successfactors import SuccessFactorsAdapter
 from app.sources.themuse import TheMuseAdapter
 from app.sources.workable import WorkableAdapter
+from app.sources.workable_search import WorkableSearchAdapter
 from app.sources.website import WebsiteAdapter
 from app.sources.workday import WorkdayAdapter
 from app.sources.yc import YCAdapter
@@ -37,6 +38,7 @@ ADAPTERS: dict[str, Adapter] = {
         WorkdayAdapter(),
         SmartRecruitersAdapter(),
         WorkableAdapter(),
+        WorkableSearchAdapter(),
         AmazonAdapter(),
         MicrosoftAdapter(),
         GoogleAdapter(),

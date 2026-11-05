@@ -5,6 +5,7 @@
     python -m app.pipeline.bulk_discovery commoncrawl         # every Greenhouse/Lever/Ashby/Workday board in Common Crawl
     python -m app.pipeline.bulk_discovery vc                  # portfolio companies of VCs whose job sites allow it
     python -m app.pipeline.bulk_discovery workday --top 5000  # Workday career sites of the biggest H-1B sponsors
+    python -m app.pipeline.bulk_discovery fix-workday         # repair Workday sources named after a file (robots.txt)
 
 VC job sites: only ones whose robots.txt allows crawling and that don't ask scrapers to use a paid API
 instead. Getro-hosted boards (General Catalyst, Accel...) ask for that, and Consider-hosted ones
@@ -149,17 +150,69 @@ async def find_workday(client: httpx.AsyncClient, name: str) -> tuple[str, str] 
                 break
         if host is None:
             continue
-        # {T}: the tenant ("Nvidia"); {N}: the company's words joined by "_" ("Capital_One").
-        words = [w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", re.sub(r"\b(inc|llc|ltd|corp|corporation|co)\b\.?", " ", name, flags=re.I))]
-        for site in dict.fromkeys(WD_SITES[1:]):
-            site = site.replace("{T}", tenant.capitalize()).replace("{N}", "_".join(words) or tenant)
-            try:
-                r = await client.post(f"https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs", json=_WD_BODY)
-            except httpx.HTTPError:
-                continue
-            if r.status_code == 200 and r.json().get("total"):
-                return "workday", f"{tenant}|{host}|{site}"
+        found = await find_site(client, tenant, host, name, WD_SITES[1:])
+        if found:
+            return found
     return None
+
+
+async def find_site(client: httpx.AsyncClient, tenant: str, host: str, name: str, sites=WD_SITES) -> tuple[str, str] | None:
+    """The career site of a known Workday tenant, by trying the common site names."""
+    # {T}: the tenant ("Nvidia"); {N}: the company's words joined by "_" ("Capital_One").
+    words = [w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", re.sub(r"\b(inc|llc|ltd|corp|corporation|co)\b\.?", " ", name, flags=re.I))]
+    for site in dict.fromkeys(sites):
+        site = site.replace("{T}", tenant.capitalize()).replace("{N}", "_".join(words) or tenant)
+        try:
+            r = await client.post(f"https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs", json=_WD_BODY)
+        except httpx.HTTPError:
+            continue
+        if r.status_code == 200 and r.json().get("total"):
+            return "workday", f"{tenant}|{host}|{site}"
+    return None
+
+
+async def fix_workday(client: httpx.AsyncClient) -> int:
+    """Repair Workday sources whose site name is a file (tenant|wd1|robots.txt, from crawled URLs).
+
+    Every poll of one fails, and with ~1,500 of them the slow lane never reached real boards. A tenant
+    already tracked under a real site name just has the junk row switched off; otherwise its real site
+    is looked for, and the row is renamed to it (or switched off if there is none).
+    """
+    with SessionLocal() as session:
+        rows = session.scalars(select(Company).where(Company.ats == "workday")).all()
+        real = {tuple(c.slug.split("|")[:2]) for c in rows if c.slug.count("|") == 2 and "." not in c.slug.split("|")[2]}
+        junk = [c for c in rows if c.slug.count("|") == 2 and "." in c.slug.split("|")[2]]
+        disabled = 0
+        for c in junk:
+            if tuple(c.slug.split("|")[:2]) in real:
+                c.enabled, c.last_status = False, "disabled: not a career site (tenant tracked under its real site)"
+                disabled += 1
+        session.commit()
+        todo = [(c.id, c.name, *c.slug.split("|")[:2]) for c in junk if c.enabled]
+    log.info("Workday: %d junk sources, %d switched off (tenant already tracked), %d to look up", len(junk), disabled, len(todo))
+    sem = asyncio.Semaphore(12)
+
+    async def one(item):
+        cid, name, tenant, host = item
+        async with sem:
+            return cid, await find_site(client, tenant, host, name)
+
+    fixed = 0
+    for i in range(0, len(todo), 200):
+        results = await asyncio.gather(*(one(t) for t in todo[i : i + 200]))
+        with SessionLocal() as session:
+            taken = set(session.scalars(select(Company.slug).where(Company.ats == "workday")))
+            for cid, found in results:
+                c = session.get(Company, cid)
+                if found and found[1] not in taken:
+                    c.slug, c.last_status, c.last_polled_at = found[1], None, None
+                    taken.add(found[1])
+                    fixed += 1
+                else:
+                    c.enabled, c.last_status = False, "disabled: no Workday career site found"
+            session.commit()
+        log.info("Workday: looked up %d/%d, %d career sites found", min(i + 200, len(todo)), len(todo), fixed)
+    return fixed
 
 
 async def from_workday(client: httpx.AsyncClient, top: int) -> int:
@@ -260,6 +313,7 @@ def main() -> None:
     sub.add_parser("vc")
     wd = sub.add_parser("workday")
     wd.add_argument("--top", type=int, default=5000)
+    sub.add_parser("fix-workday")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     args = parser.parse_args()
@@ -278,6 +332,8 @@ def main() -> None:
                 return await from_vc(client)
             if args.cmd == "workday":
                 return await from_workday(client, args.top)
+            if args.cmd == "fix-workday":
+                return await fix_workday(client)
             return await from_commoncrawl(client, args.indexes)
 
     print(f"Added {asyncio.run(run())} new boards")

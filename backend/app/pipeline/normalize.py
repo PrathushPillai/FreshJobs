@@ -112,23 +112,43 @@ def company_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key)
 
 
-def listed_at(posted_at, first_seen_at, baseline: bool):
-    """Best estimate of when a job went live.
+def listed_window(posted_at, first_seen_at, baseline: bool, earliest=None):
+    """Best estimate of when a job went live, as (listed_at, listed_until).
 
     Many boards (Workday, BambooHR...) give only a date, which reads as midnight: a job posted at 2 pm
     would then sort below everything posted at 1 am and fail a "posted in the last hour" filter. A job we
     caught on a later poll within two days of that date went live when we found it (polls are minutes
     apart), so that's the better estimate. Exact timestamps (an aggregator that saw it hours before us)
     are kept, and a baseline job's time is all the source tells us.
+
+    earliest: our previous successful check of the source, when it was more than a few minutes before
+    this one (the server was off, or the source is polled rarely). A job caught then went live somewhere
+    in (earliest, first_seen_at], so listed_at is the start of that window (never "just now" after
+    downtime) and listed_until its end. listed_until is None when listed_at is precise.
     """
+
+    def caught(lower=None):
+        if earliest is None:
+            return first_seen_at, None
+        start = max(earliest, lower) if lower else earliest
+        return (start, first_seen_at) if start < first_seen_at else (first_seen_at, None)
+
     if posted_at is None:
-        # Caught on a later poll: it went live minutes ago. Listed before we started tracking the
-        # source: unknown (our first scan's time would wrongly read as "posted just now").
-        return None if baseline else first_seen_at
+        # Caught on a later poll: it went live since the previous check. Listed before we started
+        # tracking the source: unknown (our first scan's time would wrongly read as "posted just now").
+        return (None, None) if baseline else caught()
     if posted_at > first_seen_at:
-        return first_seen_at
+        return caught()
     if baseline:
-        return posted_at
+        return posted_at, None
+    date_only = (posted_at.hour, posted_at.minute, posted_at.second, posted_at.microsecond) == (0, 0, 0, 0)
+    if date_only and first_seen_at - posted_at < timedelta(days=2):
+        return caught(posted_at)
+    return posted_at, None
+
+
+def listed_at(posted_at, first_seen_at, baseline: bool, earliest=None):
+    return listed_window(posted_at, first_seen_at, baseline, earliest)[0]
     date_only = (posted_at.hour, posted_at.minute, posted_at.second, posted_at.microsecond) == (0, 0, 0, 0)
     if date_only and first_seen_at - posted_at < timedelta(days=2):
         return first_seen_at

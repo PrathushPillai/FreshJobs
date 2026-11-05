@@ -20,6 +20,8 @@ export interface Job {
   posted_at: string | null
   first_seen_at: string
   listed_at: string | null
+  listed_until: string | null
+  checked_at: string | null
   closed_at: string | null
   is_repost: boolean
   repost_of_id: number | null
@@ -153,8 +155,10 @@ function toParams(query: object): URLSearchParams {
 }
 
 export const api = {
-  jobs: (query: JobQuery) => request<{ total: number; related_terms: string[]; items: Job[] }>(`/api/jobs?${toParams(query)}`),
+  jobs: (query: JobQuery) => request<{ total: number; total_capped: boolean; related_terms: string[]; items: Job[] }>(`/api/jobs?${toParams(query)}`),
   job: (id: number) => request<JobDetail>(`/api/jobs/${id}`),
+  verify: (id: number) =>
+    request<{ open: boolean | null; detail: string; checked_at: string; closed_at: string | null }>(`/api/jobs/${id}/verify`, { method: 'POST' }),
   recruiters: (id: number, lookup = false, refresh = false) =>
     request<RecruiterInfo>(`/api/jobs/${id}/recruiters?${toParams({ lookup, refresh })}`),
   locationFacets: (country?: string, state?: string) =>
@@ -186,6 +190,17 @@ export function timeAgo(iso: string): string {
   if (hours < 48) return `${hours} h ago`
   return `${Math.round(hours / 24)} d ago`
 }
+
+/** When a job went live. A window ("in the last 6 h", "20 min–6 h ago") when we found it after a gap in
+ * checking (the server was off) and the company gives no exact time, else a single time. */
+export function postedText(listed: string, until: string | null): string {
+  if (!until) return timeAgo(listed)
+  const span = (iso: string) => timeAgo(iso).replace(/ ago$/, '')
+  const untilMinutes = (Date.now() - new Date(until).getTime()) / 60_000
+  return untilMinutes < 5 ? `in the last ${span(listed)}` : `${span(until)}–${span(listed)} ago`
+}
+
+export const WINDOW_HINT = 'The company gives no exact time and we found this after a gap in checking, so it went live somewhere in this window.'
 
 export function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
@@ -224,6 +239,7 @@ export const SOURCE_LABELS: Record<string, string> = {
   pinpoint: 'Pinpoint',
   simplify: 'SimplifyJobs',
   themuse: 'The Muse',
+  workable_search: 'Workable job search',
   remotive: 'Remotive',
   remoteok: 'RemoteOK',
   adzuna: 'Adzuna',

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { api, formatDateTime, SOURCE_LABELS, timeAgo } from '../api'
+import { api, formatDateTime, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { Badge, CompanyAvatar, ExperienceBadge, SponsorBadge, TrackControl } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
@@ -125,6 +125,15 @@ function Recruiters({ jobId }: { jobId: number }) {
 export function JobDetailContent({ id }: { id: number }) {
   const job = useQuery({ queryKey: ['job', id], queryFn: () => api.job(id) })
   const j = job.data
+  // Before you spend time on it: open its apply page and see if it's still up (once per 6 h per job).
+  const recentlyChecked = !!j?.checked_at && Date.now() - new Date(j.checked_at).getTime() < 6 * 3600_000
+  const check = useQuery({
+    queryKey: ['verify', id],
+    queryFn: () => api.verify(id),
+    enabled: !!j && !j.closed_at && !recentlyChecked,
+    staleTime: Infinity,
+  })
+  const closedNow = check.data?.open === false
   // When it went live: the company's own time, or when we caught it if the company only gives a date.
   const listed = j?.listed_at ?? j?.posted_at ?? null
   if (job.isLoading) return <p className="p-6 text-sm text-slate-500">Loading…</p>
@@ -139,12 +148,25 @@ export function JobDetailContent({ id }: { id: number }) {
             <span className="font-medium text-slate-800">{j.company}</span> · {j.location || 'Location not listed'}
           </p>
           <p className="mt-0.5 text-xs text-slate-500">
-            {listed ? `Posted ${timeAgo(listed)}` : 'Posting date not given'}
+            {listed ? <span title={j.listed_until ? WINDOW_HINT : undefined}>Posted {postedText(listed, j.listed_until)}</span> : 'Posting date not given'}
             {!j.baseline && ` · found by us ${timeAgo(j.first_seen_at)}`}
             {j.department && ` · ${j.department}`}
           </p>
         </div>
       </div>
+      {(j.closed_at || closedNow) ? (
+        <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          This job has closed{check.data?.detail ? ` (${check.data.detail})` : ''}. It's hidden from the feed now.
+        </p>
+      ) : (
+        <p className="text-xs text-slate-500">
+          {check.isFetching
+            ? 'Checking the apply page…'
+            : check.data?.open || recentlyChecked
+              ? `✓ Apply page is up (checked ${timeAgo(check.data?.checked_at ?? j.checked_at!)})`
+              : 'Couldn’t confirm the apply page is up; it may still be open.'}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-1.5">
         <ExperienceBadge job={j} />
         <SponsorBadge filings={j.h1b_filings} />

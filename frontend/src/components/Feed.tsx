@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { api, type ExpLevel, type Job, type JobQuery, SOURCE_LABELS, timeAgo } from '../api'
+import { api, type ExpLevel, type Job, type JobQuery, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import LocationFilter from './LocationFilter'
@@ -109,8 +109,8 @@ function JobCard({ job, selected, onSelect }: { job: Job; selected: boolean; onS
           <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-slate-500">
               {posted ? (
-                <span title={new Date(posted).toLocaleString()}>
-                  Posted <span className="font-medium text-slate-700">{timeAgo(posted)}</span>
+                <span title={job.listed_until ? WINDOW_HINT : new Date(posted).toLocaleString()}>
+                  Posted <span className="font-medium text-slate-700">{postedText(posted, job.listed_until)}</span>
                 </span>
               ) : (
                 <span title="The company's site doesn't show when this was posted">Date not given</span>
@@ -313,7 +313,7 @@ export default function Feed() {
         <span>
           {jobs.data ? (
             <>
-              <b className="text-slate-800">{jobs.data.total.toLocaleString()}</b> jobs{q && <> for “{q}”</>}
+              <b className="text-slate-800">{jobs.data.total.toLocaleString()}{jobs.data.total_capped && '+'}</b> jobs{q && <> for “{q}”</>}
             </>
           ) : jobs.isLoading ? (
             'Searching…'
@@ -345,7 +345,7 @@ export default function Feed() {
                 Previous
               </button>
               <span className="text-slate-500">
-                {offset + 1}–{Math.min(offset + PAGE, jobs.data.total)} of {jobs.data.total.toLocaleString()}
+                {offset + 1}–{Math.min(offset + PAGE, jobs.data.total)} of {jobs.data.total.toLocaleString()}{jobs.data.total_capped && '+'}
               </span>
               <button
                 disabled={offset + PAGE >= jobs.data.total}
