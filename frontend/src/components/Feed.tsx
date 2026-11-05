@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { api, type ExpLevel, type Job, type JobQuery, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
-import LocationFilter from './LocationFilter'
+import { FacetList } from './LocationFilter'
 import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, SponsorBadge, Toggle, TrackControl } from './ui'
 
 const PAGE = 50
@@ -55,6 +55,23 @@ const DEFAULT_FILTERS: Filters = {
   posted_within_hours: undefined,
 }
 const STORAGE_KEY = 'freshjobs.filters.v2'
+
+/** Countries, plus the states and cities inside the one country (and state) picked, with open-job counts. */
+function useLocationFacets(countries: string[], states: string[]) {
+  const oneCountry = countries.length === 1 ? countries[0] : undefined
+  const oneState = states.length === 1 ? states[0] : undefined
+  return useQuery({
+    queryKey: ['facets', oneCountry, oneState],
+    queryFn: () => api.locationFacets(oneCountry, oneState),
+    staleTime: 5 * 60_000,
+  })
+}
+
+/** "State", "MA", "MA, NY", "MA +2": a pill's name, or what's picked in it. */
+function pillLabel(name: string, values: string[]): string {
+  if (values.length === 0) return name
+  return values.length <= 2 ? values.join(', ') : `${values[0]} +${values.length - 1}`
+}
 
 function loadFilters(): Filters {
   try {
@@ -182,7 +199,8 @@ export default function Feed() {
 
   const postedLabel = POSTED_WINDOWS.find((w) => w.hours === filters.posted_within_hours)?.label
   const foundLabel = FOUND_WINDOWS.find((w) => w.hours === filters.since_hours)?.label
-  const locationLabel = [...filters.cities, ...filters.states].join(', ') || filters.countries.join(', ')
+  const places = useLocationFacets(filters.countries, filters.states)
+  const oneCountry = filters.countries.length === 1 ? filters.countries[0] : undefined
   const expLabel = filters.exp_levels.length
     ? filters.exp_levels.map((l) => EXP_LABELS[l].split(' ')[0]).join(', ')
     : filters.max_years !== undefined ? `≤ ${filters.max_years} yrs` : 'Experience'
@@ -255,10 +273,42 @@ export default function Feed() {
             </div>
           </FilterPill>
 
-          <FilterPill label={locationLabel || 'Location'} active={!!locationLabel} onClear={() => set({ countries: [], states: [], cities: [] })}>
-            <div className="w-[min(36rem,calc(100vw-3rem))]">
-              <LocationFilter countries={filters.countries} states={filters.states} cities={filters.cities} onChange={(v) => set(v)} />
-            </div>
+          <FilterPill label={pillLabel('Country', filters.countries)} active={filters.countries.length > 0} onClear={() => set({ countries: [], states: [], cities: [] })}>
+            <FacetList
+              options={places.data?.countries}
+              loading={places.isLoading}
+              selected={filters.countries}
+              onChange={(countries) => set({ countries, states: [], cities: [] })}
+              placeholder="Search countries"
+            />
+          </FilterPill>
+
+          <FilterPill label={pillLabel('State', filters.states)} active={filters.states.length > 0} onClear={() => set({ states: [], cities: [] })}>
+            {oneCountry ? (
+              <FacetList
+                options={places.data?.states}
+                loading={places.isFetching}
+                selected={filters.states}
+                onChange={(states) => set({ states, cities: [] })}
+                placeholder={oneCountry === 'United States' ? 'Search states (CA, NY, TX…)' : 'Search states / provinces'}
+              />
+            ) : (
+              <p className="max-w-56 text-sm text-slate-500">Pick one country first, then choose its states.</p>
+            )}
+          </FilterPill>
+
+          <FilterPill label={pillLabel('City', filters.cities)} active={filters.cities.length > 0} onClear={() => set({ cities: [] })}>
+            {oneCountry ? (
+              <FacetList
+                options={places.data?.cities}
+                loading={places.isFetching}
+                selected={filters.cities}
+                onChange={(cities) => set({ cities })}
+                placeholder={filters.states.length === 1 ? `Search cities in ${filters.states[0]}` : 'Search cities'}
+              />
+            ) : (
+              <p className="max-w-56 text-sm text-slate-500">Pick one country first, then choose its cities.</p>
+            )}
           </FilterPill>
 
           <button
@@ -279,7 +329,11 @@ export default function Feed() {
             </div>
           </FilterPill>
 
-          <FilterPill label={`Sort: ${SORTS.find((s) => s.value === filters.sort)?.label}`}>
+          <FilterPill
+            label={`Sort: ${SORTS.find((s) => s.value === filters.sort)?.label}`}
+            active={filters.sort !== DEFAULT_FILTERS.sort}
+            onClear={() => set({ sort: DEFAULT_FILTERS.sort })}
+          >
             {SORTS.map((s) => (
               <Choice key={s.value} selected={filters.sort === s.value} onClick={() => set({ sort: s.value })}>
                 {s.label}

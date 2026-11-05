@@ -65,6 +65,8 @@ def run_poll(lane: str) -> dict:
         summary = asyncio.run(poll_once(lane))
         _last_poll[lane] = {**summary, "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat()}
         _checkpoint()
+        if lane == "fast":
+            _place_counts(force=True)  # location picker counts include this poll's jobs
         return summary
     except Exception:
         log.exception("Poll of %s lane failed", lane)
@@ -81,6 +83,7 @@ async def lifespan(app: FastAPI):
     backfill()
     scheduler = BackgroundScheduler()
     if settings.scheduler_enabled:
+        threading.Thread(target=_place_counts, daemon=True).start()  # location picker counts, off the startup path
         first_run = datetime.now() if settings.poll_on_startup else None
         for lane in LANES:
             scheduler.add_job(run_poll, "interval", args=[lane], minutes=settings.poll_minutes,
@@ -447,26 +450,60 @@ async def job_recruiters(job_id: int, lookup: bool = False, refresh: bool = Fals
     }
 
 
+FACETS_MAX_AGE = timedelta(minutes=10)
+_facets: dict = {"at": None, "rows": []}
+_facets_lock = threading.Lock()
+
+
+def _place_counts(force: bool = False) -> list[tuple]:
+    """(country, state, city, open jobs) for every place, from a snapshot at most FACETS_MAX_AGE old.
+
+    One grouped pass over the covering indexes (~3.5 s for 800k jobs) instead of a COUNT(DISTINCT) per
+    request, which took 65 s and left the State and City pickers empty. Refreshed at startup and after
+    each fast poll, so requests normally don't wait; while a refresh runs they get the previous snapshot.
+    """
+    at = _facets["at"]
+    if at and not force and datetime.now(timezone.utc) - at < FACETS_MAX_AGE:
+        return _facets["rows"]
+    if not _facets_lock.acquire(blocking=at is None):  # only wait when there's nothing to serve yet
+        return _facets["rows"]
+    try:
+        if _facets["at"] is at:  # nobody refreshed it while we waited for the lock
+            with SessionLocal() as session:
+                _facets["rows"] = session.execute(
+                    select(JobLocation.country, JobLocation.state, JobLocation.city, func.count())
+                    .join(Job, Job.id == JobLocation.job_id)
+                    .where(Job.closed_at.is_(None), Job.is_repost.is_(False))
+                    .group_by(JobLocation.country, JobLocation.state, JobLocation.city)
+                ).all()
+            _facets["at"] = datetime.now(timezone.utc)
+    finally:
+        _facets_lock.release()
+    return _facets["rows"]
+
+
 @app.get("/api/facets/locations")
-def location_facets(country: str | None = None, state: str | None = None, session: Session = Depends(get_session)):
-    """Countries, and the states/cities within a chosen country/state, with open-job counts."""
-    open_jobs = (Job.closed_at.is_(None), Job.is_repost.is_(False))
+def location_facets(country: str | None = None, state: str | None = None):
+    """Countries, and the states/cities within a chosen country/state, with open-job counts.
 
-    def counts(column, *where):
-        rows = session.execute(
-            select(column, func.count(func.distinct(JobLocation.job_id)))
-            .join(Job, Job.id == JobLocation.job_id)
-            .where(column.is_not(None), *open_jobs, *where)
-            .group_by(column).order_by(func.count(func.distinct(JobLocation.job_id)).desc())
-        )
-        return [{"name": name, "count": n} for name, n in rows]
+    A job listing two cities counts once in each, and twice in their country.
+    """
+    countries: dict[str, int] = {}
+    states: dict[str, int] = {}
+    cities: dict[str, int] = {}
+    for c, s, city, n in _place_counts():
+        if c:
+            countries[c] = countries.get(c, 0) + n
+        if country and c == country:
+            if s:
+                states[s] = states.get(s, 0) + n
+            if city and (not state or s == state):
+                cities[city] = cities.get(city, 0) + n
 
-    return {
-        "countries": counts(JobLocation.country),
-        "states": counts(JobLocation.state, JobLocation.country == country) if country else [],
-        "cities": counts(JobLocation.city, JobLocation.country == country,
-                         *([JobLocation.state == state] if state else []))[:300] if country else [],
-    }
+    def ranked(counts: dict[str, int], limit: int | None = None) -> list[dict]:
+        return [{"name": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: -kv[1])[:limit]]
+
+    return {"countries": ranked(countries), "states": ranked(states), "cities": ranked(cities, 500)}
 
 
 # ---------- application tracker ----------

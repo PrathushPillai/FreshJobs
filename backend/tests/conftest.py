@@ -19,6 +19,9 @@ db.SessionLocal.configure(bind=db.engine)
 def session():
     db.Base.metadata.drop_all(db.engine)
     db.init_db()
+    from app import main
+
+    main._facets.update(at=None, rows=[])  # the location counts snapshot would outlive the test's data
     with db.SessionLocal() as s:
         yield s
 

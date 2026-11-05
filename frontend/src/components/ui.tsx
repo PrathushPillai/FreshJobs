@@ -151,16 +151,18 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
       {open && (
         <div className="absolute left-0 z-30 mt-2 w-max min-w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-200 bg-white p-3 shadow-lg">
           {children}
-          {clearable && (
+          {onClear && (
+            // Always there, so every filter can be put back to its default from its own menu.
             <div className="mt-2 border-t border-slate-100 pt-2 text-right">
               <button
+                disabled={!active}
                 onClick={() => {
                   onClear()
                   setOpen(false)
                 }}
-                className="text-sm font-medium text-emerald-700 hover:underline"
+                className="rounded-full border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
               >
-                Clear
+                Reset
               </button>
             </div>
           )}

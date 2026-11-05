@@ -46,7 +46,7 @@ npm run build    # tsc -b + vite build (this is the type check)
 npx eslint src
 ```
 
-`.claude/launch.json` defines `backend` and `frontend` preview servers. `docker compose up --build` runs both.
+`start-freshjobs.bat` (repo root) starts whichever of the two isn't running, each in its own window, and opens the feed; the backend window (`scripts/run-backend.ps1`) keeps the PC awake while open. `.claude/launch.json` defines `backend` and `frontend` preview servers. `docker compose up --build` runs both.
 
 ## Architecture
 
@@ -93,6 +93,7 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
   - The two main sorts walk `ix_jobs_by_found` / `ix_jobs_by_listed` (equality on closed_at, is_repost, no_sponsor, then the sort column) and stop after a page; without them every request sorted ~800k rows (2 min). The count stops at `COUNT_CAP` (10,000; `total_capped` shows "10,000+").
   - `posted_within_hours` filters on `listed_at` (set whenever the source gives a date), and `since_hours` on `first_seen_at`.
   - Location filters: a country-only filter uses an EXISTS per job (`ix_job_locations_job_place`); a state or city uses `Job.id IN (...)` (`ix_job_locations_place_job`), since those match few jobs. Remote jobs with no parsed place still match a country-only filter.
+  - The picker lists (`GET /api/facets/locations`) come from an in-memory snapshot of open-job counts per (country, state, city) (`main._place_counts`, one grouped pass over the covering indexes, ~3.5 s), refreshed at startup and after each fast poll. A COUNT(DISTINCT) per request took 65 s and left the State and City pickers empty. Tests reset `main._facets` in the `session` fixture.
 - **H-1B** (`app/h1b.py`):
   - `aggregate()` counts certified H-1B LCAs per employer (VISA_CLASS == "H-1B", CASE_STATUS starting with "Certified") into `h1b_sponsors`.
   - `SponsorIndex` matches a job's employer to DOL legal names by token prefix, after dropping legal words (`_DROP`). A one-word name matches only generic suffixes (`_GENERIC`), so "Amazon" sums "Amazon.com Services" and "Amazon Web Services" but not "Virtual Staffing" for "Virtual".
@@ -109,6 +110,8 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
 - **Frontend** (`frontend/src/`): TanStack Query plus Tailwind v4.
   - Tabs: Feed, Tracker, Sources and Settings.
   - The Feed is laid out like LinkedIn and Jobright: a search bar, a row of filter pills (`FilterPill`/`Choice` in `ui.tsx`), and on screens ≥1024px a list/detail split (`JobDetailContent`). Narrow screens open the `JobDetail` drawer instead.
+  - Every pill with an `onClear` has a ✕ when active and a Reset button in its menu (always shown, greyed out at the default); Sort resets to "Most recently posted", and "Reset all" restores `DEFAULT_FILTERS` (United States).
+  - Location is three pills, Country, State and City, each a searchable checklist (`FacetList` in `LocationFilter.tsx`). State and City need exactly one country; changing the country clears both, and changing states clears cities.
   - Feed filters persist in localStorage (`freshjobs.filters.v2`).
   - `App.tsx` invalidates every query when the fast lane's `polling` flips from true to false.
 
