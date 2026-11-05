@@ -18,6 +18,12 @@ const ATS_HINTS: Record<string, string> = {
   icims: 'the portal in careers-<slug>.icims.com, or a full host such as uscareers-msci.icims.com',
   eightfold: 'tenant|domain[|location] from <tenant>.eightfold.ai, e.g. qualcomm|qualcomm.com|United States',
   successfactors: 'host[|filters] of the career site, e.g. careers.ey.com|optionsFacetsDD_country=US',
+  rippling: 'the board in ats.rippling.com/<slug>/jobs',
+  bamboohr: 'the subdomain in <slug>.bamboohr.com/careers',
+  recruitee: 'the subdomain in <slug>.recruitee.com',
+  breezy: 'the subdomain in <slug>.breezy.hr',
+  pinpoint: 'the subdomain in <slug>.pinpointhq.com',
+  simplify: 'a SimplifyJobs GitHub repo, e.g. SimplifyJobs/New-Grad-Positions',
 }
 
 export default function Companies() {

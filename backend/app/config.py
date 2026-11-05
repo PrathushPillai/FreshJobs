@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     stale_days: int = 14
     # New employers from aggregators to probe for their own Greenhouse/Lever/Ashby board, per poll.
     discovery_per_poll: int = 15
+    # New company boards to add per poll from aggregator job links (pipeline/harvest.py). 0 = off.
+    harvest_per_poll: int = 200
+    # Minutes between polls of a board that had no open jobs, or failed, last time.
+    idle_poll_minutes: int = 180
+    # Jobs per source per poll whose missing details are fetched again (poller.poll_once).
+    enrich_per_poll: int = 200
+    # Hours between syncs of hiring Y Combinator startups into sources (pipeline/startups.py). 0 = off.
+    yc_sync_hours: int = 24
 
     # Email alerts (leave smtp_host empty to disable)
     smtp_host: str = ""

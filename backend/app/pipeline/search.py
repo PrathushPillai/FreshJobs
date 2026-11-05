@@ -74,3 +74,34 @@ def expand_query(q: str) -> list[str]:
                 if m not in terms:
                     terms.append(m)
     return terms
+
+
+def _fts_term(term: str) -> str | None:
+    """One search term as an FTS5 phrase. The last word is a prefix ("analyst" also finds "analysts")
+    unless it's 3 letters or fewer, where a prefix would be too loose ("ai" would find "aid")."""
+    words = re.findall(r"\w+", term.lower())
+    if not words:
+        return None
+    phrase = '"' + " ".join(words) + '"'
+    return phrase + "*" if len(words[-1]) > 3 else phrase
+
+
+def fts_all_words(q: str) -> str | None:
+    """FTS5 query: the title has every word of q, in any order."""
+    parts = [_fts_term(w) for w in re.findall(r"\w+", q.lower()) if w not in STOPWORDS]
+    parts = [p for p in parts if p]
+    return "title : (" + " AND ".join(parts) + ")" if parts else None
+
+
+def fts_any_term(terms: list[str]) -> str | None:
+    """FTS5 query: the title contains any of the terms (phrases)."""
+    parts = [p for p in map(_fts_term, terms) if p]
+    return "title : (" + " OR ".join(parts) + ")" if parts else None
+
+
+def fts_company(q: str) -> str | None:
+    phrase = _fts_term(q)
+    return f"company_name : {phrase}" if phrase else None
+
+
+STOPWORDS = {"and", "or", "of", "the", "a", "an", "in", "for", "to", "not", "near"}

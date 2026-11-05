@@ -8,6 +8,11 @@ _NO_SPONSOR_PATTERNS = [
     r"without\s+(the\s+)?(need\s+for\s+)?(current\s+or\s+future\s+)?(visa\s+|employer\s+)?sponsorship",
     r"must\s+be\s+(a\s+)?(u\.?s\.?|united states)\s+citizen",
     r"(u\.?s\.?|united states)\s+citizenship\s+(is\s+)?required",
+    # "US Citizenship or Green Card Required", "U.S. citizen or permanent resident required/only"
+    r"(u\.?s\.?|united states)\s+citizen(ship)?\s+(or|/)\s+(a\s+)?(green\s*card|permanent\s+residen\w*|lawful\s+permanent\s+residen\w*)"
+    r"(\s+holders?)?\s+(status\s+)?(is\s+|are\s+)?(required|only)",
+    r"must\s+be\s+(a\s+)?(u\.?s\.?\s+citizen|green\s*card\s+holder|(lawful\s+)?permanent\s+resident)\s+or\s+",
+    r"(only|exclusively)\s+(open|available)\s+to\s+(u\.?s\.?\s+)?citizens",
     r"(active|current|ability to obtain)\s+(\w+\s+){0,3}(security\s+)?clearance",
     r"(ts/sci|top secret|secret clearance)",
     r"green card holders? only",

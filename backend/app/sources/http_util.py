@@ -48,8 +48,9 @@ def midnight_utc(year: int, month: int, day: int) -> datetime:
 _LD_JSON = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.S | re.I)
 
 
-def json_ld_job(html: str) -> dict:
-    """The first schema.org JobPosting embedded in a page as JSON-LD ({} if none)."""
+def json_ld_jobs(html: str) -> list[dict]:
+    """Every schema.org JobPosting embedded in a page as JSON-LD."""
+    found = []
     for block in _LD_JSON.findall(html):
         try:
             data = json.loads(block.strip())
@@ -58,13 +59,22 @@ def json_ld_job(html: str) -> dict:
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            items = data.get("@graph") or [data]
+            items = data.get("@graph") or data.get("itemListElement") or [data]
         else:
             items = []
         for item in items:
-            if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                return item
-    return {}
+            if isinstance(item, dict) and isinstance(item.get("item"), dict):  # ItemList entries
+                item = item["item"]
+            kind = item.get("@type") if isinstance(item, dict) else None
+            if kind == "JobPosting" or (isinstance(kind, list) and "JobPosting" in kind):
+                found.append(item)
+    return found
+
+
+def json_ld_job(html: str) -> dict:
+    """The first schema.org JobPosting embedded in a page as JSON-LD ({} if none)."""
+    jobs = json_ld_jobs(html)
+    return jobs[0] if jobs else {}
 
 
 def ld_locations(posting: dict) -> list[str]:

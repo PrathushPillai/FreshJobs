@@ -153,7 +153,7 @@ class AmazonAdapter(Adapter):
         return [j for group in results for j in group]
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         filters = parse_slug(slug)
         if full:

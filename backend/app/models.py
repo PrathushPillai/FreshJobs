@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy import DateTime as _DateTime
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -50,7 +50,13 @@ class Company(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
-    __table_args__ = (UniqueConstraint("company_id", "external_id"),)
+    __table_args__ = (
+        UniqueConstraint("company_id", "external_id"),
+        # Covering index for the feed: filters and title search scan this instead of the wide rows
+        # (descriptions make the table ~1 GB), which makes a search ~10x faster.
+        Index("ix_jobs_feed_v2", "closed_at", "is_repost", "no_sponsor", "title", "company_name", "first_seen_at",
+              "listed_at", "posted_at", "remote", "exp_level", "min_years", "h1b_filings", "role_match"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
@@ -64,10 +70,13 @@ class Job(Base):
     url: Mapped[str] = mapped_column(String(1000))
     description: Mapped[str] = mapped_column(Text, default="")
     department: Mapped[str] = mapped_column(String(200), default="")
-    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # as reported by the ATS
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)  # as reported by the ATS
 
     # Our own timeline: first_seen_at is the "freshness" clock we trust.
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # Best estimate of when the job went live (pipeline/normalize.listed_at): the source's timestamp when it
+    # has one, our detection time when the source only gives a date. "Date posted" filters/sorts use this.
+    listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     missed_polls: Mapped[int] = mapped_column(Integer, default=0)

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 import httpx
 import threading
@@ -11,18 +12,18 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, text, true
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
-from app.db import SessionLocal, get_session, init_db
+from app.db import SessionLocal, get_session, init_db, is_sqlite
 from app.h1b import sponsor_index
 from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobLocation
 from app.notify.email import email_configured
 from app.pipeline.detect import detect_from_page
 from app.pipeline.filters import role_matches
 from app.pipeline.poller import USER_AGENT, backfill, poll_once
-from app.pipeline.search import expand_query
+from app.pipeline.search import expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
 from app.recruiters import hunter_configured, hunter_lookup, search_links
 from app.sources import ADAPTERS
@@ -103,6 +104,7 @@ class JobOut(BaseModel):
     department: str
     posted_at: datetime | None
     first_seen_at: datetime
+    listed_at: datetime | None
     closed_at: datetime | None
     is_repost: bool
     repost_of_id: int | None
@@ -230,6 +232,29 @@ def _title_matches(term: str):
     return or_(*(Job.title.ilike(p) for p in patterns))
 
 
+def _has_all_words(q: str):
+    """Title contains every word of the query, in any order ("Analyst, Data" matches "data analyst")."""
+    words = [w for w in re.findall(r"[\w+#&.-]+", q.lower()) if w not in ("and", "or", "of", "the", "a", "an", "in")]
+    return and_(*(_title_matches(w) for w in words)) if words else true()
+
+
+def _fts(name: str, match: str):
+    """jobs whose title/company FTS5 entry matches (db._ensure_title_search keeps jobs_fts in sync)."""
+    return and_(text(f"jobs.id IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :{name})").bindparams(**{name: match}))
+
+
+def _title_search(q: str, related: list[str]):
+    """(exact phrase, what was typed, related roles) as WHERE clauses. "What was typed" is a title with every
+    word of the query, or the company's name. Uses the full-text index on SQLite, LIKE scans elsewhere."""
+    if is_sqlite and fts_all_words(q):
+        phrase = _fts("fts_phrase", fts_any_term([q]))
+        typed = or_(_fts("fts_typed", fts_all_words(q)), _fts("fts_company", fts_company(q)))
+        any_related = fts_any_term(related)
+        return phrase, typed, _fts("fts_related", any_related) if any_related else None
+    typed = or_(_has_all_words(q), Job.company_name.ilike(f"%{q.strip()}%"))
+    return _title_matches(q.strip().lower()), typed, or_(*(_title_matches(t) for t in related)) if related else None
+
+
 # ---------- jobs ----------
 
 @app.get("/api/jobs", response_model=JobPage)
@@ -252,6 +277,7 @@ def list_jobs(
     alert_roles_only: bool = False,
     tracked: Literal["any", "tracked", "untracked"] = "any",
     since_hours: float | None = None,
+    posted_within_hours: float | None = None,
     company_id: int | None = None,
     limit: int = Query(50, le=200),
     offset: int = 0,
@@ -273,15 +299,22 @@ def list_jobs(
         stmt = stmt.where(Job.h1b_filings > 0)
     if since_hours:
         stmt = stmt.where(Job.first_seen_at >= datetime.now(timezone.utc) - timedelta(hours=since_hours))
+    if posted_within_hours:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=posted_within_hours)
+        stmt = stmt.where(func.coalesce(Job.listed_at, Job.posted_at) >= cutoff)  # undated jobs can't qualify
     if company_id:
         stmt = stmt.where(Job.company_id == company_id)
 
     related_terms: list[str] = []
+    relevance = None
     if q.strip():
         terms = expand_query(q) if related else [q.strip().lower()]
         related_terms = terms[1:]
-        like = f"%{q.strip()}%"
-        stmt = stmt.where(or_(*(_title_matches(t) for t in terms), Job.company_name.ilike(like)))
+        phrase, typed, related_match = _title_search(q, terms[1:])
+        stmt = stmt.where(or_(typed, related_match) if related_match is not None else typed)
+        # The exact phrase first ("Data Analyst II"), then every word in any order ("Analyst, Data"),
+        # then related roles; each group in the chosen sort.
+        relevance = case((phrase, 0), (typed, 1), else_=2)
 
     if countries or states or cities:
         place = [JobLocation.job_id == Job.id]
@@ -308,18 +341,29 @@ def list_jobs(
         has_app = exists().where(Application.job_id == Job.id)
         stmt = stmt.where(has_app if tracked == "tracked" else ~has_app)
 
-    total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+    # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
+    # (descriptions), then load just the page's jobs. Selecting full rows made a search take ~6 s.
+    ids = stmt.with_only_columns(Job.id)
+    total = session.scalar(select(func.count()).select_from(ids.subquery()))
     order = {
         "newest": (Job.first_seen_at.desc(), Job.id.desc()),
-        "posted": (func.coalesce(Job.posted_at, Job.first_seen_at).desc(), Job.id.desc()),
+        # Undated jobs last: our first-scan time would wrongly put them at the top.
+        "posted": (func.coalesce(Job.listed_at, Job.posted_at).is_(None), func.coalesce(Job.listed_at, Job.posted_at).desc(), Job.id.desc()),
         "company": (Job.company_name, Job.first_seen_at.desc()),
         "sponsor": (func.coalesce(Job.h1b_filings, 0).desc(), Job.first_seen_at.desc()),
     }[sort]
-    jobs = session.scalars(
-        stmt.options(selectinload(Job.company), selectinload(Job.places), selectinload(Job.application))
-        .order_by(*order).limit(limit).offset(offset)
-    )
-    return {"total": total, "related_terms": related_terms, "items": [_job_out(j) for j in jobs]}
+    if relevance is not None:
+        order = (relevance, *order)
+    page_ids = list(session.scalars(ids.order_by(*order).limit(limit).offset(offset)))
+    loaded = {
+        j.id: j
+        for j in session.scalars(
+            select(Job).where(Job.id.in_(page_ids))
+            .options(selectinload(Job.company), selectinload(Job.places), selectinload(Job.application))
+        )
+    }
+    items = [_job_out(loaded[i]) for i in page_ids if i in loaded]
+    return {"total": total, "related_terms": related_terms, "items": items}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobDetailOut)
@@ -486,11 +530,18 @@ async def add_company_from_url(body: CareersUrlIn, session: Session = Depends(ge
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         try:
             found = await detect_from_page(client, url)
+            if found is None:
+                # No ATS behind it: read the page itself, if it lists jobs we can parse (sources/website.py).
+                try:
+                    if await ADAPTERS["website"].fetch(client, url):
+                        found = ("website", url)
+                except (httpx.HTTPError, ValueError):
+                    pass
         except httpx.HTTPError as e:
             raise HTTPException(400, f"Couldn't open that page ({type(e).__name__}).")
     if found is None:
         raise HTTPException(
-            404, "No supported job board found on that page. Try the link of a single job posting, or the page that lists jobs."
+            404, "No job board or job listings found on that page. Try the page that lists the jobs, or a single job's link."
         )
     ats, slug = found
     existing = session.scalar(select(Company).where(Company.ats == ats, Company.slug == slug))

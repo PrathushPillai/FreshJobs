@@ -136,3 +136,20 @@ def test_experience_level_takes_higher_of_title_and_years():
     assert experience_level(1, "unknown") == "entry"
     assert experience_level(7, "entry") == "senior"
     assert experience_level(None, "unknown") == "unknown"
+
+
+def test_listed_at_prefers_detection_time_for_date_only_postings():
+    from datetime import datetime, timezone
+
+    from app.pipeline.normalize import listed_at
+
+    found = datetime(2026, 11, 3, 14, 5, tzinfo=timezone.utc)
+    midnight = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    exact = datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)
+    assert listed_at(midnight, found, baseline=False) == found  # "Posted Today" caught at 2:05 pm
+    assert listed_at(exact, found, baseline=False) == exact  # an aggregator's exact time is kept
+    assert listed_at(midnight, found, baseline=True) == midnight  # baseline: the date is all we know
+    assert listed_at(None, found, baseline=False) == found
+    assert listed_at(None, found, baseline=True) is None  # undated and already listed: unknown
+    old_date = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    assert listed_at(old_date, found, baseline=False) == old_date  # re-listed old job keeps its date

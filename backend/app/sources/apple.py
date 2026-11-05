@@ -78,7 +78,7 @@ class AppleAdapter(Adapter):
         return (await http_util.post(client, f"{SITE}/api/v1/search", json=body)).json().get("res") or {}
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         locations = parse_slug(slug)
         roles: dict[str, list[dict]] = {}  # positionId -> its rows (one per city)

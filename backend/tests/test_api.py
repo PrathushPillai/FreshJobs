@@ -132,3 +132,19 @@ def test_add_company_from_careers_url(client):
     assert r.json()["added"] is True and r.json()["company"]["ats"] == "lever" and r.json()["company"]["slug"] == "acme-labs"
     again = client.post("/api/companies/from-url", json={"url": "jobs.lever.co/acme-labs"})
     assert again.json()["added"] is False
+
+
+def test_search_ranks_typed_words_before_related_roles(client):
+    items = client.get("/api/jobs", params={"q": "analyst data"}).json()["items"]
+    assert [j["title"] for j in items] == ["Data Analyst", "Business Intelligence Developer"]
+
+
+def test_posted_within_filter(client, session, now):
+    from app.models import Job
+
+    old = session.query(Job).filter_by(title="Data Analyst").one()
+    old.posted_at = old.listed_at = now - timedelta(days=10)
+    session.commit()
+    recent = titles(client.get("/api/jobs", params={"posted_within_hours": 72}))
+    assert "Data Analyst" not in recent and "Business Intelligence Developer" in recent
+    assert "Data Analyst" in titles(client.get("/api/jobs", params={"posted_within_hours": 24 * 30}))

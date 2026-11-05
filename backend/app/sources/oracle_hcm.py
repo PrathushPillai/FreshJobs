@@ -75,7 +75,7 @@ class OracleHCMAdapter(Adapter):
         return items[0].get("requisitionList") or [], items[0].get("TotalJobsCount") or 0
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         host, site, filters = parse_slug(slug)
         reqs: dict[str, dict] = {}

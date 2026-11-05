@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -20,9 +20,11 @@ from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.notify.email import send_alert
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.discovery import discover
+from app.pipeline.harvest import harvest
+from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
-from app.pipeline.normalize import company_key, experience_level, experience_years, seniority
+from app.pipeline.normalize import company_key, experience_level, experience_years, listed_at, seniority
 from app.pipeline.sponsorship import find_no_sponsor_phrase
 from app.prefs import get_prefs, sync_companies
 from app.sources import ADAPTERS, NormalizedJob
@@ -44,6 +46,7 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.no_sponsor = find_no_sponsor_phrase(job.description) is not None
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
+    job.listed_at = listed_at(job.posted_at, job.first_seen_at, job.baseline)
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -79,6 +82,14 @@ def process_company(
         if job is not None:
             job.last_seen_at = now
             job.missed_polls = 0
+            if not job.description and nj.description:
+                # Enrichment: saved without its details (e.g. a Workday first scan), fetched now.
+                job.description = nj.description
+                job.posted_at = job.posted_at or nj.posted_at
+                job.location = nj.location[:400] or job.location
+                job.remote = job.remote or nj.remote
+                with session.no_autoflush:
+                    apply_flags(session, job, prefs)
             if job.closed_at is not None:
                 job.closed_at = None
                 session.add(JobEvent(job=job, kind="reopened", at=now))
@@ -152,10 +163,18 @@ def _due(company: Company, now: datetime) -> bool:
     adapter = ADAPTERS.get(company.ats)
     if adapter is None or not adapter.is_configured():
         return False
-    if company.last_polled_at is None or adapter.min_interval_minutes <= 0:
+    if company.last_polled_at is None:
+        return True
+    interval = adapter.min_interval_minutes
+    # Boards with no open jobs, or whose last fetch failed, are checked less often: with thousands of
+    # discovered boards, most are small companies that post rarely.
+    status = company.last_status or ""
+    if status.startswith(("ok (0 ", "error")):
+        interval = max(interval, settings.idle_poll_minutes)
+    if interval <= 0:
         return True
     # A little slack so a 15-minute source doesn't slip to every 20 minutes with 5-minute polls.
-    return now - company.last_polled_at >= timedelta(minutes=adapter.min_interval_minutes - 1)
+    return now - company.last_polled_at >= timedelta(minutes=interval - 1)
 
 
 async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Company, known_ids: set[str]):
@@ -163,7 +182,7 @@ async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Com
     full = company.poll_count % adapter.full_scan_every == 0
     async with sem:
         try:
-            jobs = await adapter.fetch(client, company.slug, full=full, known_ids=known_ids)
+            jobs = await adapter.fetch(client, company.slug, full=full, known_ids=known_ids, first_scan=company.poll_count == 0)
             complete = adapter.complete_feed and full and adapter.last_fetch_complete(company.slug)
             return company, jobs, complete, None
         except httpx.HTTPStatusError as e:
@@ -191,15 +210,32 @@ async def poll_once(lane: str | None = None) -> dict:
             select(Job.company_id, Job.external_id).where(Job.company_id.in_([c.id for c in companies]))
         ):
             known.setdefault(company_id, set()).add(ext_id)
+        # Jobs saved without a description are left out of known_ids (a batch per source per poll), so
+        # adapters fetch their details again and process_company fills them in: without a description
+        # there's no sponsorship or experience check.
+        undescribed: dict[int, int] = {}
+        for company_id, ext_id in session.execute(
+            select(Job.company_id, Job.external_id).where(
+                Job.company_id.in_([c.id for c in companies]), Job.closed_at.is_(None),
+                or_(Job.description.is_(None), Job.description == ""),
+            )
+        ):
+            if undescribed.get(company_id, 0) < settings.enrich_per_poll:
+                known.get(company_id, set()).discard(ext_id)
+                undescribed[company_id] = undescribed.get(company_id, 0) + 1
 
         # One pool of fetch slots per ATS, so a few slow Workday boards can't hold every slot.
-        sems = {ats: asyncio.Semaphore(settings.poll_concurrency) for ats in {c.ats for c in companies}}
+        sems = {
+            ats: asyncio.Semaphore(ADAPTERS[ats].max_concurrency or settings.poll_concurrency)
+            for ats in {c.ats for c in companies}
+        }
         async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
             fetches = [_fetch(client, sems[c.ats], c, known.get(c.id, set())) for c in companies]
 
             new_total, errors = 0, 0
             to_alert: list[Job] = []
             employers: list[str] = []
+            links: list[tuple[str, str]] = []  # (employer, job URL) from aggregators, to find their boards
             # Save each source as soon as it's fetched, so fast boards show up while slow ones are still going.
             for next_done in asyncio.as_completed(fetches):
                 company, fetched, complete, error = await next_done
@@ -223,8 +259,15 @@ async def poll_once(lane: str | None = None) -> dict:
                     continue
                 new_total += len(new_jobs)
                 to_alert += [j for j in new_jobs if is_alert_worthy(j, prefs)]
-                if not ADAPTERS[company.ats].complete_feed:
+                if ADAPTERS[company.ats].aggregator:
                     employers += [j.company_name for j in new_jobs if j.company_name]
+                    links += [(j.company_name, j.url) for j in fetched if j.url]
+            session.commit()
+
+            harvested = []
+            if lane != "slow":  # only the fast lane adds sources
+                harvested = harvest(session, links, settings.harvest_per_poll)
+                harvested += await maybe_sync_yc(session, client)
             session.commit()
 
             discovered = []
@@ -242,6 +285,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
+        "harvested": len(harvested),
     }
     log.info("Poll finished: %s", summary)
     return summary
@@ -262,6 +306,19 @@ def backfill(batch: int = 500) -> int:
                     apply_flags(session, job, prefs)
             session.commit()
             done += len(jobs)
+    with SessionLocal() as session:  # listed_at (added later) for older jobs, same rule as normalize.listed_at
+        filled = session.execute(text("""
+            UPDATE jobs SET listed_at = CASE
+                WHEN posted_at IS NULL AND baseline THEN NULL
+                WHEN posted_at IS NULL OR posted_at > first_seen_at THEN first_seen_at
+                WHEN baseline THEN posted_at
+                WHEN time(posted_at) = '00:00:00' AND julianday(first_seen_at) - julianday(posted_at) < 2 THEN first_seen_at
+                ELSE posted_at END
+            WHERE listed_at IS NULL""")).rowcount
+        # Rows filled by an older rule that gave undated baseline jobs our first-scan time.
+        session.execute(text("UPDATE jobs SET listed_at = NULL WHERE baseline AND posted_at IS NULL AND listed_at IS NOT NULL"))
+        session.commit()
+    done += filled or 0
     if done:
         log.info("Backfilled %d jobs", done)
     return done

@@ -35,6 +35,7 @@ def split_slug(slug: str, default_pages: int, max_pages: int) -> tuple[list[tupl
 class TheMuseAdapter(Adapter):
     ats = "themuse"
     complete_feed = False
+    aggregator = True
     min_interval_minutes = 30
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:

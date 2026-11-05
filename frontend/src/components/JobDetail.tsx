@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { api, formatDateTime, SOURCE_LABELS, timeAgo } from '../api'
-import { ExperienceBadge, SponsorBadge, TrackControl } from './ui'
+import { Badge, CompanyAvatar, ExperienceBadge, SponsorBadge, TrackControl } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
 function guessEmail(pattern: string, domain: string, name: string): string | null {
@@ -121,84 +121,114 @@ function Recruiters({ jobId }: { jobId: number }) {
   )
 }
 
-export default function JobDetail({ id, onClose }: { id: number; onClose: () => void }) {
+/** The job's full details: header, apply/track actions, facts, recruiter finder and description. */
+export function JobDetailContent({ id }: { id: number }) {
   const job = useQuery({ queryKey: ['job', id], queryFn: () => api.job(id) })
+  const j = job.data
+  // When it went live: the company's own time, or when we caught it if the company only gives a date.
+  const listed = j?.listed_at ?? j?.posted_at ?? null
+  if (job.isLoading) return <p className="p-6 text-sm text-slate-500">Loading…</p>
+  if (!j) return null
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start gap-4">
+        <CompanyAvatar name={j.company} size="lg" />
+        <div className="min-w-0">
+          <h2 className="text-xl font-semibold leading-snug text-slate-900">{j.title}</h2>
+          <p className="mt-0.5 text-sm text-slate-600">
+            <span className="font-medium text-slate-800">{j.company}</span> · {j.location || 'Location not listed'}
+          </p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {listed ? `Posted ${timeAgo(listed)}` : 'Posting date not given'}
+            {!j.baseline && ` · found by us ${timeAgo(j.first_seen_at)}`}
+            {j.department && ` · ${j.department}`}
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <ExperienceBadge job={j} />
+        <SponsorBadge filings={j.h1b_filings} />
+        {j.remote && <Badge tone="slate">Remote</Badge>}
+        {j.no_sponsor && <Badge tone="red">No sponsorship</Badge>}
+        {j.is_repost && <Badge tone="amber">Repost</Badge>}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <a href={j.url} target="_blank" rel="noreferrer" className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+          Apply on company site ↗
+        </a>
+        <TrackControl job={j} />
+      </div>
+      {j.no_sponsor && (
+        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+          The description suggests this role doesn't sponsor visas, or needs US citizenship or a clearance.
+        </p>
+      )}
+      {j.is_repost && (
+        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          This looks like a repost or duplicate of a job we saw earlier (#{j.repost_of_id}).
+        </p>
+      )}
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg bg-slate-50 p-4 text-sm">
+        <dt className="text-slate-500">Posted</dt>
+        <dd>
+          {listed ? `${formatDateTime(listed)} (${timeAgo(listed)})` : 'Not given by the source'}
+          {j.posted_at && listed && j.posted_at !== listed && (
+            <span className="block text-xs text-slate-500">The company only gives the date ({new Date(j.posted_at).toLocaleDateString()}); this is when we caught it.</span>
+          )}
+        </dd>
+        <dt className="text-slate-500">Found by us</dt>
+        <dd>{j.baseline ? 'Already listed when we started tracking this source' : `${formatDateTime(j.first_seen_at)} (${timeAgo(j.first_seen_at)})`}</dd>
+        <dt className="text-slate-500">Experience</dt>
+        <dd className="flex items-center gap-2">
+          <ExperienceBadge job={j} />
+          {j.min_years === null && j.exp_level === 'unknown' && 'Not stated'}
+        </dd>
+        <dt className="text-slate-500">H-1B sponsor</dt>
+        <dd>
+          {j.sponsor ? (
+            <span className="space-y-0.5">
+              <span className="flex items-center gap-2">
+                <SponsorBadge filings={j.sponsor.filings} />
+                {j.sponsor.filings.toLocaleString()} certified H-1B filings
+              </span>
+              <span className="block text-xs text-slate-500">
+                As {j.sponsor.employers.join(', ')}
+                {j.sponsor.top_titles.length > 0 && <> · often for: {j.sponsor.top_titles.slice(0, 5).join(', ')}</>}
+              </span>
+            </span>
+          ) : (
+            <span className="text-slate-500">No H-1B filings found (or sponsor data not imported yet)</span>
+          )}
+        </dd>
+        <dt className="text-slate-500">Source</dt>
+        <dd>{SOURCE_LABELS[j.source] ?? j.source}</dd>
+        <dt className="text-slate-500">History</dt>
+        <dd>{j.events.map((e) => `${e.kind} ${timeAgo(e.at)}`).join(' → ')}</dd>
+      </dl>
+      <Recruiters jobId={j.id} />
+      <div>
+        <h3 className="mb-2 font-semibold text-slate-900">About the job</h3>
+        <div className="whitespace-pre-line text-sm leading-relaxed text-slate-800">{j.description || 'No description.'}</div>
+      </div>
+    </div>
+  )
+}
 
+/** JobDetailContent in a slide-over drawer (used on narrow screens and outside the feed). */
+export default function JobDetail({ id, onClose }: { id: number; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const j = job.data
   return (
-    <div className="fixed inset-0 z-20 flex justify-end bg-slate-900/30" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/30" onClick={onClose}>
       <aside className="h-full w-full max-w-2xl overflow-y-auto bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <button onClick={onClose} className="float-right text-sm text-slate-500 hover:text-slate-900">
           Close ✕
         </button>
-        {job.isLoading && <p className="text-sm text-slate-500">Loading…</p>}
-        {j && (
-          <div className="space-y-4">
-            <div>
-              <h2 className="pr-16 text-xl font-semibold">{j.title}</h2>
-              <p className="text-sm text-slate-600">
-                {j.company} · {j.location || 'Location not listed'}
-                {j.department && ` · ${j.department}`}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <a href={j.url} target="_blank" rel="noreferrer" className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-                Apply on the company's site
-              </a>
-              <TrackControl job={j} />
-            </div>
-            {j.no_sponsor && (
-              <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-                The description suggests this role doesn't sponsor visas, or needs US citizenship or a clearance.
-              </p>
-            )}
-            {j.is_repost && (
-              <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                This looks like a repost or duplicate of a job we saw earlier (#{j.repost_of_id}).
-              </p>
-            )}
-            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-              <dt className="text-slate-500">Posted</dt>
-              <dd>{j.posted_at ? `${formatDateTime(j.posted_at)} (${timeAgo(j.posted_at)})` : 'Not given by the source'}</dd>
-              <dt className="text-slate-500">Found by us</dt>
-              <dd>{j.baseline ? 'Already listed when we started tracking this source' : `${formatDateTime(j.first_seen_at)} (${timeAgo(j.first_seen_at)})`}</dd>
-              <dt className="text-slate-500">Experience</dt>
-              <dd className="flex items-center gap-2">
-                <ExperienceBadge job={j} />
-                {j.min_years === null && j.exp_level === 'unknown' && 'Not stated'}
-              </dd>
-              <dt className="text-slate-500">H-1B sponsor</dt>
-              <dd>
-                {j.sponsor ? (
-                  <span className="space-y-0.5">
-                    <span className="flex items-center gap-2">
-                      <SponsorBadge filings={j.sponsor.filings} />
-                      {j.sponsor.filings.toLocaleString()} certified H-1B filings
-                    </span>
-                    <span className="block text-xs text-slate-500">
-                      As {j.sponsor.employers.join(', ')}
-                      {j.sponsor.top_titles.length > 0 && <> · often for: {j.sponsor.top_titles.slice(0, 5).join(', ')}</>}
-                    </span>
-                  </span>
-                ) : (
-                  <span className="text-slate-500">No H-1B filings found (or sponsor data not imported yet)</span>
-                )}
-              </dd>
-              <dt className="text-slate-500">Source</dt>
-              <dd>{SOURCE_LABELS[j.source] ?? j.source}</dd>
-              <dt className="text-slate-500">History</dt>
-              <dd>{j.events.map((e) => `${e.kind} ${timeAgo(e.at)}`).join(' → ')}</dd>
-            </dl>
-            <Recruiters jobId={j.id} />
-            <div className="whitespace-pre-line border-t border-slate-200 pt-4 text-sm leading-relaxed text-slate-800">{j.description || 'No description.'}</div>
-          </div>
-        )}
+        <JobDetailContent id={id} />
       </aside>
     </div>
   )

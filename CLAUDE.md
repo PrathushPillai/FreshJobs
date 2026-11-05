@@ -5,10 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 FreshJobs is a personal job feed for an international student looking for work in the US. It polls every few minutes, so new postings show up long before LinkedIn picks them up. Its sources:
-- companies' own ATS boards: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle HCM, iCIMS, Eightfold and SuccessFactors.
+- companies' own ATS boards: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle HCM, iCIMS, Eightfold, SuccessFactors, Rippling, BambooHR, Recruitee, Breezy and Pinpoint.
 - big-tech career sites: Amazon, Microsoft, Google and Apple.
-- job APIs: The Muse, Remotive, RemoteOK and Adzuna.
+- job APIs: The Muse, Remotive, RemoteOK and Adzuna, plus the SimplifyJobs GitHub lists (new grad, internships).
+- startups: every hiring Y Combinator company's "Work at a Startup" page (synced daily from yc-oss, `pipeline/startups.py`; postings carry a visa policy), and Hacker News "Who is hiring?" threads.
 - Google for Jobs (via JSearch), for postings that exist only on LinkedIn, Indeed or Glassdoor.
+- companies' own careers pages with no ATS behind them (`sources/website.py`: JSON-LD JobPosting, then per-job links, then inline role sections).
+- The **LinkedIn & more** tab (`Elsewhere.tsx`) only builds pre-filtered search links (LinkedIn jobs past hour or Easy Apply, LinkedIn hiring posts, Indeed, Glassdoor, Google Jobs, X), because LinkedIn can't be collected.
 - **Search and filters:** any role can be searched, with related-role expansion, filters for location (country, state, city) and experience, and sorting by newest found or newest posted.
 - **Hidden by default:** reposts, cross-source duplicates, old jobs re-listed as new ("resurfaced"), expired jobs, and jobs that rule out visa sponsorship.
 - **Other features:** an application tracker, a recruiter finder (search links plus Hunter.io lookup), and email alerts.
@@ -28,6 +31,8 @@ Backend (run from `backend/`):
 .venv/Scripts/python.exe -m app.pipeline.discovery --file data/discover_seed.txt   # find boards for company names
 .venv/Scripts/python.exe -m app.h1b import data/h1b/<LCA_Disclosure_Data_*.xlsx>   # ~7 min; then counts refresh
 .venv/Scripts/python.exe -m app.h1b discover --top 3000          # find boards for the biggest sponsors
+.venv/Scripts/python.exe -m app.pipeline.startups                # add hiring YC startups now (also runs daily)
+.venv/Scripts/python.exe -m app.pipeline.bulk_discovery hn|websites|vc|commoncrawl   # mass board discovery (see module doc)
 .venv/Scripts/python.exe -m pytest                                # all tests
 .venv/Scripts/python.exe -m pytest tests/test_api.py::test_tracker_flow   # single test
 ```
@@ -46,7 +51,8 @@ npx eslint src
 Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (`app/main.py`) → React.
 
 - **Adapters** (`app/sources/`) implement `Adapter.fetch(client, slug, *, full, known_ids) -> list[NormalizedJob]` and are registered in `ADAPTERS` in `app/sources/__init__.py`. Class attributes control how the poller treats each one:
-  - `complete_feed`: False for aggregators, which only list recent jobs.
+  - `complete_feed`: False for aggregators that only list recent jobs (Simplify is an aggregator with a complete feed).
+  - `aggregator`: True for multi-employer sources. Their employer names feed discovery, and their job links feed harvesting.
   - `min_interval_minutes`: provider rate limits.
   - `full_scan_every`: for sources that can do a cheap partial scan of the newest jobs.
   - `lane`: `"slow"` for one-request-per-job sources (Workday, SmartRecruiters).
@@ -57,7 +63,9 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
 - **Two polling lanes** (`app/main.py`): APScheduler runs `run_poll("fast")` and `run_poll("slow")` in threads, each with its own lock, so a long Workday scan never delays the fast boards. Only the fast lane, and startup, sync `data/companies.yaml` into the DB (add-only), which avoids double inserts. `POST /api/poll` ("Check now") runs the fast lane. Each lane uses one fetch semaphore per ATS and processes each source as soon as its fetch finishes (`asyncio.as_completed`), committing per source.
 - **`process_company()`** (`pipeline/poller.py`) is the core reconcile step, and what the tests exercise directly.
   - **Baseline:** on a source's first poll (`poll_count == 0`), every job is marked `baseline=True, alerted=True`. Those jobs never alert, and their `first_seen_at` falls back to `posted_at`.
-  - **Freshness:** for later polls, `first_seen_at` is our detection time. The "newest found" sort and the "found within" filter use it. `posted_at` is the source's own date, shown separately and used by the "newest posted" sort.
+  - **Freshness:** for later polls, `first_seen_at` is our detection time. The "newest found" sort and the "found within" filter use it. `posted_at` is the source's own date.
+  - `listed_at` (`normalize.listed_at`) is the best estimate of when a job went live, used by "Date posted" and "Most recently posted". It's the source's exact time when there is one. For date-only sources (Workday, BambooHR), it's our detection time if we caught the job within 2 days of that date. A baseline job with no date gets NULL: unknown, sorted last, and never "posted just now" (some Workday tenants omit `postedOn` from their list). Old rows are filled by SQL in `backfill()`.
+  - **Enrichment:** `poll_once` leaves up to `enrich_per_poll` description-less open jobs per source out of `known_ids`, so the adapter re-fetches their details. `process_company` then fills in the description, date and location, and re-runs `apply_flags` (no_sponsor, experience). Adapters get `first_scan=` explicitly, so an empty `known_ids` isn't mistaken for a first scan.
   - **Expiry:**
     - Complete feeds: a job missing for `missed_polls_to_close` (2) full scans in a row is closed.
     - Aggregators: a job is closed after `stale_days` unseen.
@@ -74,12 +82,20 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
   - `no_sponsor` (`pipeline/sponsorship.py`)
   - `JobLocation` rows from `pipeline/locations.py`, a hand-built gazetteer that understands `US-CA-Menlo Park`, `Fort Worth TX`, `NYC, Chicago` and similar formats.
   - `backfill()` recomputes everything for rows where `exp_level IS NULL`, and runs at startup. To re-derive all jobs after changing a parser, set `exp_level = NULL` and restart.
-- **Search** (`GET /api/jobs`): `q` is expanded through the role families in `pipeline/search.py`, and titles are ILIKE-matched against every term (terms of 4 characters or fewer must match whole words). Location filters use an EXISTS on `job_locations`. Remote jobs with no parsed place still match a country-only filter.
+- **Search** (`GET /api/jobs`): `q` is expanded through the role families in `pipeline/search.py`.
+  - On SQLite, titles are matched through the FTS5 table `jobs_fts` (external content, kept in sync by triggers created in `db._ensure_title_search`, which rebuilds it if the triggers are missing). Elsewhere it falls back to ILIKE scans.
+  - Results are ranked in tiers before the chosen sort: exact phrase, then every typed word in any order (or the company name), then related roles.
+  - The list counts and sorts on IDs only, answered from the covering index `ix_jobs_feed`, then loads the page's rows. Selecting full rows (descriptions make `jobs` about 1 GB) made a search take 6–10 s.
+  - `posted_within_hours` filters on `coalesce(posted_at, first_seen_at)`, and `since_hours` on `first_seen_at`.
+  - Location filters use an EXISTS on `job_locations`. Remote jobs with no parsed place still match a country-only filter.
 - **H-1B** (`app/h1b.py`):
   - `aggregate()` counts certified H-1B LCAs per employer (VISA_CLASS == "H-1B", CASE_STATUS starting with "Certified") into `h1b_sponsors`.
   - `SponsorIndex` matches a job's employer to DOL legal names by token prefix, after dropping legal words (`_DROP`). A one-word name matches only generic suffixes (`_GENERIC`), so "Amazon" sums "Amazon.com Services" and "Amazon Web Services" but not "Virtual Staffing" for "Virtual".
   - `apply_flags()` sets `Job.h1b_filings` from a process-wide cached index (reset by `import_file`). After changing the matching, run `refresh_job_counts()` and restart the backend.
 - **Careers-URL detection** (`pipeline/detect.py`): `detect_board(url)` maps an ATS URL to (ats, slug), and `detect_from_page()` fetches a company's own careers page and finds the embedded board. It's exposed as `POST /api/companies/from-url` (Sources page). It can't see boards rendered client-side without links (e.g. stripe.com/jobs).
+- **Harvesting** (`pipeline/harvest.py`): every poll, aggregator job URLs go through `detect_board`, and up to `harvest_per_poll` untracked boards are added as companies (the most-linked first). This is the main source of coverage growth, with no network cost. Big-company singletons (amazon/microsoft/google/apple) are skipped, and boards are compared case-insensitively.
+- **Bulk discovery** (`pipeline/bulk_discovery.py`, CLI): Workday sites of the top H-1B sponsors found by name (the CXS API answers 422 for an unknown tenant, 404 for a real tenant with the wrong site name, so the host is found first and then common or name-derived site names are tried; results cached in `probe_cache` as `wd:<key>`), boards linked from 12 months of HN hiring threads, boards behind hiring YC startups' websites, a16z portfolio names (sitemap) probed by name, and Common Crawl's URL index (often down with 504s, so it retries). Getro-hosted VC boards ask scrapers to use their paid API, and Consider-hosted ones need a CSRF token, so both are deliberately skipped.
+- **Polling cost:** boards whose last poll had 0 open jobs or failed are polled every `idle_poll_minutes` (180). Greenhouse fetches the plain list (12× smaller) and gets details only for new IDs. Only the first scan uses `content=true`.
 - **Discovery** (`pipeline/discovery.py`): new employer names from aggregator jobs (up to `discovery_per_poll` per poll) are probed for Greenhouse, Lever and Ashby boards. Greenhouse matches are verified against the board's company name. Every probe is cached in `probe_cache`, and companies found exist only in the DB, not in the YAML.
 - **Alerts:** `is_alert_worthy()` (role keywords, US, not a repost or baseline, plus the prefs for sponsorship and seniority). At most one email per poll per lane.
 - **Recruiters** (`app/recruiters.py`): LinkedIn and Google search links, plus an on-demand Hunter.io domain search (HR department first), cached 30 days in `recruiter_cache`.
@@ -87,6 +103,7 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
 - **Config** (`app/config.py`): pydantic-settings reads the **repo-root** `.env`, not `backend/.env`. API keys: `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`, `HUNTER_API_KEY`, and SMTP settings.
 - **Frontend** (`frontend/src/`): TanStack Query plus Tailwind v4.
   - Tabs: Feed, Tracker, Sources and Settings.
+  - The Feed is laid out like LinkedIn and Jobright: a search bar, a row of filter pills (`FilterPill`/`Choice` in `ui.tsx`), and on screens ≥1024px a list/detail split (`JobDetailContent`). Narrow screens open the `JobDetail` drawer instead.
   - Feed filters persist in localStorage (`freshjobs.filters.v2`).
   - `App.tsx` invalidates every query when the fast lane's `polling` flips from true to false.
 
@@ -98,7 +115,7 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
 - **Workday quirks** (`app/sources/workday.py`):
   - Some tenants pin "featured" jobs above the newest-first list. A full scan learns the offset where that block ends, kept in memory per slug, and is lost on restart, so the next partial scan becomes a full scan.
   - Boards with `total == 2000` are capped, so their scans are marked incomplete and never close jobs.
-  - The first scan of all tenants takes tens of thousands of detail requests, roughly 30 minutes in the slow lane.
+  - A tenant's first scan (empty `known_ids`) fetches details only for jobs posted in the last `BASELINE_DETAIL_DAYS`. Older baseline jobs are list-only (no description), so harvesting hundreds of tenants doesn't block the slow lane for hours.
 - **Poller robustness:**
   - `_fetch` catches every exception per source. Once, an uncaught AttributeError from one adapter closed the shared httpx client and failed the whole lane.
   - `process_company(commit_every=200)` commits in batches, because a big board's first scan (Amazon, JPMorgan, Apple: thousands of jobs) otherwise held the SQLite write lock for minutes and produced "database is locked".

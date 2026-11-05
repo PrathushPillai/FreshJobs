@@ -19,6 +19,7 @@ from app.sources.base import Adapter, NormalizedJob, parse_iso
 class RemotiveAdapter(Adapter):
     ats = "remotive"
     complete_feed = False
+    aggregator = True
     min_interval_minutes = 360  # their docs: "max. 4 times a day"
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:

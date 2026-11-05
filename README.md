@@ -1,13 +1,18 @@
 # FreshJobs
 
 A personal job feed that checks employers' own job boards every few minutes, so you see new roles within minutes instead of hours later on LinkedIn. Sources:
-- **Company job boards:** Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle, iCIMS, Eightfold and SuccessFactors.
+- **Company job boards:** Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle, iCIMS, Eightfold, SuccessFactors, Rippling, BambooHR, Recruitee, Breezy and Pinpoint.
 - **Big-tech career sites:** Amazon, Microsoft, Google and Apple.
 - **Job APIs:** The Muse, Remotive, RemoteOK and Adzuna.
+- **SimplifyJobs lists:** the community new-grad and internship lists on GitHub.
+- **Careers pages with no job board:** paste any company careers page on the Sources page. If no ATS is behind it, the jobs are read from the page itself.
+- **LinkedIn & more tab:** one-click LinkedIn searches already filtered to the past hour, Easy Apply only, entry level, and recruiters' "hiring" posts, plus Indeed, Glassdoor, Google Jobs and X.
+- **Startups:** every Y Combinator startup that's hiring in the US or remotely (with each role's visa policy), plus Hacker News "Who is hiring?" posts, which often appear nowhere else.
+- **Auto-harvesting:** when an aggregator job links to a company board we don't track yet, that board is added automatically (up to 100 per check), so the company's future jobs come straight from the source.
 - **Google Jobs:** brings in LinkedIn, Indeed and Glassdoor postings.
 
 - **Any role:** search anything. Related roles are included, so "data analyst" also finds BI analysts, analytics engineers, data scientists and more.
-- **Fresh:** every job shows when it was **posted** and when we first **found** it. You can sort by newest, and filter to the last hour, 6 hours, 24 hours or more.
+- **Fresh:** every job shows when it was **posted** and when we first **found** it. You can sort by either, and filter by **Date posted** (past 24 hours, 3 days, week…) or by **Found by us** (past hour, 6 hours…).
 - **No junk:** reposts, the same job listed on several sites, old jobs re-listed as new, and expired jobs are flagged and hidden.
 - **Filters:** country, state and city; experience level (entry, mid, senior, or "asks ≤ N years"); remote.
 - **Visa-aware:** jobs whose descriptions rule out sponsorship ("will not sponsor", "must be a US citizen", "security clearance"…) are hidden by default.

@@ -111,3 +111,24 @@ async def test_adapter_bug_only_fails_its_own_source(monkeypatch):
     async with httpx.AsyncClient() as client:
         _, jobs, complete, error = await poller._fetch(client, asyncio.Semaphore(1), company, set())
     assert jobs is None and not complete and error.startswith("AttributeError")
+
+
+def test_empty_and_failing_boards_are_polled_less_often(now):
+    from app.pipeline.poller import _due
+
+    busy = Company(name="Busy", ats="greenhouse", slug="busy", last_polled_at=now - timedelta(minutes=10), last_status="ok (40 open)")
+    empty = Company(name="Empty", ats="greenhouse", slug="empty", last_polled_at=now - timedelta(minutes=10), last_status="ok (0 open)")
+    broken = Company(name="Broken", ats="greenhouse", slug="broken", last_polled_at=now - timedelta(hours=1), last_status="error: HTTP 404")
+    assert _due(busy, now) and not _due(empty, now) and not _due(broken, now)
+    assert _due(empty, now + timedelta(hours=3))
+
+
+def test_job_saved_without_description_is_enriched_later(session, now):
+    company, prefs = make_company(session), get_prefs(session)
+    [job] = process_company(session, company, [nj("1", location="Pullman, WA", description="")], prefs, now)
+    assert job.listed_at is None  # baseline and undated: unknown, not "posted just now"
+    detailed = nj("1", title="Data Engineer", location="Washington - Pullman", description=DESC + " Note: US Citizenship or Green Card Required.")
+    detailed.posted_at = now - timedelta(days=1)
+    process_company(session, company, [detailed], prefs, now + timedelta(minutes=10))
+    assert job.no_sponsor and "Green Card" in job.description
+    assert job.posted_at == now - timedelta(days=1) and job.listed_at == job.posted_at

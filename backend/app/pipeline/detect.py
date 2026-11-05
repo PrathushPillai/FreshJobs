@@ -14,6 +14,9 @@ import httpx
 # Paths on ATS hosts that aren't a board name.
 _RESERVED = {"", "embed", "api", "v1", "jobs", "job", "careers", "static", "assets", "js", "css", "favicon.ico"}
 _LOCALE = re.compile(r"^[a-z]{2}(?:-[A-Za-z]{2})?$")
+_SUBDOMAIN_BOARDS = {".bamboohr.com": "bamboohr", ".recruitee.com": "recruitee", ".breezy.hr": "breezy",
+                     ".pinpointhq.com": "pinpoint"}
+_NOT_A_BOARD = {"www", "app", "api", "help", "support", "status", "blog", "marketing", "careers", "jobs"}
 
 
 def _first_segment(path: str) -> str:
@@ -100,6 +103,20 @@ def detect_board(url: str) -> tuple[str, str] | None:
         domain = (query.get("domain") or [f"{m.group(1)}.com"])[0]
         return "eightfold", f"{m.group(1)}|{domain}"
 
+    if host == "ats.rippling.com" and seg.lower() not in _RESERVED:
+        return "rippling", seg
+    if host == "api.rippling.com":
+        m = re.search(r"/board/([^/]+)", path)
+        return ("rippling", m.group(1)) if m else None
+
+    # --- Boards on a per-company subdomain: {slug}.bamboohr.com, {slug}.recruitee.com, ... ---
+    for suffix, ats in _SUBDOMAIN_BOARDS.items():
+        if host.endswith(suffix):
+            sub = host[: -len(suffix)]
+            if sub and "." not in sub and sub not in _NOT_A_BOARD:
+                return ats, sub
+            return None
+
     # --- SuccessFactors: career{N}.successfactors.com/career?company=X is not supported (no public
     # listing), but RMK sites (jobs.x.com) are only recognisable from their page, see detect_from_page.
 
@@ -123,7 +140,8 @@ def detect_board(url: str) -> tuple[str, str] | None:
 _URL_ATTR = re.compile(r"""(?:href|src|data-src|action|data-url)\s*=\s*["']([^"']+)["']""", re.I)
 _BARE_URL = re.compile(
     r"""https?:\\?/\\?/[a-z0-9.-]*(?:greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs\.com|smartrecruiters\.com|"""
-    r"""workable\.com|icims\.com|oraclecloud\.com|eightfold\.ai)(?:\\/|[^"'\s<>)\\])*""",
+    r"""workable\.com|icims\.com|oraclecloud\.com|eightfold\.ai|rippling\.com|bamboohr\.com|recruitee\.com|"""
+    r"""breezy\.hr|pinpointhq\.com)(?:\\/|[^"'\s<>)\\])*""",
     re.I,
 )
 # Script-config patterns: Greenhouse's embed script and Lever/Ashby widget configs.

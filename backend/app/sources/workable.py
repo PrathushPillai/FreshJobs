@@ -10,6 +10,7 @@ roughly 100 quick requests from one IP), hence the long poll interval.
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 
@@ -21,10 +22,11 @@ def _place(loc: dict) -> str:
 class WorkableAdapter(Adapter):
     ats = "workable"
     min_interval_minutes = 30
+    max_concurrency = 2  # thousands of discovered Workable boards at 10 at once got HTTP 429 for most
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
-        resp = await client.get(f"https://apply.workable.com/api/v1/widget/accounts/{slug}", params={"details": "true"})
-        resp.raise_for_status()
+        # Retries 429s with backoff (Retry-After honoured).
+        resp = await http_util.get(client, f"https://apply.workable.com/api/v1/widget/accounts/{slug}", params={"details": "true"})
         jobs = []
         for j in resp.json().get("jobs") or []:
             locs = j.get("locations") or []

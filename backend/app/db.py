@@ -29,6 +29,10 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS ix_jobs_feed"))  # superseded by ix_jobs_feed_v2
+    if is_sqlite:
+        _ensure_title_search()
 
 
 def _add_missing_columns() -> None:
@@ -54,6 +58,31 @@ def _add_missing_columns() -> None:
             for index in table.indexes:
                 if index.name not in {i["name"] for i in insp.get_indexes(table.name)}:
                     index.create(conn, checkfirst=True)
+
+
+# Full-text index over job titles and employer names, kept in sync with `jobs` by triggers.
+# Title search MATCHes it instead of LIKE-scanning every row (ms instead of seconds; see main._title_search).
+_FTS_DDL = [
+    "CREATE VIRTUAL TABLE jobs_fts USING fts5(title, company_name, content='jobs', content_rowid='id')",
+    """CREATE TRIGGER jobs_fts_ai AFTER INSERT ON jobs BEGIN
+         INSERT INTO jobs_fts(rowid, title, company_name) VALUES (new.id, new.title, new.company_name); END""",
+    """CREATE TRIGGER jobs_fts_ad AFTER DELETE ON jobs BEGIN
+         INSERT INTO jobs_fts(jobs_fts, rowid, title, company_name) VALUES ('delete', old.id, old.title, old.company_name); END""",
+    """CREATE TRIGGER jobs_fts_au AFTER UPDATE OF title, company_name ON jobs BEGIN
+         INSERT INTO jobs_fts(jobs_fts, rowid, title, company_name) VALUES ('delete', old.id, old.title, old.company_name);
+         INSERT INTO jobs_fts(rowid, title, company_name) VALUES (new.id, new.title, new.company_name); END""",
+]
+
+
+def _ensure_title_search() -> None:
+    with engine.begin() as conn:
+        # The triggers go when `jobs` is dropped (tests do), leaving a stale index: then start over.
+        if conn.execute(text("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'jobs_fts_ai'")).first():
+            return
+        conn.execute(text("DROP TABLE IF EXISTS jobs_fts"))
+        for ddl in _FTS_DDL:
+            conn.execute(text(ddl))
+        conn.execute(text("INSERT INTO jobs_fts(jobs_fts) VALUES ('rebuild')"))  # index existing jobs
 
 
 def get_session():

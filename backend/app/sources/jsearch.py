@@ -42,6 +42,7 @@ def _description(j: dict) -> str:
 class JSearchAdapter(Adapter):
     ats = "jsearch"
     complete_feed = False  # a search, not a full listing
+    aggregator = True
 
     @property
     def min_interval_minutes(self) -> int:  # type: ignore[override]

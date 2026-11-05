@@ -2,11 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api, timeAgo } from './api'
 import Companies from './components/Companies'
+import Elsewhere from './components/Elsewhere'
 import Feed from './components/Feed'
 import Settings from './components/Settings'
 import Tracker from './components/Tracker'
 
-const TABS = ['Feed', 'Tracker', 'Sources', 'Settings'] as const
+const TABS = ['Feed', 'LinkedIn & more', 'Tracker', 'Sources', 'Settings'] as const
 type Tab = (typeof TABS)[number]
 
 export default function App() {
@@ -28,9 +29,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
-          <h1 className="text-lg font-semibold tracking-tight">
+      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
+          <h1 className="text-xl font-bold tracking-tight">
             Fresh<span className="text-emerald-600">Jobs</span>
           </h1>
           <nav className="flex gap-1">
@@ -63,13 +64,14 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-5">
+      <main className="mx-auto max-w-7xl px-4 py-5">
         {status.isError && (
           <p className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
             Can't reach the backend. Is it running on port 8000?
           </p>
         )}
         {tab === 'Feed' && <Feed />}
+        {tab === 'LinkedIn & more' && <Elsewhere />}
         {tab === 'Tracker' && <Tracker />}
         {tab === 'Sources' && <Companies />}
         {tab === 'Settings' && <Settings status={s} />}

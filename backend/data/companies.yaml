@@ -655,3 +655,22 @@
 - name: 'Google Jobs: entry-level software engineer'
   ats: jsearch
   slug: query=entry level software engineer jobs in USA&date_posted=today
+
+# --- SimplifyJobs GitHub lists (new-grad + internships, refreshed many times a day). Their links also
+# reveal hundreds of company boards, which the poller starts tracking directly (pipeline/harvest.py).
+- name: "SimplifyJobs: New Grad"
+  ats: simplify
+  slug: "SimplifyJobs/New-Grad-Positions"
+- name: "SimplifyJobs: Internships"
+  ats: simplify
+  slug: "SimplifyJobs/Summer2026-Internships"
+
+# --- Hacker News "Who is hiring?" (monthly thread; startups that often post nowhere else)
+- name: "Hacker News: Who is hiring"
+  ats: hackernews
+  slug: whoishiring
+
+# --- Companies' own careers pages with no ATS behind them (sources/website.py)
+- name: Wizer
+  ats: website
+  slug: https://www.wizer-training.com/careers

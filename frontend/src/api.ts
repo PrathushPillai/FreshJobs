@@ -19,6 +19,7 @@ export interface Job {
   department: string
   posted_at: string | null
   first_seen_at: string
+  listed_at: string | null
   closed_at: string | null
   is_repost: boolean
   repost_of_id: number | null
@@ -126,6 +127,7 @@ export interface JobQuery {
   alert_roles_only?: boolean
   tracked?: 'any' | 'tracked' | 'untracked'
   since_hours?: number
+  posted_within_hours?: number
   status?: 'open' | 'closed' | 'all'
   limit?: number
   offset?: number
@@ -215,6 +217,12 @@ export const SOURCE_LABELS: Record<string, string> = {
   icims: 'iCIMS',
   eightfold: 'Eightfold',
   successfactors: 'SuccessFactors',
+  rippling: 'Rippling',
+  bamboohr: 'BambooHR',
+  recruitee: 'Recruitee',
+  breezy: 'Breezy HR',
+  pinpoint: 'Pinpoint',
+  simplify: 'SimplifyJobs',
   themuse: 'The Muse',
   remotive: 'Remotive',
   remoteok: 'RemoteOK',
