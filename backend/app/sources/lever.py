@@ -5,6 +5,7 @@ from app.sources.base import Adapter, NormalizedJob, from_epoch_ms
 
 class LeverAdapter(Adapter):
     ats = "lever"
+    max_concurrency = 25  # public postings API, one request per board
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
         resp = await client.get(f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"})

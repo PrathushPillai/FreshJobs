@@ -104,6 +104,15 @@ def detect_board(url: str) -> tuple[str, str] | None:
         domain = (query.get("domain") or [f"{m.group(1)}.com"])[0]
         return "eightfold", f"{m.group(1)}|{domain}"
 
+    # --- Gem: jobs.gem.com/{slug}; Polymer: jobs.polymer.co/{slug} (startup ATSs) ---
+    if host == "jobs.gem.com" and seg.lower() not in _RESERVED:
+        return "gem", seg
+    if host == "api.gem.com":
+        m = re.match(r"/job_board/v0/([^/]+)", path)
+        return ("gem", m.group(1)) if m else None
+    if host == "jobs.polymer.co" and seg.lower() not in _RESERVED:
+        return "polymer", seg
+
     if host == "ats.rippling.com" and seg.lower() not in _RESERVED:
         return "rippling", seg
     if host == "api.rippling.com":

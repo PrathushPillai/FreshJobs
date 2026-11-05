@@ -37,6 +37,7 @@ def _job(j: dict, content: dict | None = None) -> NormalizedJob:
 
 class GreenhouseAdapter(Adapter):
     ats = "greenhouse"
+    max_concurrency = 25  # a public CDN-backed API; 10 at once made a pass over ~2,700 boards take ~30 min
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_

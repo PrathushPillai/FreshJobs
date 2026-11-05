@@ -6,12 +6,13 @@ Run one poll by hand:  python -m app.pipeline.poller --once
 import argparse
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.config import settings
 from app.db import SessionLocal, init_db
@@ -33,6 +34,8 @@ from app.sources import ADAPTERS, NormalizedJob
 log = logging.getLogger(__name__)
 
 USER_AGENT = "job-portal-personal/0.1 (personal job search tool)"
+# How stale a still-listed job's last_seen_at may get before it is rewritten (see process_company).
+LAST_SEEN_RESOLUTION = timedelta(hours=6)
 
 
 def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
@@ -76,9 +79,15 @@ def process_company(
     gap_start = company.last_ok_at or (company.last_polled_at if (company.last_status or "").startswith("ok") else None)
     if gap_start is not None and now - gap_start <= timedelta(minutes=settings.listed_exact_gap_minutes):
         gap_start = None
-    existing = {j.external_id: j for j in session.scalars(select(Job).where(Job.company_id == company.id))}
+    # Descriptions are most of the table's size: leave them unloaded, and only note which jobs lack one.
+    existing = {j.external_id: j for j in session.scalars(
+        select(Job).where(Job.company_id == company.id).options(defer(Job.description)))}
+    undescribed = set(session.scalars(select(Job.id).where(
+        Job.company_id == company.id, or_(Job.description.is_(None), Job.description == ""))))
     seen_ids = set()
     new_jobs: list[Job] = []
+    same_poll_ids: set[int] = set()
+    pending: deque[Job] = deque()  # new jobs whose ids haven't been moved into same_poll_ids yet
 
     for nj in fetched:
         if nj.external_id in seen_ids:
@@ -86,9 +95,14 @@ def process_company(
         seen_ids.add(nj.external_id)
         job = existing.get(nj.external_id)
         if job is not None:
-            job.last_seen_at = now
-            job.missed_polls = 0
-            if not job.description and nj.description:
+            # Only write when something changed. Rewriting last_seen_at on every job every poll rewrote
+            # ~900k rows (with their descriptions) per pass and held the write lock for tens of seconds.
+            # last_seen_at only has to be accurate to the day (aggregators close after stale_days).
+            if job.last_seen_at is None or now - job.last_seen_at > LAST_SEEN_RESOLUTION:
+                job.last_seen_at = now
+            if job.missed_polls:
+                job.missed_polls = 0
+            if job.id in undescribed and nj.description:
                 # Enrichment: saved without its details (e.g. a Workday first scan), fetched now.
                 job.description = nj.description
                 job.posted_at = job.posted_at or nj.posted_at
@@ -118,12 +132,18 @@ def process_company(
             listed_earliest=None if first_poll else gap_start,
             baseline=first_poll,
             alerted=first_poll,
+            is_repost=False,  # set here: column defaults only apply at the (batched) flush
+            missed_polls=0,
         )
+        # Jobs added earlier in this poll that are in the database by now (a batch commit, or an autoflush)
+        # must not count as originals. Unflushed ones aren't visible to find_original's queries anyway.
+        while pending and pending[0].id is not None:
+            same_poll_ids.add(pending.popleft().id)
         with session.no_autoflush:  # the half-built job is already attached via job.company
             apply_flags(session, job, prefs)
             original = find_original(
                 session, job.company_key, nj.title, nj.location, nj.description, now,
-                settings.repost_window_days, {j.id for j in new_jobs},
+                settings.repost_window_days, same_poll_ids,
             )
         kind, detail = "seen", ""
         if original is not None:
@@ -137,10 +157,11 @@ def process_company(
             # Newly listed, but the source says it was posted long ago: an old job re-listed or refreshed.
             job.is_repost = True
             kind, detail = "resurfaced", f"originally posted {nj.posted_at:%b %d, %Y}"
+        # No flush per job: flushing each insert made a big first scan's save take minutes.
         session.add(job)
-        session.flush()
         session.add(JobEvent(job=job, kind=kind, at=now, detail=detail))
         new_jobs.append(job)
+        pending.append(job)
         if commit_every and len(new_jobs) % commit_every == 0:
             # A big board's first scan adds thousands of jobs: commit in batches so the
             # SQLite write lock is never held long enough to block the other lane or the API.
@@ -202,17 +223,26 @@ async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Com
             return company, None, False, f"{type(e).__name__}: {e}"[:300]
 
 
+def _save(session: Session, company: Company, fetched: list[NormalizedJob], prefs: UserPrefs, now: datetime, complete: bool) -> list[Job]:
+    new_jobs = process_company(session, company, fetched, prefs, now, complete=complete, commit_every=200)
+    session.commit()  # per source, so the write lock is held only briefly
+    return new_jobs
+
+
 async def poll_once(lane: str | None = None) -> dict:
     """Poll every enabled source that's due (only sources in `lane`, if given). Returns a summary."""
     now = datetime.now(timezone.utc)
     with SessionLocal() as session:
-        if lane != "slow":  # one lane adds new companies, so two lanes starting together can't both insert them
+        if lane in (None, "fast"):  # one lane adds new companies, so two lanes starting together can't both insert them
             sync_companies(session, settings.companies_file)
         prefs = get_prefs(session)
         companies = [
             c for c in session.scalars(select(Company).where(Company.enabled.is_(True)))
             if _due(c, now) and (lane is None or ADAPTERS[c.ats].lane == lane)
         ]
+        # Longest-waiting first: fetch slots are handed out in this order, and if the poll's deadline
+        # cuts it short, the sources left over are the ones checked most recently.
+        companies.sort(key=lambda c: c.last_polled_at or datetime.min.replace(tzinfo=timezone.utc))
         known: dict[int, set[str]] = {}
         for company_id, ext_id in session.execute(
             select(Job.company_id, Job.external_id).where(Job.company_id.in_([c.id for c in companies]))
@@ -238,15 +268,27 @@ async def poll_once(lane: str | None = None) -> dict:
             for ats in {c.ats for c in companies}
         }
         async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
-            fetches = [_fetch(client, sems[c.ats], c, known.get(c.id, set())) for c in companies]
+            fetches = [asyncio.ensure_future(_fetch(client, sems[c.ats], c, known.get(c.id, set()))) for c in companies]
+            # A poll ends by its deadline so the next one starts on time: one slow batch of boards
+            # mustn't keep every other board from being checked again for an hour. Sources not
+            # reached keep their last_polled_at, so they're first in line next time.
+            deadline = settings.poll_deadline_minutes.get(lane) if lane else None  # --once polls everything
 
             new_total, errors = 0, 0
             to_alert: list[Job] = []
             employers: list[str] = []
             links: list[tuple[str, str]] = []  # (employer, job URL) from aggregators, to find their boards
             # Save each source as soon as it's fetched, so fast boards show up while slow ones are still going.
-            for next_done in asyncio.as_completed(fetches):
-                company, fetched, complete, error = await next_done
+            cut_short = 0
+            for next_done in asyncio.as_completed(fetches, timeout=deadline * 60 if deadline else None):
+                try:
+                    company, fetched, complete, error = await next_done
+                except TimeoutError:
+                    cut_short = sum(not f.done() for f in fetches)
+                    for f in fetches:
+                        f.cancel()
+                    log.info("%s lane hit its %d-minute deadline; %d sources wait for the next poll", lane, deadline, cut_short)
+                    break
                 if error is not None:
                     # Don't touch the source's jobs: a failed fetch says nothing about whether they closed.
                     errors += 1
@@ -255,8 +297,9 @@ async def poll_once(lane: str | None = None) -> dict:
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
                     continue
                 try:
-                    new_jobs = process_company(session, company, fetched, prefs, now, complete=complete, commit_every=200)
-                    session.commit()  # per source, so the write lock is held only briefly
+                    # In a worker thread: saving a big board takes seconds, and on the event loop it froze
+                    # every download in flight. One save at a time, so the session is never shared.
+                    new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
                 except SQLAlchemyError as e:
                     # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
                     session.rollback()
@@ -274,7 +317,7 @@ async def poll_once(lane: str | None = None) -> dict:
 
             harvested = []
             verified_closed = 0
-            if lane != "slow":  # only the fast lane adds sources and checks apply pages
+            if lane in (None, "fast"):  # only the fast lane adds sources and checks apply pages
                 harvested = harvest(session, links, settings.harvest_per_poll)
                 harvested += await maybe_sync_yc(session, client)
                 session.commit()
@@ -296,7 +339,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
-        "harvested": len(harvested), "closed_by_check": verified_closed,
+        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short,
     }
     log.info("Poll finished: %s", summary)
     return summary

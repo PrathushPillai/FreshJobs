@@ -35,9 +35,10 @@ const SORTS = [
 const EXP_LEVELS: ExpLevel[] = ['entry', 'mid', 'senior']
 
 type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'hide_no_sponsor' | 'show_reposts' | 'tracked'>> &
-  Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean }
+  Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
+  for_you: true,
   related: true,
   sort: 'posted',
   countries: ['United States'],
@@ -98,57 +99,122 @@ function useWideScreen() {
   return wide
 }
 
-function JobCard({ job, selected, onSelect }: { job: Job; selected: boolean; onSelect: () => void }) {
-  // listed_at: when it went live (the company's time, or when we caught it if they only give a date).
+/** How fresh a posting is, as a coloured badge: the thing this feed is for. */
+function FreshnessBadge({ job }: { job: Job }) {
   const posted = job.listed_at ?? job.posted_at
+  if (!posted) return <span className="whitespace-nowrap text-xs text-slate-400" title="The company's site doesn't show when this was posted">Date not given</span>
+  const hours = (Date.now() - new Date(posted).getTime()) / 3_600_000
+  const tone =
+    job.listed_until ? 'bg-slate-100 text-slate-600'
+      : hours < 1 ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/30'
+        : hours < 6 ? 'bg-emerald-100 text-emerald-800'
+          : hours < 24 ? 'bg-sky-50 text-sky-800'
+            : 'bg-slate-100 text-slate-600'
+  return (
+    <span
+      title={job.listed_until ? WINDOW_HINT : `Posted ${new Date(posted).toLocaleString()}`}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold ${tone}`}
+    >
+      {hours < 1 && !job.listed_until && <span aria-hidden>⚡</span>}
+      {postedText(posted, job.listed_until)}
+    </span>
+  )
+}
+
+const PIN = 'M10 2a6 6 0 0 0-6 6c0 4.5 6 10 6 10s6-5.5 6-10a6 6 0 0 0-6-6Zm0 8.5A2.5 2.5 0 1 1 10 5.5a2.5 2.5 0 0 1 0 5Z'
+
+function JobCard({ job, selected, onSelect }: { job: Job; selected: boolean; onSelect: () => void }) {
   return (
     <li
       onClick={onSelect}
-      className={`cursor-pointer border-l-4 px-4 py-3.5 transition ${selected ? 'border-emerald-600 bg-emerald-50/60' : 'border-transparent hover:bg-slate-50'}`}
+      className={`group relative cursor-pointer rounded-xl border bg-white p-4 transition ${
+        selected ? 'border-emerald-500 shadow-md shadow-emerald-600/10 ring-1 ring-emerald-500' : 'border-slate-200 hover:border-slate-300 hover:shadow-md hover:shadow-slate-900/5'
+      }`}
     >
       <div className="flex gap-3">
         <CompanyAvatar name={job.company} />
         <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className={`min-w-0 break-words font-semibold leading-snug ${selected ? 'text-emerald-800' : 'text-slate-900'}`}>{job.title}</h3>
-            {isNew(job) && <Badge tone="green">NEW</Badge>}
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className={`break-words text-[15px] font-semibold leading-snug ${selected ? 'text-emerald-800' : 'text-slate-900 group-hover:text-emerald-800'}`}>{job.title}</h3>
+              <p className="mt-0.5 truncate text-sm font-medium text-slate-600">{job.company}</p>
+            </div>
+            <FreshnessBadge job={job} />
           </div>
-          <p className="truncate text-sm text-slate-700">{job.company}</p>
-          <p className="truncate text-sm text-slate-500">{job.location || 'Location not listed'}</p>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          <p className="mt-1.5 flex min-w-0 items-center gap-1 text-sm text-slate-500">
+            <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 fill-slate-400" aria-hidden>
+              <path fillRule="evenodd" d={PIN} clipRule="evenodd" />
+            </svg>
+            <span className="truncate">{job.location || 'Location not listed'}</span>
+            {job.remote && <span className="ml-1 shrink-0 rounded bg-violet-50 px-1.5 text-[11px] font-medium text-violet-700">Remote</span>}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-1">
             <ExperienceBadge job={job} />
             <SponsorBadge filings={job.h1b_filings} />
-            {job.remote && <Badge tone="slate">Remote</Badge>}
+            {isNew(job) && <Badge tone="green">Found {timeAgo(job.first_seen_at)}</Badge>}
             {job.is_repost && <Badge tone="amber">Repost</Badge>}
             {job.no_sponsor && <Badge tone="red">No sponsorship</Badge>}
             {job.closed_at && <Badge tone="slate">Closed</Badge>}
           </div>
-          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-slate-500">
-              {posted ? (
-                <span title={job.listed_until ? WINDOW_HINT : new Date(posted).toLocaleString()}>
-                  Posted <span className="font-medium text-slate-700">{postedText(posted, job.listed_until)}</span>
-                </span>
-              ) : (
-                <span title="The company's site doesn't show when this was posted">Date not given</span>
-              )}
-              {!job.baseline && (
-                <span title={new Date(job.first_seen_at).toLocaleString()}>
-                  {' · '}Found <span className={isNew(job) ? 'font-medium text-emerald-700' : ''}>{timeAgo(job.first_seen_at)}</span>
-                </span>
-              )}
-              <span className="text-slate-400"> · {SOURCE_LABELS[job.source] ?? job.source}</span>
-            </p>
-            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
+            <span className="truncate text-xs text-slate-400">via {SOURCE_LABELS[job.source] ?? job.source}</span>
+            <div className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
               <TrackControl job={job} compact />
-              <a href={job.url} target="_blank" rel="noreferrer" className="rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700">
-                Apply
+              <a href={job.url} target="_blank" rel="noreferrer" className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700">
+                Apply ↗
               </a>
             </div>
           </div>
         </div>
       </div>
     </li>
+  )
+}
+
+function CardSkeleton() {
+  return (
+    <li className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="flex gap-3">
+        <div className="skeleton h-11 w-11 rounded-lg" />
+        <div className="flex-1 space-y-2">
+          <div className="skeleton h-4 w-3/4" />
+          <div className="skeleton h-3 w-1/3" />
+          <div className="skeleton h-3 w-1/2" />
+        </div>
+      </div>
+    </li>
+  )
+}
+
+/** "⚡ 784 posted in the last hour · 4,959 today": one click to the freshest jobs for the current filters. */
+function FreshnessStrip({ base, active, onPick }: { base: JobQuery; active?: number; onPick: (hours: number | undefined) => void }) {
+  const counts = [1, 6, 24].map((hours) => ({ hours, label: hours === 1 ? 'last hour' : hours === 24 ? 'today' : `last ${hours} h` }))
+  const results = useQuery({
+    queryKey: ['fresh-counts', base],
+    queryFn: () => Promise.all(counts.map((c) => api.jobs({ ...base, posted_within_hours: c.hours, limit: 1, offset: 0 }))),
+    refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
+  })
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {counts.map((c, i) => {
+        const page = results.data?.[i]
+        const on = active === c.hours
+        return (
+          <button
+            key={c.hours}
+            onClick={() => onPick(on ? undefined : c.hours)}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-sm transition ${
+              on ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-emerald-300'
+            }`}
+          >
+            {i === 0 && <span aria-hidden>⚡</span>}
+            <b className={on ? 'text-white' : 'text-slate-900'}>{page ? `${page.total.toLocaleString()}${page.total_capped ? '+' : ''}` : '…'}</b>
+            posted {c.label}
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
@@ -182,9 +248,11 @@ export default function Feed() {
   }, [q])
 
   // About 1 in 5 postings never states a level; picking "Entry" shouldn't silently drop them.
-  const { include_unstated, ...rest } = filters
+  const { include_unstated, for_you, ...rest } = filters
   const exp_levels = rest.exp_levels.length && include_unstated ? [...rest.exp_levels, 'unknown' as const] : rest.exp_levels
-  const query: JobQuery = { ...rest, exp_levels, q, limit: PAGE, offset }
+  // "For you": titles matching the roles in Settings. A search looks through every job instead.
+  const forYou = for_you && !q
+  const query: JobQuery = { ...rest, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
   const jobs = useQuery({ queryKey: ['jobs', query], queryFn: () => api.jobs(query), placeholderData: keepPreviousData, refetchInterval: 60_000 })
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
   const toggleLevel = (level: ExpLevel) =>
@@ -207,9 +275,30 @@ export default function Feed() {
   const moreActive = filters.show_reposts || filters.tracked !== 'any' || !filters.related
 
   return (
-    <div className="space-y-3">
-      <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-        <div className="flex items-center gap-2 rounded-xl border border-slate-300 px-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100">
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold tracking-tight text-slate-900">{forYou ? 'Jobs for you' : q ? 'Search results' : 'All jobs'}</h2>
+            <p className="text-xs text-slate-500">
+              {forYou ? 'Roles you picked in Settings, straight from company career sites' : q ? 'Searching every open job' : 'Every open job we track, straight from company career sites'}
+            </p>
+          </div>
+          <div className="flex rounded-lg bg-slate-100 p-0.5 text-sm font-medium" role="tablist">
+            {([true, false] as const).map((v) => (
+              <button
+                key={String(v)}
+                role="tab"
+                aria-selected={filters.for_you === v}
+                onClick={() => set({ for_you: v })}
+                className={`rounded-md px-3 py-1.5 transition ${filters.for_you === v ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+              >
+                {v ? 'For you' : 'All jobs'}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50/60 px-3 transition focus-within:border-emerald-500 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald-100">
           <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 shrink-0 text-slate-400" aria-hidden>
             <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 3.4 9.83l3.63 3.64a.75.75 0 1 0 1.06-1.06l-3.63-3.64A5.5 5.5 0 0 0 9 3.5ZM5 9a4 4 0 1 1 8 0 4 4 0 0 1-8 0Z" clipRule="evenodd" />
           </svg>
@@ -363,6 +452,8 @@ export default function Feed() {
         </div>
       </div>
 
+      <FreshnessStrip base={{ ...query, limit: 1, offset: 0 }} active={filters.posted_within_hours} onPick={(hours) => set({ posted_within_hours: hours })} />
+
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 px-1 text-sm text-slate-500">
         <span>
           {jobs.data ? (
@@ -386,11 +477,19 @@ export default function Feed() {
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <div className="min-w-0 space-y-3">
-          <ul className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <ul className="space-y-2.5">
+            {!items && jobs.isLoading && Array.from({ length: 6 }, (_, i) => <CardSkeleton key={i} />)}
             {items?.map((job) => (
               <JobCard key={job.id} job={job} selected={wide && job.id === selected} onSelect={() => setSelected(job.id)} />
             ))}
-            {items?.length === 0 && <li className="px-4 py-12 text-center text-sm text-slate-500">No jobs match these filters.</li>}
+            {items?.length === 0 && (
+              <li className="rounded-xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
+                <p className="font-medium text-slate-800">No jobs match these filters</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {forYou ? 'Try "All jobs", widen the date, or add roles in Settings.' : 'Try a wider date range, another location, or Reset all.'}
+                </p>
+              </li>
+            )}
           </ul>
 
           {jobs.data && jobs.data.total > PAGE && (
@@ -413,7 +512,7 @@ export default function Feed() {
         </div>
 
         {wide && (
-          <aside className="sticky top-20 h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6">
+          <aside className="thin-scroll sticky top-20 h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             {selected !== null ? <JobDetailContent id={selected} /> : <p className="text-sm text-slate-500">Select a job to see the details.</p>}
           </aside>
         )}

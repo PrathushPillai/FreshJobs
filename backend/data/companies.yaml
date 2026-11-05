@@ -545,6 +545,9 @@
 - name: Sweep360
   ats: workable
   slug: sweep360
+- name: JazzHR (all employers)
+  ats: jazzhr
+  slug: all
 - name: Workable job search (US)
   ats: workable_search
   slug: location=United States

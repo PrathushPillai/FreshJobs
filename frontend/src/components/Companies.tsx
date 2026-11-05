@@ -19,6 +19,8 @@ const ATS_HINTS: Record<string, string> = {
   eightfold: 'tenant|domain[|location] from <tenant>.eightfold.ai, e.g. qualcomm|qualcomm.com|United States',
   successfactors: 'host[|filters] of the career site, e.g. careers.ey.com|optionsFacetsDD_country=US',
   rippling: 'the board in ats.rippling.com/<slug>/jobs',
+  gem: 'the board in jobs.gem.com/<slug>',
+  polymer: 'the board in jobs.polymer.co/<slug>',
   bamboohr: 'the subdomain in <slug>.bamboohr.com/careers',
   recruitee: 'the subdomain in <slug>.recruitee.com',
   breezy: 'the subdomain in <slug>.breezy.hr',

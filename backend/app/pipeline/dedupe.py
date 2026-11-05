@@ -53,18 +53,26 @@ def find_original(
     cutoff = now - timedelta(days=window_days)
     fp = fingerprint(company_key, title, location)
     recent = or_(Job.closed_at.is_(None), Job.closed_at >= cutoff)
-    base = select(Job).where(Job.company_key == company_key, recent)
-    if same_poll_ids:
-        base = base.where(Job.id.notin_(same_poll_ids))
-
-    same_fp = session.scalars(base.where(Job.fingerprint == fp).order_by(Job.first_seen_at)).first()
+    # Same-poll jobs are skipped in Python: as a NOT IN list in the SQL, a big first scan (JazzHR: ~110k
+    # jobs) sent ever longer queries and saving slowed quadratically.
+    same_fp = next((j for j in session.scalars(
+        select(Job).where(Job.company_key == company_key, recent, Job.fingerprint == fp).order_by(Job.first_seen_at)
+    ) if j.id not in same_poll_ids), None)
     if same_fp:
         return same_fp
 
     if not description.strip():
         return None
+    # Titles first (a narrow select), descriptions only for the few with the same title: loading every
+    # recent job's description at a big employer for each new job was quadratic too.
     norm = normalize_title(title)
-    for candidate in session.scalars(base.where(Job.first_seen_at >= cutoff)):
-        if normalize_title(candidate.title) == norm and similarity(candidate.description, description) >= SIMILARITY_THRESHOLD:
+    candidates = [
+        job_id for job_id, candidate_title in session.execute(
+            select(Job.id, Job.title).where(Job.company_key == company_key, recent, Job.first_seen_at >= cutoff))
+        if job_id not in same_poll_ids and normalize_title(candidate_title) == norm
+    ]
+    for job_id in candidates:
+        candidate = session.get(Job, job_id)
+        if candidate is not None and similarity(candidate.description or "", description) >= SIMILARITY_THRESHOLD:
             return candidate
     return None

@@ -25,6 +25,8 @@ class WorkableAdapter(Adapter):
     # each board, for closings and full listings, every 3 hours keeps under Workable's rate limit.
     min_interval_minutes = 180
     max_concurrency = 2  # thousands of discovered Workable boards at 10 at once got HTTP 429 for most
+    # At 2 at a time, ~4,400 boards take hours: in their own lane, so they never hold up the fast boards.
+    lane = "bulk"
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
         # Retries 429s with backoff (Retry-After honoured).

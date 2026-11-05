@@ -20,6 +20,7 @@ DETAIL_CONCURRENCY = 4
 
 class RipplingAdapter(Adapter):
     ats = "rippling"
+    max_concurrency = 15
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_

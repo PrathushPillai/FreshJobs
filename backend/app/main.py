@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 # Fast boards (Greenhouse, Lever, Ashby, aggregators) and slow ones (Workday, SmartRecruiters: a request
 # per job) poll in separate lanes with their own locks, so a long Workday scan never delays the fast boards.
-LANES = ("fast", "slow")
+LANES = ("fast", "slow", "bulk")  # bulk: rate-limited ATSs with thousands of boards (Workable)
 _poll_locks = {lane: threading.Lock() for lane in LANES}
 _last_poll: dict[str, dict] = {}
 

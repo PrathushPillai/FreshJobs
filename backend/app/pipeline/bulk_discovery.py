@@ -40,7 +40,8 @@ HN_SEARCH = "https://hn.algolia.com/api/v1/search_by_date"
 HN_ITEM = "https://hn.algolia.com/api/v1/items/{id}"
 CC_INFO = "https://index.commoncrawl.org/collinfo.json"
 CC_PATTERNS = ["boards.greenhouse.io/*", "job-boards.greenhouse.io/*", "jobs.lever.co/*", "jobs.ashbyhq.com/*",
-               "*.myworkdayjobs.com", "apply.workable.com/*", "jobs.smartrecruiters.com/*", "ats.rippling.com/*"]
+               "*.myworkdayjobs.com", "apply.workable.com/*", "jobs.smartrecruiters.com/*", "ats.rippling.com/*",
+               "jobs.gem.com/*", "jobs.polymer.co/*"]
 _HREF = re.compile(r'href="([^"]+)"')
 
 
@@ -101,7 +102,11 @@ async def from_websites(client: httpx.AsyncClient) -> int:
 
 
 # VC portfolio job sites whose sitemap lists their companies as /company/{slug} or /jobs/{slug}.
-VC_SITEMAPS = ["https://jobs.a16z.com/sitemap.xml"]
+# Portfolio pages whose sitemaps robots.txt allows (checked Nov 2026). Pear lists its portfolio through
+# WordPress's REST API instead (PEAR_COMPANIES).
+VC_SITEMAPS = ["https://jobs.a16z.com/sitemap.xml", "https://www.generalcatalyst.com/sitemap.xml",
+               "https://www.luxcapital.com/sitemap.xml", "https://foundersfund.com/company-sitemap.xml"]
+PEAR_COMPANIES = "https://pear.vc/wp-json/wp/v2/companies"
 
 
 async def from_vc(client: httpx.AsyncClient) -> int:
@@ -112,7 +117,12 @@ async def from_vc(client: httpx.AsyncClient) -> int:
     for url in VC_SITEMAPS:
         r = await client.get(url)
         if r.status_code == 200:
-            names += [m.replace("-", " ") for m in re.findall(r"<loc>https?://[^<]+/(?:company|jobs)/([^</]+)</loc>", r.text)]
+            names += [m.replace("-", " ") for m in re.findall(r"<loc>https?://[^<]+/(?:company|companies|jobs)/([^</]+)/?</loc>", r.text)]
+    for page in range(1, 10):
+        r = await client.get(PEAR_COMPANIES, params={"per_page": 100, "page": page})
+        if r.status_code != 200 or not r.json():
+            break
+        names += [html.unescape(c.get("title", {}).get("rendered", "")) for c in r.json() if c.get("title")]
     with SessionLocal() as session:
         added = await discover(session, client, list(dict.fromkeys(names)), limit=len(names))
     log.info("VC portfolios: %d companies, %d new boards", len(names), len(added))
@@ -276,14 +286,14 @@ async def _cc_get(client: httpx.AsyncClient, url: str, tries: int = 4) -> httpx.
     return None
 
 
-async def from_commoncrawl(client: httpx.AsyncClient, indexes: int) -> int:
+async def from_commoncrawl(client: httpx.AsyncClient, indexes: int, patterns: list[str] | None = None) -> int:
     info = await _cc_get(client, CC_INFO)
     if info is None:
         log.warning("Common Crawl index server unreachable; try again later")
         return 0
     total = 0
     for index in [c["id"] for c in info.json()][:indexes]:
-        for pattern in CC_PATTERNS:
+        for pattern in patterns or CC_PATTERNS:
             base = f"https://index.commoncrawl.org/{index}-index?url={quote(pattern)}&output=json&fl=url"
             meta = await _cc_get(client, base + "&showNumPages=true")
             if meta is None:
@@ -316,6 +326,7 @@ def main() -> None:
     sub.add_parser("fix-workday")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
+    cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -334,7 +345,7 @@ def main() -> None:
                 return await from_workday(client, args.top)
             if args.cmd == "fix-workday":
                 return await fix_workday(client)
-            return await from_commoncrawl(client, args.indexes)
+            return await from_commoncrawl(client, args.indexes, args.patterns)
 
     print(f"Added {asyncio.run(run())} new boards")
 

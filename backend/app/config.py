@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Polling
     poll_minutes: int = 5
     poll_concurrency: int = 10
+    # Minutes a lane's poll may run before the sources it hasn't reached wait for the next one. The slow
+    # lane has none: a big Workday or Amazon scan can take longer and must be allowed to finish.
+    poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30}
     poll_on_startup: bool = True
     scheduler_enabled: bool = True
     # A job missing from its feed this many polls in a row is marked closed.
