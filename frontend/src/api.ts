@@ -25,6 +25,7 @@ export interface Job {
   closed_at: string | null
   is_repost: boolean
   repost_of_id: number | null
+  repost_kind: RepeatKind | null
   no_sponsor: boolean
   seniority: string
   min_years: number | null
@@ -34,8 +35,18 @@ export interface Job {
   application: { id: number; status: AppStatus } | null
 }
 
+/** Why a job is hidden as a repeat: same job re-posted, the same job on another site, or an old job re-listed. */
+export type RepeatKind = 'repost' | 'duplicate' | 'resurfaced'
+export const REPEAT_KINDS: RepeatKind[] = ['repost', 'duplicate', 'resurfaced']
+export const REPEAT_LABELS: Record<RepeatKind, { label: string; hint: string }> = {
+  repost: { label: 'Repost', hint: 'The same job was posted before by this company' },
+  duplicate: { label: 'Duplicate', hint: 'The same job is also listed, still open, on another site we track' },
+  resurfaced: { label: 'Resurfaced', hint: 'Newly listed, but the company dates it more than a week ago: an old job re-listed' },
+}
+
 export interface JobDetail extends Job {
   description: string
+  repost_of: { id: number; title: string; company: string; url: string; first_seen_at: string; closed_at: string | null } | null
   events: { kind: string; at: string; detail: string }[]
   sponsor: { filings: number; employers: string[]; top_titles: string[]; source: string } | null
 }
@@ -128,6 +139,7 @@ export interface JobQuery {
   sponsors_only?: boolean
   hide_no_sponsor?: boolean
   show_reposts?: boolean
+  repeat_kinds?: RepeatKind[]
   alert_roles_only?: boolean
   tracked?: 'any' | 'tracked' | 'untracked'
   since_hours?: number

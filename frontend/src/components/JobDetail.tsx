@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
-import { api, formatDateTime, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
-import { Badge, CompanyAvatar, ExperienceBadge, SponsorBadge, TrackControl } from './ui'
+import { type ReactNode, useEffect, useState } from 'react'
+import { api, formatDateTime, type JobDetail as JobDetailType, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
+import { Badge, CompanyAvatar, ExperienceBadge, RepeatBadge, SponsorBadge, TrackControl } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
 function guessEmail(pattern: string, domain: string, name: string): string | null {
@@ -172,7 +172,7 @@ export function JobDetailContent({ id }: { id: number }) {
         <SponsorBadge filings={j.h1b_filings} />
         {j.remote && <Badge tone="slate">Remote</Badge>}
         {j.no_sponsor && <Badge tone="red">No sponsorship</Badge>}
-        {j.is_repost && <Badge tone="amber">Repost</Badge>}
+        <RepeatBadge job={j} />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <a href={j.url} target="_blank" rel="noreferrer" className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
@@ -185,11 +185,7 @@ export function JobDetailContent({ id }: { id: number }) {
           The description suggests this role doesn't sponsor visas, or needs US citizenship or a clearance.
         </p>
       )}
-      {j.is_repost && (
-        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          This looks like a repost or duplicate of a job we saw earlier (#{j.repost_of_id}).
-        </p>
-      )}
+      <RepeatNote job={j} />
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg bg-slate-50 p-4 text-sm">
         <dt className="text-slate-500">Posted</dt>
         <dd>
@@ -254,4 +250,23 @@ export default function JobDetail({ id, onClose }: { id: number; onClose: () => 
       </aside>
     </div>
   )
+}
+
+function RepeatNote({ job }: { job: JobDetailType }) {
+  if (!job.repost_kind) return null
+  const o = job.repost_of
+  let text: ReactNode
+  if (job.repost_kind === 'resurfaced') {
+    text = job.posted_at
+      ? <>Re-listed as new, but the company first posted it on {new Date(job.posted_at).toLocaleDateString()} ({timeAgo(job.posted_at)}). Others have likely applied already.</>
+      : <>Re-listed as new, but the company dates it more than a week ago.</>
+  } else if (o) {
+    const original = <a href={o.url} target="_blank" rel="noreferrer" className="font-medium underline">{o.title} at {o.company}</a>
+    text = job.repost_kind === 'duplicate'
+      ? <>The same job is also listed elsewhere: {original}, which we found {timeAgo(o.first_seen_at)} and is still open.</>
+      : <>A repost of {original}, which we first found {timeAgo(o.first_seen_at)}{o.closed_at ? ` and saw close ${timeAgo(o.closed_at)}` : ''}.</>
+  } else {
+    text = <>A repost of a job this company listed before.</>
+  }
+  return <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">{text}</p>
 }

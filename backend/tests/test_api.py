@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -158,8 +158,11 @@ def test_data_engineer_relates_to_data_platform_roles():
 def test_posted_within_filter(client, session, now):
     from app.models import Job
 
+    # The filter compares with the real clock, while the fixture's `now` is a fixed date: date the jobs from today.
+    today = datetime.now(timezone.utc)
     old = session.query(Job).filter_by(title="Data Analyst").one()
-    old.posted_at = old.listed_at = now - timedelta(days=10)
+    old.posted_at = old.listed_at = today - timedelta(days=10)
+    session.query(Job).filter_by(title="Business Intelligence Developer").one().listed_at = today - timedelta(hours=1)
     session.commit()
     recent = titles(client.get("/api/jobs", params={"posted_within_hours": 72}))
     assert "Data Analyst" not in recent and "Business Intelligence Developer" in recent
@@ -193,3 +196,36 @@ def test_related_roles_are_suggested_and_only_searched_when_picked(client):
     picked = client.get("/api/jobs", params={"q": "nurse", "related": "false", "also": ["data analyst"]}).json()
     assert plain <= {j["id"] for j in picked["items"]}
     assert client.get("/api/roles/suggestions", params={"roles": ["data analyst"]}).status_code == 200
+
+
+def test_repeat_kinds_labelled_and_filterable(client, session, now):
+    acme = session.query(Company).filter_by(slug="acme").one()
+    agg = Company(name="Adzuna: data", ats="adzuna", slug="data")
+    session.add(agg)
+    session.flush()
+    prefs = get_prefs(session)
+    old = nj("6", "Product Manager", "Austin, TX")
+    old.posted_at = now - timedelta(days=40)
+    process_company(session, acme, [nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
+                                    nj("2", "Business Intelligence Developer", "Toronto, ON"),
+                                    nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
+                                    nj("4", "Registered Nurse", "London, UK"),
+                                    nj("5", "Data Engineer", "Remote", "Must be a US citizen."), old], prefs, now)
+    process_company(session, agg, [], prefs, now)  # the aggregator's baseline poll
+    process_company(session, agg, [nj("a1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience.", "Acme")],
+                    prefs, now + timedelta(minutes=5))
+    session.commit()
+
+    assert "Product Manager" not in titles(client.get("/api/jobs"))  # repeats stay hidden by default
+    items = client.get("/api/jobs", params={"show_reposts": True}).json()["items"]
+    kinds = {(j["title"], j["source"]): j["repost_kind"] for j in items}
+    assert kinds[("Product Manager", "greenhouse")] == "resurfaced"
+    assert kinds[("Data Analyst", "adzuna")] == "duplicate"
+    assert kinds[("Data Analyst", "greenhouse")] is None
+
+    only = client.get("/api/jobs", params={"show_reposts": True, "repeat_kinds": ["resurfaced"]}).json()["items"]
+    assert {(j["title"], j["repost_kind"]) for j in only if j["repost_kind"]} == {("Product Manager", "resurfaced")}
+
+    dup = next(j for j in items if j["repost_kind"] == "duplicate")
+    detail = client.get(f"/api/jobs/{dup['id']}").json()
+    assert detail["repost_of"]["company"] == "Acme" and detail["repost_of"]["closed_at"] is None

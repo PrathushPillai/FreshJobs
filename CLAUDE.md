@@ -84,6 +84,9 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
     - `repost`: same fingerprint, or the same title with a near-identical description. A same-title job still open on the same board in another place is a separate opening (a chain hiring in several cities), not a repost; `find_original` skips those.
     - `duplicate`: the same job, still open, from another source.
     - `resurfaced`: newly listed, but `posted_at` is older than `resurfaced_days`.
+  - The API returns `repost_kind` (from that `JobEvent`, one batched query per page via `_repeat_kinds`), and the detail endpoint returns `repost_of` (the original's title, company, URL and dates).
+  - `show_reposts=true&repeat_kinds=...` shows only the chosen kinds (an EXISTS on `job_events`).
+  - The Feed shows an amber Repost, Duplicate or Resurfaced badge (Resurfaced carries the original date). The detail panel explains it and links to the original. The More pill has one "Show repeated jobs" switch plus a checkbox per kind.
 - **Derived fields** are set by `apply_flags()` at insert:
   - `company_key` and `fingerprint`
   - `seniority` (from the title)
@@ -127,7 +130,16 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
 
 - **Migrations are add-only and automatic:** `db._add_missing_columns()` runs ALTER TABLE ADD COLUMN for new nullable or scalar-default columns. Renames, type changes and drops need a real migration (Alembic isn't set up).
 - **SQLite runs in WAL mode with a 30s busy timeout** (`app/db.py`), so both lanes and the API can work at once. Without it, you get "database is locked". With the API reading nonstop, automatic checkpoints never reset the WAL (it reached 1.7 GB and slowed every read), so `run_poll` runs `PRAGMA wal_checkpoint(TRUNCATE)` after each lane.
-- **A damaged database** ("database disk image is malformed" at startup, so the start script waits forever and the Feed shows a 500) happened on 2026-11-06 after the laptop blue-screened mid-write. This laptop has crashed with driver bugchecks (0x133, 0x10E) since before the portal existed. The installed `sqlite3.exe` builds (Anaconda 3.41/3.33) have no `.recover`, so it was salvaged in Python: copy each table in rowid ranges from a read-only connection, split any range that errors until only unreadable rows are skipped (17 of 1.65M jobs were lost), recreate the indexes, and leave out `jobs_fts*` and its triggers (`_ensure_title_search` rebuilds them on start). Run `PRAGMA quick_check` (about 6 min, read-only) to confirm damage first. The damaged original is kept as `C:\Users\prath\FreshJobs\jobs-damaged.db`.
+- **A damaged database** ("database disk image is malformed" at startup, so the start script waits forever and the Feed shows a 500) happened on 2026-11-06 after the laptop blue-screened mid-write. This laptop has crashed with driver bugchecks (0x133, 0x10E) since before the portal existed. The installed `sqlite3.exe` builds (Anaconda 3.41/3.33) have no `.recover`, so it was salvaged in Python: copy each table in rowid ranges from a read-only connection, split any range that errors until only unreadable rows are skipped (17 of 1.65M jobs were lost), recreate the indexes, and leave out `jobs_fts*` and its triggers (`_ensure_title_search` rebuilds them on start). Run `PRAGMA quick_check` (about 6 min, read-only) to confirm damage first. The damaged original was deleted afterwards to free disk space (C: is nearly full).
+  - One job read back with garbage in its date columns: job 1622196, next to the lost rows. That row made every Feed page it landed on return a 500 ("Invalid isoformat string"), and it was deleted. A full scan then found no other row with a non-date value in a `*_at` column.
+  - After a future salvage, run that same check, for example `... WHERE first_seen_at NOT GLOB '[12][0-9][0-9][0-9]-*'` for each date column.
+- **Laptop load** (measured 2026-11-06, about 1.56M open jobs):
+  - Backend: 6–9% CPU of 16 cores and 1–1.6 GB of RAM. Disk reads run 4–40 MB/s during a fast poll, mostly searches and saves over the 9 GB database.
+  - Vite: about 0% CPU and under 60 MB of RAM. The GPU isn't used.
+  - The first fast poll after a restart took about 14 minutes, almost all of it saving (`of_which_saving`) while caches were cold.
+  - Drive C: is about 95% full.
+  - Proposed and not built, because the user wants to review them first: lighter polling on battery, keep-awake off by default, a daily DB backup, a start script that detects a damaged DB, and moving to a cloud server.
+- **Finding the backend process:** a backend started outside the Claude app's sandbox shows as PID 0 in `Get-NetTCPConnection`/netstat. Find it by command line instead: `Win32_Process` where CommandLine is like `*uvicorn*app.main:app*8000*`.
 - **New indexes on big tables** are created at startup by `_add_missing_columns()`, which takes minutes on the multi-GB `jobs.db` and holds the write lock meanwhile.
 - **Datetimes:** the custom `DateTime` TypeDecorator in `app/models.py` always returns tz-aware UTC. Never use naive datetimes.
 - **Workday quirks** (`app/sources/workday.py`):

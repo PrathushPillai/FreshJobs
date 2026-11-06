@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { APP_STATUSES, type AppStatus, type Job, STATUS_STYLES, api } from '../api'
+import { APP_STATUSES, type AppStatus, type Job, REPEAT_LABELS, STATUS_STYLES, api } from '../api'
 
 export function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -39,6 +39,18 @@ export function ExperienceBadge({ job }: { job: Pick<Job, 'exp_level' | 'min_yea
   const tone = job.exp_level === 'entry' ? 'blue' : job.exp_level === 'mid' ? 'violet' : 'slate'
   const label = { entry: 'Entry', mid: 'Mid', senior: 'Senior' }[job.exp_level]
   return <Badge tone={tone}>{job.min_years !== null ? `${label} · ${job.min_years}+ yrs` : label}</Badge>
+}
+
+export function RepeatBadge({ job }: { job: Pick<Job, 'repost_kind' | 'posted_at'> }) {
+  if (!job.repost_kind) return null
+  const { label, hint } = REPEAT_LABELS[job.repost_kind]
+  const since = job.repost_kind === 'resurfaced' && job.posted_at
+    ? ` · from ${new Date(job.posted_at).toLocaleDateString(undefined, {
+        month: 'short', day: 'numeric',
+        year: new Date(job.posted_at).getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+      })}`
+    : ''
+  return <Badge tone="amber" title={hint}>{label}{since}</Badge>
 }
 
 export function SponsorBadge({ filings }: { filings: number | null }) {

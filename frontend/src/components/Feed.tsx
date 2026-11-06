@@ -1,11 +1,11 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { api, type ExpLevel, type Job, type JobQuery, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
+import { api, type ExpLevel, type Job, type JobQuery, postedText, REPEAT_KINDS, REPEAT_LABELS, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
 import RolesBar from './RolesBar'
-import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, SponsorBadge, Toggle, TrackControl } from './ui'
+import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, RepeatBadge, SponsorBadge, Toggle, TrackControl } from './ui'
 
 const PAGE = 50
 // "Date posted" uses the company's own posting date; "Found" uses when we first saw the job.
@@ -35,7 +35,7 @@ const SORTS = [
 ] as const
 const EXP_LEVELS: ExpLevel[] = ['entry', 'mid', 'senior']
 
-type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'hide_no_sponsor' | 'show_reposts' | 'tracked'>> &
+type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
   Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
@@ -51,6 +51,7 @@ const DEFAULT_FILTERS: Filters = {
   sponsors_only: false,
   hide_no_sponsor: true,
   show_reposts: false,
+  repeat_kinds: REPEAT_KINDS,
   tracked: 'any',
   max_years: undefined,
   since_hours: undefined,
@@ -153,7 +154,7 @@ function JobCard({ job, selected, onSelect }: { job: Job; selected: boolean; onS
             <ExperienceBadge job={job} />
             <SponsorBadge filings={job.h1b_filings} />
             {isNew(job) && <Badge tone="green">Found {timeAgo(job.first_seen_at)}</Badge>}
-            {job.is_repost && <Badge tone="amber">Repost</Badge>}
+            <RepeatBadge job={job} />
             {job.no_sponsor && <Badge tone="red">No sponsorship</Badge>}
             {job.closed_at && <Badge tone="slate">Closed</Badge>}
           </div>
@@ -458,9 +459,32 @@ export default function Feed() {
             ))}
           </FilterPill>
 
-          <FilterPill label="More" active={moreActive} onClear={() => set({ show_reposts: false, tracked: 'any' })}>
+          <FilterPill label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any' })}>
             <div className="space-y-2">
-              <Toggle label="Show reposts & duplicates" checked={filters.show_reposts} onChange={(v) => set({ show_reposts: v })} />
+              <Toggle
+                label="Show repeated jobs (hidden by default)"
+                checked={filters.show_reposts}
+                onChange={(v) => set({ show_reposts: v, repeat_kinds: REPEAT_KINDS })}
+              />
+              {filters.show_reposts && (
+                <div className="ml-5 space-y-1 border-l border-slate-200 pl-3">
+                  {REPEAT_KINDS.map((k) => (
+                    <label key={k} title={REPEAT_LABELS[k].hint} className="flex cursor-pointer select-none items-center gap-1.5 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="accent-emerald-600"
+                        checked={filters.repeat_kinds.includes(k)}
+                        onChange={(e) => {
+                          const kinds = e.target.checked ? [...filters.repeat_kinds, k] : filters.repeat_kinds.filter((x) => x !== k)
+                          set(kinds.length ? { repeat_kinds: kinds } : { show_reposts: false, repeat_kinds: REPEAT_KINDS })
+                        }}
+                      />
+                      {REPEAT_LABELS[k].label}s
+                      <span className="text-xs text-slate-400">· {REPEAT_LABELS[k].hint.toLowerCase()}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
               <select
                 value={filters.tracked}
                 onChange={(e) => set({ tracked: e.target.value as Filters['tracked'] })}

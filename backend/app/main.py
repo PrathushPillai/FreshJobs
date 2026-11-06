@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.db import SessionLocal, engine, get_session, init_db, is_sqlite
 from app.h1b import sponsor_index
-from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobLocation
+from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobEvent, JobLocation
 from app.notify.email import email_configured
 from app.pipeline.detect import detect_from_page
 from app.pipeline import liveness
@@ -133,6 +133,7 @@ class JobOut(BaseModel):
     closed_at: datetime | None
     is_repost: bool
     repost_of_id: int | None
+    repost_kind: str | None  # "repost", "duplicate" or "resurfaced" (see process_company); None if not a repeat
     no_sponsor: bool
     seniority: str
     min_years: int | None
@@ -155,8 +156,18 @@ class SponsorOut(BaseModel):
     source: str
 
 
+class OriginalOut(BaseModel):
+    id: int
+    title: str
+    company: str
+    url: str
+    first_seen_at: datetime
+    closed_at: datetime | None
+
+
 class JobDetailOut(JobOut):
     description: str
+    repost_of: OriginalOut | None
     events: list[EventOut]
     sponsor: SponsorOut | None
 
@@ -236,8 +247,27 @@ class ApplicationPatch(BaseModel):
     applied_at: datetime | None = None
 
 
-def _job_out(job: Job) -> dict:
-    data = {k: getattr(job, k) for k in JobOut.model_fields if k not in ("company", "source", "places", "application")}
+REPEAT_KINDS = ("repost", "duplicate", "resurfaced")
+
+
+def _repeat_kinds(session: Session, jobs: list[Job]) -> dict[int, str]:
+    """Which kind of repeat each flagged job is, from the JobEvent written when it was found."""
+    ids = [j.id for j in jobs if j.is_repost]
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(JobEvent.job_id, JobEvent.kind).where(JobEvent.job_id.in_(ids), JobEvent.kind.in_(REPEAT_KINDS))
+    )
+    return {job_id: kind for job_id, kind in rows}
+
+
+def _job_out(job: Job, repeat_kind: str | None = None) -> dict:
+    skip = ("company", "source", "places", "application", "repost_kind")
+    data = {k: getattr(job, k) for k in JobOut.model_fields if k not in skip}
+    if job.is_repost:  # jobs flagged before kinds were recorded: no original means resurfaced
+        data["repost_kind"] = repeat_kind or ("repost" if job.repost_of_id else "resurfaced")
+    else:
+        data["repost_kind"] = None
     data["company"] = job.company_name or job.company.name
     data["source"] = job.company.ats
     data["exp_level"] = job.exp_level or "unknown"
@@ -308,6 +338,7 @@ def list_jobs(
     sponsors_only: bool = False,
     hide_no_sponsor: bool = True,
     show_reposts: bool = False,
+    repeat_kinds: list[str] = Query([]),  # with show_reposts: which repeats to show (empty = all of REPEAT_KINDS)
     alert_roles_only: bool = False,
     tracked: Literal["any", "tracked", "untracked"] = "any",
     since_hours: float | None = None,
@@ -351,8 +382,14 @@ def list_jobs(
         stmt = stmt.where(text("+jobs.closed_at IS NULL") if fts_first else Job.closed_at.is_(None))
     elif status == "closed":
         stmt = stmt.where(Job.closed_at.is_not(None))
+    shown_kinds = [k for k in repeat_kinds if k in REPEAT_KINDS]
     if not show_reposts:
         stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
+    elif shown_kinds and len(set(shown_kinds)) < len(REPEAT_KINDS):
+        stmt = stmt.where(or_(
+            Job.is_repost.is_(False),
+            select(JobEvent.id).where(JobEvent.job_id == Job.id, JobEvent.kind.in_(shown_kinds)).exists(),
+        ))
     if hide_no_sponsor:
         stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
     if alert_roles_only:
@@ -422,7 +459,8 @@ def list_jobs(
             .options(selectinload(Job.company), selectinload(Job.places), selectinload(Job.application))
         )
     }
-    items = [_job_out(loaded[i]) for i in page_ids if i in loaded]
+    kinds = _repeat_kinds(session, list(loaded.values()))
+    items = [_job_out(loaded[i], kinds.get(i)) for i in page_ids if i in loaded]
     return {"total": min(total, COUNT_CAP), "total_capped": total > COUNT_CAP, "related_terms": related_terms, "items": items}
 
 
@@ -431,9 +469,14 @@ def get_job(job_id: int, session: Session = Depends(get_session)):
     job = session.get(Job, job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    data = _job_out(job)
+    data = _job_out(job, _repeat_kinds(session, [job]).get(job.id))
     data["description"] = job.description
     data["events"] = [{"kind": e.kind, "at": e.at, "detail": e.detail} for e in job.events]
+    original = session.get(Job, job.repost_of_id) if job.repost_of_id else None
+    data["repost_of"] = {
+        "id": original.id, "title": original.title, "company": original.company_name or original.company.name,
+        "url": original.url, "first_seen_at": original.first_seen_at, "closed_at": original.closed_at,
+    } if original else None
     data["sponsor"] = _sponsor_info(session, job.company_name or job.company.name)
     return data
 
