@@ -21,10 +21,9 @@ from app.h1b import sponsor_index
 from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobLocation
 from app.notify.email import email_configured
 from app.pipeline.detect import detect_from_page
-from app.pipeline.filters import role_matches
 from app.pipeline import liveness
-from app.pipeline.poller import USER_AGENT, backfill, poll_once
-from app.pipeline.search import expand_query, fts_all_words, fts_any_term, fts_company
+from app.pipeline.poller import USER_AGENT, backfill, poll_once, refresh_role_match
+from app.pipeline.search import distinct_roles, expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
 from app.recruiters import hunter_configured, hunter_lookup, search_links
 from app.sources import ADAPTERS
@@ -84,6 +83,10 @@ async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
     if settings.scheduler_enabled:
         threading.Thread(target=_place_counts, daemon=True).start()  # location picker counts, off the startup path
+        with SessionLocal() as s:
+            p = get_prefs(s)
+            include, exclude = list(p.include_keywords), list(p.exclude_keywords)
+        threading.Thread(target=refresh_role_match, args=(include, exclude), daemon=True).start()  # rules may have changed
         first_run = datetime.now() if settings.poll_on_startup else None
         for lane in LANES:
             scheduler.add_job(run_poll, "interval", args=[lane], minutes=settings.poll_minutes,
@@ -266,16 +269,22 @@ def _fts(name: str, match: str):
     return and_(text(f"jobs.id IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :{name})").bindparams(**{name: match}))
 
 
+FTS_FIRST_MAX = 20_000
+
+
 def _title_search(q: str, related: list[str]):
-    """(exact phrase, what was typed, related roles) as WHERE clauses. "What was typed" is a title with every
-    word of the query, or the company's name. Uses the full-text index on SQLite, LIKE scans elsewhere."""
+    """(exact phrase, what was typed, related roles, combined FTS match or None) for a search. "What was
+    typed" is a title with every word of the query, or the company's name. The combined match is one FTS5
+    query for "typed or related". Uses the full-text index on SQLite, LIKE scans elsewhere."""
     if is_sqlite and fts_all_words(q):
-        phrase = _fts("fts_phrase", fts_any_term([q]))
-        typed = or_(_fts("fts_typed", fts_all_words(q)), _fts("fts_company", fts_company(q)))
+        typed_match = f"({fts_all_words(q)}) OR ({fts_company(q)})"
         any_related = fts_any_term(related)
-        return phrase, typed, _fts("fts_related", any_related) if any_related else None
+        phrase = _fts("fts_phrase", fts_any_term([q]))
+        typed = _fts("fts_typed", typed_match)
+        combined = f"({typed_match}) OR ({any_related})" if any_related else typed_match
+        return phrase, typed, _fts("fts_related", any_related) if any_related else None, combined
     typed = or_(_has_all_words(q), Job.company_name.ilike(f"%{q.strip()}%"))
-    return _title_matches(q.strip().lower()), typed, or_(*(_title_matches(t) for t in related)) if related else None
+    return _title_matches(q.strip().lower()), typed, or_(*(_title_matches(t) for t in related)) if related else None, None
 
 
 # ---------- jobs ----------
@@ -285,6 +294,7 @@ def list_jobs(
     session: Session = Depends(get_session),
     q: str = "",
     related: bool = True,
+    also: list[str] = Query([]),
     sort: Literal["newest", "posted", "company", "sponsor"] = "newest",
     status: Literal["open", "closed", "all"] = "open",
     countries: list[str] = Query([]),
@@ -305,15 +315,43 @@ def list_jobs(
     limit: int = Query(50, le=200),
     offset: int = 0,
 ):
+    # Title search first: how many jobs it matches decides the query plan (below).
+    related_terms: list[str] = []
+    relevance = search_clause = None
+    fts_first = False
+    if q.strip():
+        # Related roles are suggestions; only the ones the user picked (`also`) are searched, unless
+        # related=true asks for all of them (the API's older behaviour).
+        related_terms = distinct_roles(expand_query(q)[1:], [q])
+        chosen = related_terms if related else [t.strip().lower() for t in also if t.strip()]
+        phrase, typed, related_match, combined = _title_search(q, chosen)
+        search_clause = or_(typed, related_match) if related_match is not None else typed
+        if combined is not None:
+            # One FTS lookup for "typed or related", and for a search matching few jobs, start from its
+            # matches (via ix_jobs_id_feed) instead of walking every open job: "react" 1.5 s -> 0.03 s.
+            # A broad one ("software engineer", tens of thousands of titles) is faster the other way.
+            search_clause = _fts("fts_all", combined)
+            matches = session.scalar(text("SELECT count(*) FROM (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :m LIMIT :cap)"),
+                                     {"m": combined, "cap": FTS_FIRST_MAX + 1})
+            fts_first = matches <= FTS_FIRST_MAX
+        # The exact phrase first ("Data Analyst II"), then every word in any order ("Analyst, Data"),
+        # then related roles; each group in the chosen sort.
+        relevance = case((phrase, 0), (typed, 1), else_=2)
+
+    def flag(column: str, clause):
+        """A status filter; written as "+jobs.col" when the plan starts from the search matches, so SQLite
+        doesn't pick the open-jobs index for it instead."""
+        return text(f"+jobs.{column}") if fts_first else clause
+
     stmt = select(Job)
     if status == "open":
-        stmt = stmt.where(Job.closed_at.is_(None))
+        stmt = stmt.where(text("+jobs.closed_at IS NULL") if fts_first else Job.closed_at.is_(None))
     elif status == "closed":
         stmt = stmt.where(Job.closed_at.is_not(None))
     if not show_reposts:
-        stmt = stmt.where(Job.is_repost.is_(False))
+        stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
     if hide_no_sponsor:
-        stmt = stmt.where(Job.no_sponsor.is_(False))
+        stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
     if alert_roles_only:
         stmt = stmt.where(Job.role_match.is_(True))
     if remote_only:
@@ -328,16 +366,8 @@ def list_jobs(
     if company_id:
         stmt = stmt.where(Job.company_id == company_id)
 
-    related_terms: list[str] = []
-    relevance = None
-    if q.strip():
-        terms = expand_query(q) if related else [q.strip().lower()]
-        related_terms = terms[1:]
-        phrase, typed, related_match = _title_search(q, terms[1:])
-        stmt = stmt.where(or_(typed, related_match) if related_match is not None else typed)
-        # The exact phrase first ("Data Analyst II"), then every word in any order ("Analyst, Data"),
-        # then related roles; each group in the chosen sort.
-        relevance = case((phrase, 0), (typed, 1), else_=2)
+    if search_clause is not None:
+        stmt = stmt.where(search_clause)
 
     if countries or states or cities:
         place = []
@@ -660,11 +690,47 @@ def write_prefs(body: PrefsModel, session: Session = Depends(get_session)):
     keywords_changed = (body.include_keywords, body.exclude_keywords) != (prefs.include_keywords, prefs.exclude_keywords)
     for k, v in body.model_dump().items():
         setattr(prefs, k, v)
-    if keywords_changed:
-        for job in session.scalars(select(Job)):
-            job.role_match = role_matches(job.title, prefs.include_keywords, prefs.exclude_keywords)
     session.commit()
+    if keywords_changed:
+        # Rechecking ~1.2M titles takes a minute or more: in the background, so saving is instant.
+        # Until it finishes, "For you" shows the old matches.
+        threading.Thread(target=refresh_role_match, args=(list(prefs.include_keywords), list(prefs.exclude_keywords)),
+                         daemon=True).start()
     return prefs
+
+
+_suggestion_cache: dict[tuple, tuple[datetime, list[dict]]] = {}
+SUGGESTION_CAP = 2_000
+
+
+@app.get("/api/roles/suggestions")
+def role_suggestions(roles: list[str] = Query([]), session: Session = Depends(get_session)):
+    """Related roles to offer next to the user's own (search's role families), with open US jobs for each.
+
+    The user adds the ones they want; nothing is added for them. Cached 10 minutes per role list.
+    """
+    picked = {r.strip().lower() for r in roles if r.strip()}
+    key = tuple(sorted(picked))
+    hit = _suggestion_cache.get(key)
+    if hit and datetime.now(timezone.utc) - hit[0] < timedelta(minutes=10):
+        return hit[1]
+    candidates = distinct_roles([t for r in picked for t in expand_query(r)[1:]], list(picked))
+    suggestions = []
+    for term in list(dict.fromkeys(candidates))[:40]:
+        match = fts_any_term([term]) if is_sqlite else None
+        if not match:
+            continue
+        # Starts from the term's full-text matches (ix_jobs_id_feed) and stops at SUGGESTION_CAP ("2k+"):
+        # 40 exact counts over the open-jobs index took 25 s.
+        ids = (select(Job.id).where(text("+jobs.closed_at IS NULL"), text("+jobs.is_repost IS 0"), _fts("fts_s", match),
+                                    exists().where(JobLocation.job_id == Job.id, JobLocation.country == "United States"))
+               .limit(SUGGESTION_CAP + 1))
+        n = session.scalar(select(func.count()).select_from(ids.subquery())) or 0
+        if n:
+            suggestions.append({"role": term, "open_jobs": n})
+    suggestions.sort(key=lambda s: -s["open_jobs"])
+    _suggestion_cache[key] = (datetime.now(timezone.utc), suggestions)
+    return suggestions
 
 
 @app.post("/api/poll")

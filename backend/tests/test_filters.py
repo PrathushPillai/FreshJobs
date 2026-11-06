@@ -170,3 +170,20 @@ def test_listed_window_after_a_gap_in_checking():
     late_prev = datetime(2026, 11, 2, 20, 0, tzinfo=timezone.utc)
     assert listed_window(midnight, found, False, late_prev) == (midnight, found)  # not before the posted date
     assert listed_window(None, found, True, prev) == (None, None)  # baseline stays unknown
+
+
+def test_roles_match_exactly_what_was_picked_in_any_spelling():
+    from app.pipeline.filters import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, role_matches
+
+    yes = ["Frontend Engineer", "Front-End Developer", "Software Engineers", "Senior Data Analyst", "Full-Stack Engineer"]
+    no = ["Software Development Engineer II", ".NET Developer", "Mobile Crane Operator", "Sales Engineer", "Software Engineer Intern"]
+    assert all(role_matches(t, DEFAULT_INCLUDE, DEFAULT_EXCLUDE) for t in yes)
+    assert not any(role_matches(t, DEFAULT_INCLUDE, DEFAULT_EXCLUDE) for t in no)  # related roles are only suggested
+    assert role_matches("Software Development Engineer II", [*DEFAULT_INCLUDE, "sde"], DEFAULT_EXCLUDE)  # once picked
+
+
+def test_search_terms_are_whole_words_in_every_spelling():
+    from app.pipeline.search import fts_all_words, query_variants
+
+    assert set(query_variants("frontend developer")) >= {"front end developer", "frontend engineer"}
+    assert "reactor" not in fts_all_words("react") and '"reacts"' in fts_all_words("react")

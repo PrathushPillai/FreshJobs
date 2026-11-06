@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     verify_per_poll: int = 150
     # Hours between syncs of hiring Y Combinator startups into sources (pipeline/startups.py). 0 = off.
     yc_sync_hours: int = 24
+    # Hours between syncs of the community GitHub job lists into sources (pipeline/startup_lists.py). 0 = off.
+    list_sync_hours: int = 12
 
     # Email alerts (leave smtp_host empty to disable)
     smtp_host: str = ""

@@ -6,6 +6,7 @@ Run one poll by hand:  python -m app.pipeline.poller --once
 import argparse
 import asyncio
 import logging
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -23,6 +24,7 @@ from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
 from app.pipeline.liveness import verify_due
+from app.pipeline.startup_lists import maybe_sync_lists
 from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
@@ -40,6 +42,7 @@ LAST_SEEN_RESOLUTION = timedelta(hours=6)
 
 def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     """Compute every derived field of a job from its raw data."""
+    job.described = bool(job.description)
     job.company_key = company_key(job.company_name or "")
     job.fingerprint = fingerprint(job.company_key, job.title, job.location)
     job.seniority = seniority(job.title)
@@ -51,6 +54,35 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
+
+
+def refresh_role_match(include: list[str], exclude: list[str], batch: int = 50_000) -> int:
+    """Recompute role_match for every job from its title; returns how many changed.
+
+    Reads only (id, title, role_match) and writes only the rows whose answer changes, in batches, so it
+    takes seconds over a million jobs. Loading whole Job rows (with descriptions) took minutes and held
+    the write lock. Runs at startup (the matching rules may have changed) and when the keywords do.
+    """
+    changed, last_id = 0, 0
+    verdicts: dict[str, bool] = {}  # many jobs share a title: match each distinct title once
+    while True:
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(Job.id, Job.title, Job.role_match).where(Job.id > last_id).order_by(Job.id).limit(batch)).all()
+            if not rows:
+                return changed
+            last_id = rows[-1][0]
+            updates = []
+            for i, t, old in rows:
+                m = verdicts.get(t or "")
+                if m is None:
+                    m = verdicts[t or ""] = role_matches(t or "", include, exclude)
+                if m != bool(old):
+                    updates.append({"i": i, "m": m})
+            if updates:
+                session.execute(text("UPDATE jobs SET role_match = :m WHERE id = :i"), updates)
+                session.commit()
+                changed += len(updates)
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -83,7 +115,7 @@ def process_company(
     existing = {j.external_id: j for j in session.scalars(
         select(Job).where(Job.company_id == company.id).options(defer(Job.description)))}
     undescribed = set(session.scalars(select(Job.id).where(
-        Job.company_id == company.id, or_(Job.description.is_(None), Job.description == ""))))
+        Job.company_id == company.id, Job.described.is_(False))))
     seen_ids = set()
     new_jobs: list[Job] = []
     same_poll_ids: set[int] = set()
@@ -143,7 +175,7 @@ def process_company(
             apply_flags(session, job, prefs)
             original = find_original(
                 session, job.company_key, nj.title, nj.location, nj.description, now,
-                settings.repost_window_days, same_poll_ids,
+                settings.repost_window_days, same_poll_ids, company.id,
             )
         kind, detail = "seen", ""
         if original is not None:
@@ -232,6 +264,14 @@ def _save(session: Session, company: Company, fetched: list[NormalizedJob], pref
 async def poll_once(lane: str | None = None) -> dict:
     """Poll every enabled source that's due (only sources in `lane`, if given). Returns a summary."""
     now = datetime.now(timezone.utc)
+    # Seconds spent in each phase, reported in the summary (GET /api/status shows the last poll's).
+    clock, timings = time.monotonic(), {}
+
+    def lap(phase: str) -> None:
+        nonlocal clock
+        timings[phase] = round(time.monotonic() - clock, 1)
+        clock = time.monotonic()
+
     with SessionLocal() as session:
         if lane in (None, "fast"):  # one lane adds new companies, so two lanes starting together can't both insert them
             sync_companies(session, settings.companies_file)
@@ -255,7 +295,7 @@ async def poll_once(lane: str | None = None) -> dict:
         for company_id, ext_id in session.execute(
             select(Job.company_id, Job.external_id).where(
                 Job.company_id.in_([c.id for c in companies]), Job.closed_at.is_(None),
-                or_(Job.description.is_(None), Job.description == ""),
+                Job.described.is_(False),
             )
         ):
             if undescribed.get(company_id, 0) < settings.enrich_per_poll:
@@ -263,6 +303,7 @@ async def poll_once(lane: str | None = None) -> dict:
                 undescribed[company_id] = undescribed.get(company_id, 0) + 1
 
         # One pool of fetch slots per ATS, so a few slow Workday boards can't hold every slot.
+        lap("prepare")
         sems = {
             ats: asyncio.Semaphore(ADAPTERS[ats].max_concurrency or settings.poll_concurrency)
             for ats in {c.ats for c in companies}
@@ -279,7 +320,7 @@ async def poll_once(lane: str | None = None) -> dict:
             employers: list[str] = []
             links: list[tuple[str, str]] = []  # (employer, job URL) from aggregators, to find their boards
             # Save each source as soon as it's fetched, so fast boards show up while slow ones are still going.
-            cut_short = 0
+            cut_short, saving = 0, 0.0
             for next_done in asyncio.as_completed(fetches, timeout=deadline * 60 if deadline else None):
                 try:
                     company, fetched, complete, error = await next_done
@@ -299,7 +340,9 @@ async def poll_once(lane: str | None = None) -> dict:
                 try:
                     # In a worker thread: saving a big board takes seconds, and on the event loop it froze
                     # every download in flight. One save at a time, so the session is never shared.
+                    started_save = time.monotonic()
                     new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
+                    saving += time.monotonic() - started_save
                 except SQLAlchemyError as e:
                     # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
                     session.rollback()
@@ -315,18 +358,24 @@ async def poll_once(lane: str | None = None) -> dict:
                     links += [(j.company_name, j.url) for j in fetched if j.url]
             session.commit()
 
+            lap("fetch_and_save")
+            timings["of_which_saving"] = round(saving, 1)
             harvested = []
             verified_closed = 0
             if lane in (None, "fast"):  # only the fast lane adds sources and checks apply pages
                 harvested = harvest(session, links, settings.harvest_per_poll)
                 harvested += await maybe_sync_yc(session, client)
+                harvested += await maybe_sync_lists(session, client)
                 session.commit()
+                lap("harvest")
                 verified_closed = await verify_due(session, client, settings.verify_per_poll, now)
+                lap("verify")
             session.commit()
 
             discovered = []
             if employers and settings.discovery_per_poll > 0:
                 discovered = await discover(session, client, employers, settings.discovery_per_poll)
+            lap("discover")
 
         emailed = False
         if to_alert and prefs.email_alerts:
@@ -339,7 +388,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
-        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short,
+        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short, "timings": timings,
     }
     log.info("Poll finished: %s", summary)
     return summary
@@ -360,6 +409,12 @@ def backfill(batch: int = 500) -> int:
                     apply_flags(session, job, prefs)
             session.commit()
             done += len(jobs)
+    with SessionLocal() as session:  # described (added later): one pass over the descriptions, once
+        filled_described = session.execute(text(
+            "UPDATE jobs SET described = (description IS NOT NULL AND description != '') WHERE described IS NULL")).rowcount
+        session.commit()
+        if filled_described:
+            log.info("Marked %d jobs as having a description or not", filled_described)
     with SessionLocal() as session:  # last_ok_at (added later): the last poll, if it succeeded
         session.execute(text("UPDATE companies SET last_ok_at = last_polled_at WHERE last_ok_at IS NULL AND last_status LIKE 'ok%'"))
         session.commit()

@@ -6,6 +6,7 @@
     python -m app.pipeline.bulk_discovery vc                  # portfolio companies of VCs whose job sites allow it
     python -m app.pipeline.bulk_discovery workday --top 5000  # Workday career sites of the biggest H-1B sponsors
     python -m app.pipeline.bulk_discovery fix-workday         # repair Workday sources named after a file (robots.txt)
+    python -m app.pipeline.bulk_discovery ai-portfolios       # boards behind AI investors' portfolio company websites
 
 VC job sites: only ones whose robots.txt allows crawling and that don't ask scrapers to use a paid API
 instead. Getro-hosted boards (General Catalyst, Accel...) ask for that, and Consider-hosted ones
@@ -23,7 +24,7 @@ import html
 import json
 import logging
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from sqlalchemy import select
@@ -78,13 +79,18 @@ async def from_websites(client: httpx.AsyncClient) -> int:
     resp = await client.get(YC_HIRING)
     resp.raise_for_status()
     companies = [c for c in resp.json() if c.get("website") and US_REGIONS & set(c.get("regions") or [])]
+    return await _boards_behind(client, [(c["name"], c["website"]) for c in companies], "YC websites")
+
+
+async def _boards_behind(client: httpx.AsyncClient, sites: list[tuple[str, str]], label: str) -> int:
+    """Find and add the ATS board behind each (name, website): its /careers, /jobs, then home page."""
     with SessionLocal() as session:
         tracked = {board_key(c.ats, c.slug) for c in session.scalars(select(Company))}
     sem = asyncio.Semaphore(8)
     links: list[tuple[str, str]] = []
 
-    async def one(c: dict) -> None:
-        site = c["website"].rstrip("/")
+    async def one(name: str, site: str) -> None:
+        site = site.rstrip("/")
         async with sem:
             for url in (f"{site}/careers", f"{site}/jobs", site):
                 try:
@@ -94,11 +100,53 @@ async def from_websites(client: httpx.AsyncClient) -> int:
                 if found:
                     if board_key(*found) not in tracked:
                         # harvest() maps URLs to boards; a synthetic board URL is the simplest input.
-                        links.append((c["name"], _board_url(*found)))
+                        links.append((name, _board_url(*found)))
                     return
 
-    await asyncio.gather(*(one(c) for c in companies))
-    return _save([link for link in links if link[1]], "YC websites")
+    await asyncio.gather(*(one(n, s) for n, s in sites))
+    return _save([link for link in links if link[1]], label)
+
+
+# AI-focused investors' own portfolio pages (not their Getro/Consider job boards), whose robots.txt allows
+# crawling and which link each company's website (checked Nov 2026), plus a curated list of AI startups.
+AI_PORTFOLIO_PAGES = [
+    "https://aigrant.com/", "https://www.airstreet.com/portfolio", "https://www.kleinerperkins.com/partnerships/",
+    "https://www.khoslaventures.com/portfolio/", "https://www.gradient.com/portfolio/", "https://www.felicis.com/portfolio",
+    "https://www.madrona.com/portfolio/", "https://www.conviction.com/",
+    "https://raw.githubusercontent.com/vinitshahdeo/awesome-ai-startups-hiring/main/README.md",
+]
+_NOT_COMPANY = ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com", "youtube.com", "github.com",
+                "medium.com", "substack.com", "techcrunch.com", "bloomberg.com", "forbes.com", "wsj.com", "nytimes.com",
+                "google.com", "apple.com", "crunchbase.com", "wikipedia.org", "shields.io", "notion.so", "bit.ly")
+
+
+def company_sites(html_text: str, page_url: str) -> list[str]:
+    """Websites a portfolio page links to: other hosts, one URL per domain, minus social and news sites."""
+    own = (urlparse(page_url).hostname or "").removeprefix("www.")
+    sites: dict[str, str] = {}
+    for href in re.findall(r"""href=["'](https?://[^"'#?]+)|\]\((https?://[^)\s#?]+)\)""", html_text):
+        url = href[0] or href[1]
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        if not host or host == own or host.endswith("." + own) or any(host == d or host.endswith("." + d) for d in _NOT_COMPANY):
+            continue
+        sites.setdefault(host, f"https://{host}")
+    return list(sites.values())
+
+
+async def from_ai_portfolios(client: httpx.AsyncClient) -> int:
+    """Boards behind the websites of AI-investor portfolio companies (AI_PORTFOLIO_PAGES)."""
+    sites: list[tuple[str, str]] = []
+    for page in AI_PORTFOLIO_PAGES:
+        try:
+            r = await client.get(page)
+        except httpx.HTTPError:
+            continue
+        if r.status_code == 200:
+            found = company_sites(r.text, page)
+            log.info("%s: %d company websites", page, len(found))
+            sites += [(urlparse(s).hostname.split(".")[0].title(), s) for s in found]
+    sites = list(dict((s, (n, s)) for n, s in sites).values())
+    return await _boards_behind(client, sites, "AI portfolios")
 
 
 # VC portfolio job sites whose sitemap lists their companies as /company/{slug} or /jobs/{slug}.
@@ -324,6 +372,7 @@ def main() -> None:
     wd = sub.add_parser("workday")
     wd.add_argument("--top", type=int, default=5000)
     sub.add_parser("fix-workday")
+    sub.add_parser("ai-portfolios")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
@@ -345,6 +394,8 @@ def main() -> None:
                 return await from_workday(client, args.top)
             if args.cmd == "fix-workday":
                 return await fix_workday(client)
+            if args.cmd == "ai-portfolios":
+                return await from_ai_portfolios(client)
             return await from_commoncrawl(client, args.indexes, args.patterns)
 
     print(f"Added {asyncio.run(run())} new boards")

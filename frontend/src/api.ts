@@ -116,6 +116,7 @@ export interface RecruiterInfo {
 export interface JobQuery {
   q?: string
   related?: boolean
+  also?: string[]
   sort?: 'newest' | 'posted' | 'company' | 'sponsor'
   countries?: string[]
   states?: string[]
@@ -177,6 +178,7 @@ export const api = {
   setCompanyEnabled: (id: number, enabled: boolean) =>
     request<Company>(`/api/companies/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
   prefs: () => request<Prefs>('/api/prefs'),
+  roleSuggestions: (roles: string[]) => request<{ role: string; open_jobs: number }[]>(`/api/roles/suggestions?${toParams({ roles })}`),
   savePrefs: (prefs: Prefs) => request<Prefs>('/api/prefs', { method: 'PUT', body: JSON.stringify(prefs) }),
   status: () => request<Status>('/api/status'),
   poll: () => request<{ started: boolean }>('/api/poll', { method: 'POST' }),

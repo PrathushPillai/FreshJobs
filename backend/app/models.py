@@ -61,6 +61,11 @@ class Job(Base):
         # after a page, instead of sorting every open job (~800k) on each request.
         Index("ix_jobs_by_found", "closed_at", "is_repost", "no_sponsor", "first_seen_at", "listed_at", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match"),
+        Index("ix_jobs_company_described", "company_id", "described", "closed_at"),
+        # Keyed by id: a search that starts from its full-text matches checks each job's filters here
+        # instead of reading the job's row (whose description comes before these columns).
+        Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
+              "exp_level", "min_years", "h1b_filings", "role_match"),
         Index("ix_jobs_by_listed", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match"),
     )
@@ -76,6 +81,9 @@ class Job(Base):
     remote: Mapped[bool] = mapped_column(Boolean, default=False)
     url: Mapped[str] = mapped_column(String(1000))
     description: Mapped[str] = mapped_column(Text, default="")
+    # Whether description is non-empty, so "which jobs still need details" never reads the descriptions
+    # themselves (that took 3 minutes per poll). Set by poller.apply_flags; NULL until backfilled.
+    described: Mapped[bool | None] = mapped_column(Boolean)
     department: Mapped[str] = mapped_column(String(200), default="")
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)  # as reported by the ATS
 

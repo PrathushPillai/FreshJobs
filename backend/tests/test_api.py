@@ -168,3 +168,12 @@ def test_job_list_reports_when_its_count_is_capped(client, monkeypatch):
     monkeypatch.setattr(main, "COUNT_CAP", 1)
     page = client.get("/api/jobs").json()
     assert page["total"] == 1 and page["total_capped"] is True
+
+
+def test_related_roles_are_suggested_and_only_searched_when_picked(client):
+    page = client.get("/api/jobs", params={"q": "nurse", "related": "false"}).json()
+    plain = {j["id"] for j in page["items"]}
+    assert page["related_terms"] is not None  # suggestions are always returned
+    picked = client.get("/api/jobs", params={"q": "nurse", "related": "false", "also": ["data analyst"]}).json()
+    assert plain <= {j["id"] for j in picked["items"]}
+    assert client.get("/api/roles/suggestions", params={"roles": ["data analyst"]}).status_code == 200

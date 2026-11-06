@@ -60,10 +60,19 @@ def test_repost_with_new_id_is_flagged(session, now):
     assert not is_alert_worthy(repost, prefs)
 
 
-def test_same_title_new_location_with_same_description_is_repost(session, now):
+def test_same_role_in_another_city_is_a_separate_opening_while_the_first_is_open(session, now):
+    company, prefs = make_company(session), get_prefs(session)
+    process_company(session, company, [nj("1")], prefs, now)
+    [sibling] = process_company(session, company, [nj("1"), nj("2", location="Austin, TX")], prefs, now + timedelta(hours=1))
+    assert not sibling.is_repost
+
+
+def test_same_role_relisted_in_another_city_after_closing_is_repost(session, now):
     company, prefs = make_company(session), get_prefs(session)
     [original] = process_company(session, company, [nj("1")], prefs, now)
-    [dup] = process_company(session, company, [nj("1"), nj("2", location="Austin, TX")], prefs, now + timedelta(hours=1))
+    for minutes in (5, 10):  # the original disappears and closes
+        process_company(session, company, [], prefs, now + timedelta(minutes=minutes))
+    [dup] = process_company(session, company, [nj("2", location="Austin, TX")], prefs, now + timedelta(days=2))
     assert dup.is_repost and dup.repost_of_id == original.id
 
 
@@ -187,6 +196,7 @@ async def test_poll_stops_at_its_deadline_and_leaves_the_rest_for_next_time(sess
         return []
 
     monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
     monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
     session.add_all([Company(name="Quick", ats="quick", slug="q"), Company(name="Stuck", ats="stuck", slug="s")])
     session.commit()

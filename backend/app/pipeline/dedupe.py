@@ -39,6 +39,7 @@ def find_original(
     now: datetime,
     window_days: int,
     same_poll_ids: set[int] = frozenset(),
+    company_id: int | None = None,
 ) -> Job | None:
     """Find an earlier job this one repeats, from any source.
 
@@ -73,6 +74,12 @@ def find_original(
     ]
     for job_id in candidates:
         candidate = session.get(Job, job_id)
-        if candidate is not None and similarity(candidate.description or "", description) >= SIMILARITY_THRESHOLD:
+        if candidate is None:
+            continue
+        # The same role, still open on the same board, in another place is a separate opening (a chain
+        # hiring a store manager in Seattle and in San Francisco), not a repost: the city matters.
+        if company_id is not None and candidate.company_id == company_id and candidate.closed_at is None:
+            continue
+        if similarity(candidate.description or "", description) >= SIMILARITY_THRESHOLD:
             return candidate
     return None

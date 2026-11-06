@@ -4,6 +4,7 @@ import { api, type ExpLevel, type Job, type JobQuery, postedText, SOURCE_LABELS,
 import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
+import RolesBar from './RolesBar'
 import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, SponsorBadge, Toggle, TrackControl } from './ui'
 
 const PAGE = 50
@@ -221,6 +222,7 @@ function FreshnessStrip({ base, active, onPick }: { base: JobQuery; active?: num
 export default function Feed() {
   const [search, setSearch] = useState('')
   const [q, setQ] = useState('')
+  const [also, setAlso] = useState<string[]>([])  // related roles picked for this search
   const [filters, setFilters] = useState<Filters>(loadFilters)
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
@@ -240,6 +242,7 @@ export default function Feed() {
   }, [filters])
   useEffect(() => {
     setOffset(0)
+    setAlso([])
     try {
       if (q) localStorage.setItem(LAST_QUERY_KEY, q)
     } catch {
@@ -252,7 +255,8 @@ export default function Feed() {
   const exp_levels = rest.exp_levels.length && include_unstated ? [...rest.exp_levels, 'unknown' as const] : rest.exp_levels
   // "For you": titles matching the roles in Settings. A search looks through every job instead.
   const forYou = for_you && !q
-  const query: JobQuery = { ...rest, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
+  // Related roles are only searched when picked (the chips under the search), never added automatically.
+  const query: JobQuery = { ...rest, related: false, also, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
   const jobs = useQuery({ queryKey: ['jobs', query], queryFn: () => api.jobs(query), placeholderData: keepPreviousData, refetchInterval: 60_000 })
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
   const toggleLevel = (level: ExpLevel) =>
@@ -272,7 +276,7 @@ export default function Feed() {
   const expLabel = filters.exp_levels.length
     ? filters.exp_levels.map((l) => EXP_LABELS[l].split(' ')[0]).join(', ')
     : filters.max_years !== undefined ? `≤ ${filters.max_years} yrs` : 'Experience'
-  const moreActive = filters.show_reposts || filters.tracked !== 'any' || !filters.related
+  const moreActive = filters.show_reposts || filters.tracked !== 'any'
 
   return (
     <div className="space-y-4">
@@ -298,6 +302,11 @@ export default function Feed() {
             ))}
           </div>
         </div>
+        {forYou && (
+          <div className="mb-3">
+            <RolesBar />
+          </div>
+        )}
         <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50/60 px-3 transition focus-within:border-emerald-500 focus-within:bg-white focus-within:ring-4 focus-within:ring-emerald-100">
           <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 shrink-0 text-slate-400" aria-hidden>
             <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 3.4 9.83l3.63 3.64a.75.75 0 1 0 1.06-1.06l-3.63-3.64A5.5 5.5 0 0 0 9 3.5ZM5 9a4 4 0 1 1 8 0 4 4 0 0 1-8 0Z" clipRule="evenodd" />
@@ -430,9 +439,8 @@ export default function Feed() {
             ))}
           </FilterPill>
 
-          <FilterPill label="More" active={moreActive} onClear={() => set({ related: true, show_reposts: false, tracked: 'any' })}>
+          <FilterPill label="More" active={moreActive} onClear={() => set({ show_reposts: false, tracked: 'any' })}>
             <div className="space-y-2">
-              <Toggle label="Include related roles in search" checked={filters.related} onChange={(v) => set({ related: v })} />
               <Toggle label="Show reposts & duplicates" checked={filters.show_reposts} onChange={(v) => set({ show_reposts: v })} />
               <select
                 value={filters.tracked}
@@ -465,13 +473,30 @@ export default function Feed() {
           ) : null}
           {jobs.isFetching && jobs.data && <span className="ml-2 text-xs text-slate-400">updating…</span>}
         </span>
-        {q && filters.related && related.length > 0 && (
-          <span className="truncate text-xs" title={related.join(', ')}>
-            Exact matches first, then related: {related.slice(0, 5).join(', ')}
-            {related.length > 5 && ` +${related.length - 5}`}
-          </span>
-        )}
       </div>
+      {q && related.length > 0 && (
+        <div className="-mt-1 flex flex-wrap items-center gap-1.5 px-1">
+          <span className="mr-1 text-xs font-medium text-slate-500">Also search related roles</span>
+          {[...also, ...related.filter((r) => !also.includes(r))].slice(0, 14).map((r) => {
+            const on = also.includes(r)
+            return (
+              <button
+                key={r}
+                onClick={() => setAlso(on ? also.filter((x) => x !== r) : [...also, r])}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition ${on ? 'bg-emerald-600 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-400'}`}
+              >
+                {on ? '✓ ' : '+ '}
+                {r}
+              </button>
+            )
+          })}
+          {also.length > 0 && (
+            <button onClick={() => setAlso([])} className="text-xs text-slate-500 hover:text-red-600">
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {jobs.isError && <p className="text-sm text-red-600">{(jobs.error as Error).message}</p>}
 
