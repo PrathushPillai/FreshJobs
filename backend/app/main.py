@@ -295,6 +295,7 @@ def list_jobs(
     q: str = "",
     related: bool = True,
     also: list[str] = Query([]),
+    skip: list[str] = Query([]),
     sort: Literal["newest", "posted", "company", "sponsor"] = "newest",
     status: Literal["open", "closed", "all"] = "open",
     countries: list[str] = Query([]),
@@ -320,10 +321,12 @@ def list_jobs(
     relevance = search_clause = None
     fts_first = False
     if q.strip():
-        # Related roles are suggestions; only the ones the user picked (`also`) are searched, unless
-        # related=true asks for all of them (the API's older behaviour).
+        # related=true (the Feed's default) searches every related role except the ones the user
+        # switched off (`skip`); related=false is "Exact title", plus any roles picked in `also`.
+        # Ranking keeps exact-title matches first either way.
         related_terms = distinct_roles(expand_query(q)[1:], [q])
-        chosen = related_terms if related else [t.strip().lower() for t in also if t.strip()]
+        skipped = {t.strip().lower() for t in skip}
+        chosen = [t for t in related_terms if t not in skipped] if related else [t.strip().lower() for t in also if t.strip()]
         phrase, typed, related_match, combined = _title_search(q, chosen)
         search_clause = or_(typed, related_match) if related_match is not None else typed
         if combined is not None:

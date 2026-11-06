@@ -222,7 +222,7 @@ function FreshnessStrip({ base, active, onPick }: { base: JobQuery; active?: num
 export default function Feed() {
   const [search, setSearch] = useState('')
   const [q, setQ] = useState('')
-  const [also, setAlso] = useState<string[]>([])  // related roles picked for this search
+  const [skip, setSkip] = useState<string[]>([])  // related roles switched off for this search
   const [filters, setFilters] = useState<Filters>(loadFilters)
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
@@ -242,7 +242,7 @@ export default function Feed() {
   }, [filters])
   useEffect(() => {
     setOffset(0)
-    setAlso([])
+    setSkip([])
     try {
       if (q) localStorage.setItem(LAST_QUERY_KEY, q)
     } catch {
@@ -255,13 +255,22 @@ export default function Feed() {
   const exp_levels = rest.exp_levels.length && include_unstated ? [...rest.exp_levels, 'unknown' as const] : rest.exp_levels
   // "For you": titles matching the roles in Settings. A search looks through every job instead.
   const forYou = for_you && !q
-  // Related roles are only searched when picked (the chips under the search), never added automatically.
-  const query: JobQuery = { ...rest, related: false, also, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
+  // A search includes related roles (exact-title matches always rank first); "Exact title" turns them
+  // off, and each related role can be switched off on its own (the chips under the count).
+  const exact = !filters.related
+  const query: JobQuery = { ...rest, related: !exact, skip: exact ? [] : skip, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
   const jobs = useQuery({ queryKey: ['jobs', query], queryFn: () => api.jobs(query), placeholderData: keepPreviousData, refetchInterval: 60_000 })
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
   const toggleLevel = (level: ExpLevel) =>
     set({ exp_levels: filters.exp_levels.includes(level) ? filters.exp_levels.filter((l) => l !== level) : [...filters.exp_levels, level] })
   const related = jobs.data?.related_terms ?? []
+  // How many of the results have the exact title, shown next to the total while related roles are on.
+  const exactCount = useQuery({
+    queryKey: ['jobs', 'exact-count', { ...query, limit: 1, offset: 0 }],
+    queryFn: () => api.jobs({ ...query, related: false, skip: [], limit: 1, offset: 0 }),
+    enabled: !!q && !exact && related.length > 0,
+    placeholderData: keepPreviousData,
+  })
   const items = jobs.data?.items
 
   // Two-pane view: keep a job open on the right, defaulting to the first result.
@@ -322,6 +331,16 @@ export default function Feed() {
               ✕
             </button>
           )}
+          <label
+            className="flex shrink-0 cursor-pointer select-none items-center gap-2 border-l border-slate-200 py-1.5 pl-3 text-sm text-slate-600"
+            title="On: only titles matching what you typed. Off: also related roles (exact matches still come first)."
+          >
+            <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${exact ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+              <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition ${exact ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            </span>
+            <input type="checkbox" className="sr-only" checked={exact} onChange={(e) => set({ related: !e.target.checked })} />
+            Exact title
+          </label>
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -467,6 +486,13 @@ export default function Feed() {
           {jobs.data ? (
             <>
               <b className="text-slate-800">{jobs.data.total.toLocaleString()}{jobs.data.total_capped && '+'}</b> jobs{q && <> for “{q}”</>}
+              {q && exact && <> · exact title only</>}
+              {q && !exact && related.length > 0 && exactCount.data && (
+                <>
+                  {' '}
+                  · <b className="text-slate-800">{exactCount.data.total.toLocaleString()}{exactCount.data.total_capped && '+'}</b> with that exact title, shown first; the rest are related roles
+                </>
+              )}
             </>
           ) : jobs.isLoading ? (
             'Searching…'
@@ -474,25 +500,27 @@ export default function Feed() {
           {jobs.isFetching && jobs.data && <span className="ml-2 text-xs text-slate-400">updating…</span>}
         </span>
       </div>
-      {q && related.length > 0 && (
+      {q && !exact && related.length > 0 && (
         <div className="-mt-1 flex flex-wrap items-center gap-1.5 px-1">
-          <span className="mr-1 text-xs font-medium text-slate-500">Also search related roles</span>
-          {[...also, ...related.filter((r) => !also.includes(r))].slice(0, 14).map((r) => {
-            const on = also.includes(r)
+          <span className="mr-1 text-xs font-medium text-slate-500">Including related roles (click to switch one off)</span>
+          {related.slice(0, 16).map((r) => {
+            const on = !skip.includes(r)
             return (
               <button
                 key={r}
-                onClick={() => setAlso(on ? also.filter((x) => x !== r) : [...also, r])}
-                className={`rounded-full px-2.5 py-0.5 text-xs transition ${on ? 'bg-emerald-600 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-400'}`}
+                onClick={() => setSkip(on ? [...skip, r] : skip.filter((x) => x !== r))}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition ${on ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-300 hover:ring-red-300' : 'bg-white text-slate-400 line-through ring-1 ring-slate-200 hover:ring-emerald-400'}`}
+                title={on ? `Stop including "${r}"` : `Include "${r}" again`}
               >
-                {on ? '✓ ' : '+ '}
+                {on ? '✓ ' : ''}
                 {r}
               </button>
             )
           })}
-          {also.length > 0 && (
-            <button onClick={() => setAlso([])} className="text-xs text-slate-500 hover:text-red-600">
-              Clear
+          {related.length > 16 && <span className="text-xs text-slate-400">+{related.length - 16} more included</span>}
+          {skip.length > 0 && (
+            <button onClick={() => setSkip([])} className="text-xs text-slate-500 hover:text-emerald-700">
+              Include all
             </button>
           )}
         </div>

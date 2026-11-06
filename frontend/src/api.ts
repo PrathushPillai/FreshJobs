@@ -117,6 +117,7 @@ export interface JobQuery {
   q?: string
   related?: boolean
   also?: string[]
+  skip?: string[]
   sort?: 'newest' | 'posted' | 'company' | 'sponsor'
   countries?: string[]
   states?: string[]

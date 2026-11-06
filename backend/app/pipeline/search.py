@@ -4,12 +4,21 @@ import re
 
 # Role families. A search that matches any term in a family also searches the family's other terms.
 ROLE_FAMILIES: dict[str, list[str]] = {
-    "data": [
-        "data analyst", "data analytics", "data scientist", "data science", "data engineer", "analytics engineer",
-        "business intelligence", "bi analyst", "bi developer", "business analyst", "reporting analyst",
-        "insights analyst", "product analyst", "marketing analyst", "quantitative analyst", "statistician",
-        "decision scientist", "data architect", "etl developer", "analytics", "data visualization", "tableau",
-        "power bi", "sql developer",
+    # Data is three families, so "data engineer" brings data-platform roles, not marketing analysts.
+    "data analytics": [
+        "data analyst", "data analytics", "analytics", "business intelligence", "bi analyst", "bi developer",
+        "business analyst", "reporting analyst", "insights analyst", "product analyst", "marketing analyst",
+        "analytics engineer", "data visualization", "tableau", "power bi", "data scientist",
+    ],
+    "data science": [
+        "data scientist", "data science", "quantitative analyst", "statistician", "decision scientist",
+        "applied scientist",
+    ],
+    "data engineering": [
+        "data engineer", "analytics engineer", "data platform", "analytics platform", "data infrastructure",
+        "big data", "etl developer", "etl engineer", "data pipeline", "data architect", "data warehouse",
+        "database engineer", "database developer", "sql developer", "data integration", "dataops",
+        "snowflake developer", "databricks engineer",
     ],
     "machine learning": [
         "machine learning", "ml engineer", "mle", "ai engineer", "applied scientist", "research scientist",
@@ -77,7 +86,9 @@ def expand_query(q: str) -> list[str]:
     for family, members in ROLE_FAMILIES.items():
         vocab = [family, *members]
         # The query names a role in the family ("data analyst"), or is the family's word ("data", "sales").
-        if any(q == m or (len(q) >= 4 and (q in m.split() or m in q)) for m in vocab):
+        # Word order doesn't matter: "analyst data" is "data analyst".
+        words = sorted(q.split())
+        if any(q == m or sorted(m.split()) == words or (len(q) >= 4 and (q in m.split() or m in q)) for m in vocab):
             for m in members:
                 if m not in terms:
                     terms.append(m)

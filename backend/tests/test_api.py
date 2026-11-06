@@ -139,6 +139,22 @@ def test_search_ranks_typed_words_before_related_roles(client):
     assert [j["title"] for j in items] == ["Data Analyst", "Business Intelligence Developer"]
 
 
+def test_search_related_roles_can_be_switched_off(client):
+    params = {"q": "data analyst"}
+    assert titles(client.get("/api/jobs", params=params)) == ["Business Intelligence Developer", "Data Analyst"]
+    # "Exact title" (related=false) and switching one related role off both drop the related match.
+    assert titles(client.get("/api/jobs", params={**params, "related": "false"})) == ["Data Analyst"]
+    assert titles(client.get("/api/jobs", params={**params, "skip": ["business intelligence", "bi developer"]})) == ["Data Analyst"]
+
+
+def test_data_engineer_relates_to_data_platform_roles():
+    from app.pipeline.search import distinct_roles, expand_query
+
+    related = distinct_roles(expand_query("data engineer")[1:], ["data engineer"])
+    assert "analytics platform" in related and "data platform" in related
+    assert "marketing analyst" not in related
+
+
 def test_posted_within_filter(client, session, now):
     from app.models import Job
 
