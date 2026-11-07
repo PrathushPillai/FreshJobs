@@ -4,25 +4,28 @@ import re
 
 import httpx
 import threading
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import and_, case, exists, func, or_, select, text, true
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, defer, selectinload
 
 from app.config import settings
 from app.db import SessionLocal, engine, get_session, init_db, is_sqlite
-from app.h1b import sponsor_index
+from app.everify import lookup as everify_lookup
+from app.uscis import lookup as uscis_lookup
+from app.h1b import role_history, sponsor_index
 from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobEvent, JobLocation
 from app.notify.email import email_configured
 from app.pipeline.detect import detect_from_page
 from app.pipeline import liveness
-from app.pipeline.poller import USER_AGENT, backfill, poll_once, refresh_role_match
+from app.pipeline.poller import USER_AGENT, backfill, poll_once, refresh_role_match, refresh_role_match_for
 from app.pipeline.search import distinct_roles, expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
 from app.recruiters import hunter_configured, hunter_lookup, search_links
@@ -39,7 +42,8 @@ _poll_locks = {lane: threading.Lock() for lane in LANES}
 _last_poll: dict[str, dict] = {}
 
 
-COUNT_CAP = 10_000
+# Counting stops here ("2,000+"): counting further meant reading up to 10,000 matching jobs (42 s cold).
+COUNT_CAP = 2_000
 
 
 def _checkpoint() -> None:
@@ -64,8 +68,10 @@ def run_poll(lane: str) -> dict:
         summary = asyncio.run(poll_once(lane))
         _last_poll[lane] = {**summary, "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat()}
         _checkpoint()
+        _jobs_cache.clear()  # cached result pages would miss this poll's jobs
         if lane == "fast":
             _place_counts(force=True)  # location picker counts include this poll's jobs
+            threading.Thread(target=_warm_suggestions, daemon=True).start()
         return summary
     except Exception:
         log.exception("Poll of %s lane failed", lane)
@@ -87,6 +93,7 @@ async def lifespan(app: FastAPI):
             p = get_prefs(s)
             include, exclude = list(p.include_keywords), list(p.exclude_keywords)
         threading.Thread(target=refresh_role_match, args=(include, exclude), daemon=True).start()  # rules may have changed
+        threading.Thread(target=_warm_suggestions, daemon=True).start()  # the "Your roles" bar's counts
         first_run = datetime.now() if settings.poll_on_startup else None
         for lane in LANES:
             scheduler.add_job(run_poll, "interval", args=[lane], minutes=settings.poll_minutes,
@@ -99,6 +106,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Job Portal", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"], allow_headers=["*"])
+
+# GET /api/jobs responses by query string. The Feed asks for the same pages again and again (its
+# 60-second refresh, going back to an earlier filter, the freshness counts), and a page takes seconds on
+# 1.6M jobs. Cleared after every poll and by any change the user makes (tracking a job, editing prefs).
+JOBS_CACHE_SECONDS = 60
+_jobs_cache: dict[str, tuple[float, bytes]] = {}
+
+
+@app.middleware("http")
+async def _cache_job_lists(request: Request, call_next):
+    if request.method != "GET":
+        # Opening a job checks its apply page (POST .../verify) every time: that mustn't empty the cache. A job
+        # it finds closed drops out of cached pages at the next poll.
+        if request.url.path.startswith("/api/") and not request.url.path.endswith("/verify"):
+            _jobs_cache.clear()
+        return await call_next(request)
+    if request.url.path != "/api/jobs":
+        return await call_next(request)
+    key = request.url.query
+    hit = _jobs_cache.get(key)
+    if hit and time.monotonic() - hit[0] < JOBS_CACHE_SECONDS:
+        return Response(content=hit[1], media_type="application/json", headers={"X-Cache": "hit"})
+    response = await call_next(request)
+    if response.status_code != 200:
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    if len(_jobs_cache) > 500:
+        _jobs_cache.clear()
+    _jobs_cache[key] = (time.monotonic(), body)
+    return Response(content=body, status_code=200, media_type="application/json", headers={"X-Cache": "miss"})
 
 
 # ---------- schemas ----------
@@ -135,6 +172,9 @@ class JobOut(BaseModel):
     repost_of_id: int | None
     repost_kind: str | None  # "repost", "duplicate" or "resurfaced" (see process_company); None if not a repeat
     no_sponsor: bool
+    student_visa: str | None  # "welcome" / "excluded": what the description says about OPT/CPT (F-1)
+    everify_text: bool  # the description says the employer uses E-Verify
+    everify: str | None  # the employer in USCIS's E-Verify list: "yes" (enrolled), "ended", None (not found)
     seniority: str
     min_years: int | None
     exp_level: str
@@ -165,9 +205,55 @@ class OriginalOut(BaseModel):
     closed_at: datetime | None
 
 
+class H1BRoleOut(BaseModel):
+    soc_code: str
+    soc_title: str
+    filings: int
+    median_wage: int | None
+    low_wage: int | None
+    high_wage: int | None
+    top_titles: list[str]
+    top_cities: list[str]
+
+
+class H1BMatchOut(H1BRoleOut):
+    matched_by: str  # "title" (similar LCA job titles) or "occupation" (the usual occupation for the title)
+
+
+class H1BHistoryOut(BaseModel):
+    total: int
+    match: H1BMatchOut | None
+    roles: list[H1BRoleOut]
+
+
+class EVerifyOut(BaseModel):
+    status: str  # "yes" or "ended"
+    since: date | None  # earliest enrollment
+    ended: date | None  # when the last account ended ("ended" only)
+    name: str  # the enrolled name that matched
+    workforce: str
+    accounts: int
+
+
+class USCISYearOut(BaseModel):
+    fiscal_year: int
+    new_approvals: int
+    new_denials: int
+    approvals: int
+    denials: int
+
+
+class USCISOut(BaseModel):
+    years: list[USCISYearOut]  # newest first
+    names: list[str]  # petitioner names that matched
+
+
 class JobDetailOut(JobOut):
     description: str
     repost_of: OriginalOut | None
+    h1b_roles: H1BHistoryOut | None  # the employer's H-1B filings by occupation, and the one fitting this job
+    everify_info: EVerifyOut | None
+    uscis: USCISOut | None  # H-1B petitions USCIS approved and denied, per fiscal year
     events: list[EventOut]
     sponsor: SponsorOut | None
 
@@ -175,6 +261,8 @@ class JobDetailOut(JobOut):
 class JobPage(BaseModel):
     total: int
     total_capped: bool = False  # more than COUNT_CAP matches; total is COUNT_CAP
+    # With fresh_counts=true: matches posted in the last 1, 6 and 24 hours ({"1": n, "6": n, "24": n}).
+    fresh: dict[str, int] | None = None
     related_terms: list[str]
     items: list[JobOut]
 
@@ -336,6 +424,7 @@ def list_jobs(
     max_years: int | None = None,
     remote_only: bool = False,
     sponsors_only: bool = False,
+    everify_only: bool = False,  # employers in USCIS's E-Verify list, or whose posting says they use it
     hide_no_sponsor: bool = True,
     show_reposts: bool = False,
     repeat_kinds: list[str] = Query([]),  # with show_reposts: which repeats to show (empty = all of REPEAT_KINDS)
@@ -346,6 +435,7 @@ def list_jobs(
     company_id: int | None = None,
     limit: int = Query(50, le=200),
     offset: int = 0,
+    fresh_counts: bool = False,  # instead of a page: how many matches were posted in the last 1, 6, 24 hours
 ):
     # Title search first: how many jobs it matches decides the query plan (below).
     related_terms: list[str] = []
@@ -398,8 +488,12 @@ def list_jobs(
         stmt = stmt.where(Job.remote.is_(True))
     if sponsors_only:
         stmt = stmt.where(Job.h1b_filings > 0)
+    if everify_only:
+        stmt = stmt.where(or_(Job.everify == "yes", Job.everify_text.is_(True)))
     if since_hours:
         stmt = stmt.where(Job.first_seen_at >= datetime.now(timezone.utc) - timedelta(hours=since_hours))
+    if fresh_counts:
+        posted_within_hours = 24  # the strip's widest window; the 1 h and 6 h counts are taken inside it
     if posted_within_hours:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=posted_within_hours)
         stmt = stmt.where(Job.listed_at >= cutoff)  # undated jobs can't qualify
@@ -440,7 +534,18 @@ def list_jobs(
     # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
     # (descriptions), then load just the page's jobs. Selecting full rows made a search take ~6 s.
     ids = stmt.with_only_columns(Job.id)
-    # Counting every match of a broad query (800k open jobs) takes seconds, so stop at COUNT_CAP ("10,000+").
+    if fresh_counts:
+        # One scan, newest first, so the 1 h and 6 h counts are exact even when the day's count is capped.
+        now = datetime.now(timezone.utc)
+        newest = stmt.with_only_columns(Job.listed_at).order_by(Job.listed_at.desc()).limit(COUNT_CAP + 1).subquery()
+        day, six, hour = session.execute(select(
+            func.count(),
+            func.coalesce(func.sum(case((newest.c.listed_at >= now - timedelta(hours=6), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((newest.c.listed_at >= now - timedelta(hours=1), 1), else_=0)), 0),
+        )).one()
+        return {"total": min(day, COUNT_CAP), "total_capped": day > COUNT_CAP, "related_terms": related_terms,
+                "items": [], "fresh": {"1": hour, "6": six, "24": min(day, COUNT_CAP)}}
+    # Counting every match of a broad query (800k open jobs) takes seconds, so stop at COUNT_CAP ("2,000+").
     total = session.scalar(select(func.count()).select_from(ids.limit(COUNT_CAP + 1).subquery()))
     order = {
         "newest": (Job.first_seen_at.desc(), Job.id.desc()),
@@ -456,7 +561,9 @@ def list_jobs(
         j.id: j
         for j in session.scalars(
             select(Job).where(Job.id.in_(page_ids))
-            .options(selectinload(Job.company), selectinload(Job.places), selectinload(Job.application))
+            # A list shows no descriptions; loading them read 50 multi-KB rows from disk per page.
+            .options(defer(Job.description), selectinload(Job.company), selectinload(Job.places),
+                     selectinload(Job.application))
         )
     }
     kinds = _repeat_kinds(session, list(loaded.values()))
@@ -478,6 +585,9 @@ def get_job(job_id: int, session: Session = Depends(get_session)):
         "url": original.url, "first_seen_at": original.first_seen_at, "closed_at": original.closed_at,
     } if original else None
     data["sponsor"] = _sponsor_info(session, job.company_name or job.company.name)
+    data["h1b_roles"] = role_history(session, job.company_name or job.company.name, job.title)
+    data["everify_info"] = everify_lookup(session, job.company_name or job.company.name)
+    data["uscis"] = uscis_lookup(session, job.company_name or job.company.name)
     return data
 
 
@@ -495,34 +605,61 @@ def _sponsor_info(session: Session, company: str) -> dict | None:
     }
 
 
-@app.post("/api/jobs/{job_id}/verify")
-async def verify_job(job_id: int, session: Session = Depends(get_session)):
-    """Open the job's apply page now and close the job if it's gone (pipeline/liveness.py)."""
+def _job_or_404(session: Session, job_id: int) -> Job:
     job = session.get(Job, job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
-        is_open, why = await liveness.check(client, job.url)
+    return job
+
+
+def _job_url(job_id: int) -> str:
+    with SessionLocal() as session:
+        return _job_or_404(session, job_id).url
+
+
+def _record_check(job_id: int, is_open: bool | None, why: str) -> dict:
     now = datetime.now(timezone.utc)
-    job.checked_at = now
-    if is_open is False and job.closed_at is None:
-        liveness.close(session, job, why, now)
-    session.commit()
-    return {"open": is_open, "detail": why, "checked_at": now, "closed_at": job.closed_at}
+    with SessionLocal() as session:
+        job = _job_or_404(session, job_id)
+        job.checked_at = now
+        if is_open is False and job.closed_at is None:
+            liveness.close(session, job, why, now)
+        session.commit()
+        return {"open": is_open, "detail": why, "checked_at": now, "closed_at": job.closed_at}
+
+
+@app.post("/api/jobs/{job_id}/verify")
+async def verify_job(job_id: int):
+    """Open the job's apply page now and close the job if it's gone (pipeline/liveness.py).
+
+    The database work runs in worker threads: on the event loop, its commit waited for the write lock
+    (up to the 120 s busy timeout while a poll saved) and froze every other request, the whole site with it.
+    """
+    url = await asyncio.to_thread(_job_url, job_id)
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        is_open, why = await liveness.check(client, url)
+    return await asyncio.to_thread(_record_check, job_id, is_open, why)
+
+
+def _company_and_title(job_id: int) -> tuple[str, str]:
+    with SessionLocal() as session:
+        job = _job_or_404(session, job_id)
+        return job.company_name or job.company.name, job.title
 
 
 @app.get("/api/jobs/{job_id}/recruiters")
-async def job_recruiters(job_id: int, lookup: bool = False, refresh: bool = False, session: Session = Depends(get_session)):
+async def job_recruiters(job_id: int, lookup: bool = False, refresh: bool = False):
     """Search links for the job's recruiters; with lookup=true, also Hunter.io emails (uses quota, cached)."""
-    job = session.get(Job, job_id)
-    if job is None:
-        raise HTTPException(404, "job not found")
-    company = job.company_name or job.company.name
+    company, title = await asyncio.to_thread(_company_and_title, job_id)  # off the event loop (see verify_job)
+    hunter = None
+    if lookup:  # a click on "Look up", rare: its cache reads and writes stay inline
+        with SessionLocal() as session:
+            hunter = await hunter_lookup(session, company, refresh)
     return {
         "company": company,
-        "links": search_links(company, job.title),
+        "links": search_links(company, title),
         "hunter_configured": hunter_configured(),
-        "hunter": await hunter_lookup(session, company, refresh) if lookup else None,
+        "hunter": hunter,
     }
 
 
@@ -733,15 +870,21 @@ def read_prefs(session: Session = Depends(get_session)):
 @app.put("/api/prefs", response_model=PrefsModel)
 def write_prefs(body: PrefsModel, session: Session = Depends(get_session)):
     prefs = get_prefs(session)
-    keywords_changed = (body.include_keywords, body.exclude_keywords) != (prefs.include_keywords, prefs.exclude_keywords)
+    old_include, old_exclude = list(prefs.include_keywords), list(prefs.exclude_keywords)
     for k, v in body.model_dump().items():
         setattr(prefs, k, v)
     session.commit()
-    if keywords_changed:
-        # Rechecking ~1.2M titles takes a minute or more: in the background, so saving is instant.
-        # Until it finishes, "For you" shows the old matches.
-        threading.Thread(target=refresh_role_match, args=(list(prefs.include_keywords), list(prefs.exclude_keywords)),
-                         daemon=True).start()
+    include, exclude = list(prefs.include_keywords), list(prefs.exclude_keywords)
+    if (include, exclude) != (old_include, old_exclude):
+        # Adding or removing a role (the "Your roles" bar) only changes jobs whose title mentions it: recheck
+        # just those, right now, so "For you" is up to date when this returns. A changed exclude list can
+        # change any job: recheck all ~1.7M titles in the background (about a minute).
+        added_or_removed = sorted(set(include) ^ set(old_include))
+        changed = refresh_role_match_for(added_or_removed, include, exclude) if exclude == old_exclude else None
+        if changed is None:
+            threading.Thread(target=refresh_role_match, args=(include, exclude), daemon=True).start()
+        _jobs_cache.clear()  # pages cached while the roles were being rechecked
+        _status_counts.clear()
     return prefs
 
 
@@ -758,8 +901,39 @@ def role_suggestions(roles: list[str] = Query([]), session: Session = Depends(ge
     picked = {r.strip().lower() for r in roles if r.strip()}
     key = tuple(sorted(picked))
     hit = _suggestion_cache.get(key)
-    if hit and datetime.now(timezone.utc) - hit[0] < timedelta(minutes=10):
+    if hit:
+        if datetime.now(timezone.utc) - hit[0] >= timedelta(minutes=10) and key not in _suggestions_refreshing:
+            # Stale: answer now with the old counts and recount in the background (a recount takes ~20 s).
+            _suggestions_refreshing.add(key)
+            threading.Thread(target=_refresh_suggestions, args=(list(picked),), daemon=True).start()
         return hit[1]
+    return _compute_suggestions(session, picked)
+
+
+_suggestions_refreshing: set[tuple] = set()
+
+
+def _refresh_suggestions(roles: list[str]) -> None:
+    key = tuple(sorted(roles))
+    try:
+        with SessionLocal() as session:
+            _compute_suggestions(session, set(roles))
+    except Exception:
+        log.warning("Recounting role suggestions failed", exc_info=True)
+    finally:
+        _suggestions_refreshing.discard(key)
+
+
+def _warm_suggestions() -> None:
+    """Count the suggestions for the user's own roles ahead of time (startup, after each fast poll)."""
+    with SessionLocal() as s:
+        roles = [r.strip().lower() for r in get_prefs(s).include_keywords if r.strip()]
+    if roles:
+        _refresh_suggestions(roles)
+
+
+def _compute_suggestions(session: Session, picked: set[str]) -> list[dict]:
+    key = tuple(sorted(picked))
     candidates = distinct_roles([t for r in picked for t in expand_query(r)[1:]], list(picked))
     suggestions = []
     for term in list(dict.fromkeys(candidates))[:40]:
@@ -786,9 +960,30 @@ def trigger_poll():
     return {"started": True}
 
 
+_status_counts: dict = {}  # "at" (monotonic seconds) and the counts
+
+
+def _counts(session: Session) -> dict:
+    """The header's totals. Counting 1.6M jobs takes seconds, and the header asks every few seconds while a
+    check runs, so they're recomputed at most once a minute."""
+    if _status_counts and time.monotonic() - _status_counts["at"] < 60:
+        return _status_counts
+    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    _status_counts.update(
+        at=time.monotonic(),
+        companies=session.scalar(select(func.count()).select_from(Company)),
+        open_jobs=session.scalar(select(func.count()).where(Job.closed_at.is_(None), Job.is_repost.is_(False))),
+        new_last_24h=session.scalar(
+            select(func.count()).where(Job.baseline.is_(False), Job.is_repost.is_(False), Job.first_seen_at >= day_ago)
+        ),
+        h1b_sponsors=session.scalar(select(func.count()).select_from(H1BSponsor)),
+    )
+    return _status_counts
+
+
 @app.get("/api/status")
 def status(session: Session = Depends(get_session)):
-    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    counts = _counts(session)
     return {
         "polling": _poll_locks["fast"].locked(),
         "slow_polling": _poll_locks["slow"].locked(),
@@ -798,12 +993,10 @@ def status(session: Session = Depends(get_session)):
         "email_configured": email_configured(),
         "hunter_configured": hunter_configured(),
         "adzuna_configured": "adzuna" in ADAPTERS and ADAPTERS["adzuna"].is_configured(),
-        "companies": session.scalar(select(func.count()).select_from(Company)),
-        "open_jobs": session.scalar(select(func.count()).where(Job.closed_at.is_(None), Job.is_repost.is_(False))),
-        "new_last_24h": session.scalar(
-            select(func.count()).where(Job.baseline.is_(False), Job.is_repost.is_(False), Job.first_seen_at >= day_ago)
-        ),
+        "companies": counts["companies"],
+        "open_jobs": counts["open_jobs"],
+        "new_last_24h": counts["new_last_24h"],
         "tracked": session.scalar(select(func.count()).select_from(Application)),
-        "h1b_sponsors": session.scalar(select(func.count()).select_from(H1BSponsor)),
+        "h1b_sponsors": counts["h1b_sponsors"],
         "jsearch_configured": ADAPTERS["jsearch"].is_configured() if "jsearch" in ADAPTERS else False,
     }

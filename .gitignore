@@ -6,3 +6,5 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 backend/data/h1b/
+backend/data/everify/
+backend/data/uscis_h1b/

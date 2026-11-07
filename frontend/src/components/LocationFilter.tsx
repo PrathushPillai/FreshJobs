@@ -18,7 +18,7 @@ export function FacetList({ options, selected, onChange, loading, placeholder }:
   const toggle = (name: string) => onChange(selected.includes(name) ? selected.filter((v) => v !== name) : [...selected, name])
   const row = (name: string, checked: boolean) => (
     <label key={name} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm text-slate-700 hover:bg-slate-100">
-      <input type="checkbox" className="accent-emerald-600" checked={checked} onChange={() => toggle(name)} />
+      <input type="checkbox" className="accent-brand-600" checked={checked} onChange={() => toggle(name)} />
       <span className="min-w-0 flex-1 truncate">{name}</span>
       {counts.has(name) && <span className="text-xs text-slate-400">{counts.get(name)!.toLocaleString()}</span>}
     </label>
@@ -30,7 +30,7 @@ export function FacetList({ options, selected, onChange, loading, placeholder }:
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder={placeholder}
-        className="mb-2 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-emerald-500"
+        className="mb-2 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-brand-500"
       />
       <div className="max-h-72 overflow-y-auto">
         {selected.map((name) => row(name, true))}

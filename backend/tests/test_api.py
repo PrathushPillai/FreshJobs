@@ -229,3 +229,56 @@ def test_repeat_kinds_labelled_and_filterable(client, session, now):
     dup = next(j for j in items if j["repost_kind"] == "duplicate")
     detail = client.get(f"/api/jobs/{dup['id']}").json()
     assert detail["repost_of"]["company"] == "Acme" and detail["repost_of"]["closed_at"] is None
+
+
+def test_student_visa_and_everify_signals(client, session, now):
+    acme = session.query(Company).filter_by(slug="acme").one()
+    process_company(session, acme, [
+        nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
+        nj("2", "Business Intelligence Developer", "Toronto, ON"),
+        nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
+        nj("4", "Registered Nurse", "London, UK"),
+        nj("5", "Data Engineer", "Remote", "Must be a US citizen."),
+        nj("7", "Analytics Engineer", "Boston, MA",
+           "We're happy to sponsor international candidates (e.g., STEM OPT, OPT, H1B). We participate in E-Verify."),
+        nj("8", "Data Scientist", "Boston, MA", "This role is not eligible for visa sponsorship (H1B, OPT/CPT, TN etc)."),
+    ], get_prefs(session), now + timedelta(minutes=5))
+    session.commit()
+    items = {j["title"]: j for j in client.get("/api/jobs", params={"hide_no_sponsor": False}).json()["items"]}
+    assert items["Analytics Engineer"]["student_visa"] == "welcome" and items["Analytics Engineer"]["everify_text"]
+    assert items["Data Scientist"]["student_visa"] == "excluded" and items["Data Scientist"]["no_sponsor"]
+    assert "Data Scientist" not in titles(client.get("/api/jobs"))  # ruling out OPT/CPT hides it like "no sponsorship"
+    detail = client.get(f"/api/jobs/{items['Analytics Engineer']['id']}").json()
+    assert detail["h1b_roles"] is None  # no H-1B data imported in this test
+
+
+def test_fresh_counts_in_one_request(client, session):
+    from app.models import Job
+
+    today = datetime.now(timezone.utc)
+    for title, hours in (("Data Analyst", 0.5), ("Business Intelligence Developer", 3), ("Registered Nurse", 30)):
+        session.query(Job).filter_by(title=title).one().listed_at = today - timedelta(hours=hours)
+    session.query(Job).filter_by(title="Senior Software Engineer").one().listed_at = today - timedelta(hours=12)
+    session.commit()
+    page = client.get("/api/jobs", params={"fresh_counts": True, "countries": ["United States", "Canada", "United Kingdom"]}).json()
+    assert page["fresh"] == {"1": 1, "6": 2, "24": 3} and page["items"] == []
+
+
+def test_job_lists_are_cached_until_something_changes(client, session):
+    first = client.get("/api/jobs", params={"q": "analyst"})
+    assert first.headers["X-Cache"] == "miss"
+    assert client.get("/api/jobs", params={"q": "analyst"}).headers["X-Cache"] == "hit"
+    job_id = first.json()["items"][0]["id"]
+    client.post("/api/applications", json={"job_id": job_id, "status": "applied"})  # any change clears the cache
+    again = client.get("/api/jobs", params={"q": "analyst"})
+    assert again.headers["X-Cache"] == "miss" and again.json()["items"][0]["application"]["status"] == "applied"
+
+
+def test_adding_or_removing_a_role_updates_for_you_at_once(client):
+    for_you = lambda: titles(client.get("/api/jobs", params={"alert_roles_only": True, "hide_no_sponsor": False}))  # noqa: E731
+    prefs = client.get("/api/prefs").json()
+    assert "Registered Nurse" not in for_you() and "Data Analyst" in for_you()
+    client.put("/api/prefs", json={**prefs, "include_keywords": [*prefs["include_keywords"], "nurse"]})
+    assert "Registered Nurse" in for_you()  # no waiting for a background recheck
+    client.put("/api/prefs", json={**prefs, "include_keywords": [k for k in prefs["include_keywords"] if k != "data analyst"]})
+    assert "Registered Nurse" not in for_you() and "Data Analyst" not in for_you()

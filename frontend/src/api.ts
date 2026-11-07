@@ -27,12 +27,43 @@ export interface Job {
   repost_of_id: number | null
   repost_kind: RepeatKind | null
   no_sponsor: boolean
+  /** What the description says about F-1 students on OPT/CPT/STEM OPT. */
+  student_visa: 'welcome' | 'excluded' | null
+  /** The description says the employer uses E-Verify (needed to hire on STEM OPT). */
+  everify_text: boolean
+  /** The employer in USCIS's E-Verify list: enrolled, every account ended, or not found. */
+  everify: 'yes' | 'ended' | null
   seniority: string
   min_years: number | null
   exp_level: ExpLevel
   baseline: boolean
   h1b_filings: number | null
   application: { id: number; status: AppStatus } | null
+}
+
+/** One occupation (SOC code) an employer filed H-1B LCAs for, with the offered yearly wages. */
+export interface H1BRole {
+  soc_code: string
+  soc_title: string
+  filings: number
+  median_wage: number | null
+  low_wage: number | null
+  high_wage: number | null
+  top_titles: string[]
+  top_cities: string[]
+}
+
+export interface H1BHistory {
+  total: number
+  /** The occupation that fits this job: by similar LCA titles ("title") or the title's usual occupation. */
+  match: (H1BRole & { matched_by: 'title' | 'occupation' }) | null
+  roles: H1BRole[]
+}
+
+/** "$148k" */
+export function money(n: number | null): string {
+  if (n === null) return '-'
+  return n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${Math.round(n / 1000)}k`
 }
 
 /** Why a job is hidden as a repeat: same job re-posted, the same job on another site, or an old job re-listed. */
@@ -47,6 +78,12 @@ export const REPEAT_LABELS: Record<RepeatKind, { label: string; hint: string }> 
 export interface JobDetail extends Job {
   description: string
   repost_of: { id: number; title: string; company: string; url: string; first_seen_at: string; closed_at: string | null } | null
+  h1b_roles: H1BHistory | null
+  uscis: {
+    years: { fiscal_year: number; new_approvals: number; new_denials: number; approvals: number; denials: number }[]
+    names: string[]
+  } | null
+  everify_info: { status: 'yes' | 'ended'; since: string | null; ended: string | null; name: string; workforce: string; accounts: number } | null
   events: { kind: string; at: string; detail: string }[]
   sponsor: { filings: number; employers: string[]; top_titles: string[]; source: string } | null
 }
@@ -137,6 +174,9 @@ export interface JobQuery {
   max_years?: number
   remote_only?: boolean
   sponsors_only?: boolean
+  everify_only?: boolean
+  /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
+  fresh_counts?: boolean
   hide_no_sponsor?: boolean
   show_reposts?: boolean
   repeat_kinds?: RepeatKind[]
@@ -169,7 +209,7 @@ function toParams(query: object): URLSearchParams {
 }
 
 export const api = {
-  jobs: (query: JobQuery) => request<{ total: number; total_capped: boolean; related_terms: string[]; items: Job[] }>(`/api/jobs?${toParams(query)}`),
+  jobs: (query: JobQuery) => request<{ total: number; total_capped: boolean; related_terms: string[]; items: Job[]; fresh?: { '1': number; '6': number; '24': number } | null }>(`/api/jobs?${toParams(query)}`),
   job: (id: number) => request<JobDetail>(`/api/jobs/${id}`),
   verify: (id: number) =>
     request<{ open: boolean | null; detail: string; checked_at: string; closed_at: string | null }>(`/api/jobs/${id}/verify`, { method: 'POST' }),

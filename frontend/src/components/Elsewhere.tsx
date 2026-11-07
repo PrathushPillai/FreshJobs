@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Toggle } from './ui'
+import { Toggle, PageHeader } from './ui'
 
 /** Saved by the Feed, so this tab opens with whatever was searched last. */
 export const LAST_QUERY_KEY = 'freshjobs.lastQuery'
@@ -84,29 +84,32 @@ export default function Elsewhere() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="text-lg font-semibold">LinkedIn, hiring posts and other sites</h2>
+      <PageHeader icon="🔗" title="LinkedIn & more">
+        One click to LinkedIn, Indeed, Glassdoor, Google Jobs and X, already filtered to the newest posts for your role.
+      </PageHeader>
+      <div className="rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-4 shadow-sm">
+        <h2 className="font-display text-lg font-bold">LinkedIn, hiring posts and other sites</h2>
         <p className="mt-1 text-sm text-slate-600">
           FreshJobs pulls jobs from company boards, but LinkedIn doesn't allow other sites to collect its listings or posts. These buttons
           open LinkedIn's own search (and other sites') already filtered to the newest results for your role, in your signed-in browser.
           LinkedIn-only jobs found through Google also appear in your Feed (source "Google Jobs").
         </p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role, e.g. data analyst" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-emerald-500" />
-          <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location" className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-emerald-500 sm:w-56" />
+          <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role, e.g. data analyst" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500" />
+          <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location" className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500 sm:w-56" />
           <Toggle label="Posts mentioning visa sponsorship" checked={visa} onChange={setVisa} />
         </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
         {groups(role, location, visa).map((g) => (
-          <section key={g.title} className="rounded-2xl border border-slate-200 bg-white p-4">
+          <section key={g.title} className="rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-4">
             <h3 className="font-semibold">{g.title}</h3>
             <p className="mb-3 mt-0.5 text-xs text-slate-500">{g.note}</p>
             <ul className="space-y-2">
               {g.links.map((l) => (
                 <li key={l.label}>
-                  <a href={l.url} target="_blank" rel="noreferrer" className="block rounded-lg border border-slate-200 px-3 py-2 hover:border-emerald-400 hover:bg-emerald-50">
+                  <a href={l.url} target="_blank" rel="noreferrer" className="block rounded-lg border border-slate-200 px-3 py-2 hover:border-brand-400 hover:bg-brand-50">
                     <span className="text-sm font-medium text-slate-900">{l.label} ↗</span>
                     {l.hint && <span className="block text-xs text-slate-500">{l.hint}</span>}
                   </a>

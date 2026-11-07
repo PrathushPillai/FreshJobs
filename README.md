@@ -47,13 +47,20 @@ LinkedIn, Indeed, Glassdoor and Meta's careers site are never scraped, against t
   - Turn on **Exact title** in the search bar to search only what you typed.
 - **Fresh:** every job shows when it was **posted** and when we first **found** it. Sort by either, or filter by **Date posted** or **Found by us**. The strip above the list shows how many jobs came in during the last hour, 6 hours and 24 hours.
 - **Filters:** Country, State and City pills; experience level; remote. Every pill has a ✕ and a Reset button, and "Reset all" goes back to United States.
-- **Hidden by default:** reposts, the same job on several sites, old jobs re-listed as new, expired jobs (closed jobs are re-checked automatically), and jobs that rule out sponsorship.
+- **Hidden by default:** reposts, the same job on several sites, old jobs re-listed as new, and expired jobs (closed jobs are re-checked automatically).
+- **Shown, but flagged:** jobs that rule out sponsorship or OPT/CPT carry a red badge. Some employers can still be persuaded, so they stay in the feed. **Visa → Hide jobs that rule out sponsorship or OPT/CPT** removes them.
 - **Repeated jobs:** to see them, open **More → Show repeated jobs** and tick the kinds you want:
   - **Repost:** the company posted the same job before.
   - **Duplicate:** the same job is also open on another site.
   - **Resurfaced:** an old job re-listed as new. Its badge shows the original date, such as "Resurfaced · from Sep 30".
   - The job's detail panel explains why it was flagged and links to the original.
 - **H-1B sponsors:** every job shows its employer's certified H-1B filings from Department of Labor data. You can filter to sponsors only or sort by filings.
+- **H-1B for this role:** the job panel shows how many H-1Bs the employer filed for this kind of role, with the median offered salary and the main cities. For example: "1,240 filings as Software Developers · median $148k · mostly in Seattle". It also lists the employer's other sponsored occupations.
+- **OPT, CPT and E-Verify:**
+  - **OPT/CPT welcome:** the posting says F-1 students on OPT, STEM OPT or CPT can apply.
+  - **No OPT/CPT:** the posting rules them out. Like "No sponsorship" jobs, they stay in the feed unless you hide them from the Visa pill.
+  - **E-Verify:** the employer is in USCIS's E-Verify list (or its posting says it uses E-Verify), which a STEM OPT employer must be. **E-Verify ended** means every one of its accounts has been closed. **Visa → Only E-Verify employers** filters to them.
+- **H-1B approvals:** the job panel shows how many H-1B petitions USCIS approved and denied for the employer in FY2024–FY2026, including "new" workers, those new to H-1B as a new grad would be.
 - **Tracker:** save or mark jobs as applied, then move them through each stage, with notes and a contact.
 - **Recruiter finder:** LinkedIn and Google searches for each job's recruiters, plus a Hunter.io email lookup when that key is set.
 - **Email alerts:** one email per check, listing new jobs that match your roles.
@@ -112,14 +119,23 @@ Copy `.env.example` to `.env`, fill it in, and restart the backend.
 
 ## H-1B sponsor data
 
-1. In your browser, download the latest **LCA Disclosure Data** .xlsx from https://www.dol.gov/agencies/eta/foreign-labor/performance. Scripted downloads are blocked.
-2. Save it in `backend/data/h1b/`.
-3. Import it (about 7 minutes), then find job boards for the top sponsors:
-   ```bash
-   cd backend
-   .venv/Scripts/python.exe -m app.h1b import data/h1b/LCA_Disclosure_Data_FY2026_Q3.xlsx
-   .venv/Scripts/python.exe -m app.h1b discover --top 3000
-   ```
+All of these are downloaded in a browser; scripted downloads are blocked.
+
+| Data | Where to get it | Save in |
+|---|---|---|
+| **DOL LCA filings** (H-1B by role and salary) | https://www.dol.gov/agencies/eta/foreign-labor/performance → LCA Programs. Each year's file is cumulative, so take the latest one per fiscal year (e.g. `FY2025_Q4`, `FY2026_Q3`). | `backend/data/h1b/` |
+| **USCIS H-1B approvals and denials** | https://www.uscis.gov/tools/reports-and-studies/h-1b-employer-data-hub → Crosstab View → pick one Fiscal Year → Download → Crosstab → CSV, once per year | `backend/data/uscis_h1b/` |
+| **E-Verify employers** | https://www.e-verify.gov/e-verify-employer-search. Set Date Enrolled to "Last 30 years" and keep Open and Terminated ticked, then Download → Crosstab. The full list is too large, so export one **Industry** at a time. | `backend/data/everify/` |
+
+Then import them (the LCA step takes about 15 minutes):
+```bash
+cd backend
+.venv/Scripts/python.exe -m app.h1b import data/h1b/LCA_Disclosure_Data_FY2025_Q4.xlsx data/h1b/LCA_Disclosure_Data_FY2026_Q3.xlsx
+.venv/Scripts/python.exe -m app.uscis import data/uscis_h1b
+.venv/Scripts/python.exe -m app.everify import data/everify
+.venv/Scripts/python.exe -m app.h1b discover --top 3000     # optional: find job boards for the top sponsors
+```
+Restart the backend afterwards.
 
 ## Adding companies
 

@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy import DateTime as _DateTime
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -58,16 +58,18 @@ class Job(Base):
         Index("ix_jobs_feed_v2", "closed_at", "is_repost", "no_sponsor", "title", "company_name", "first_seen_at",
               "listed_at", "posted_at", "remote", "exp_level", "min_years", "h1b_filings", "role_match"),
         # The feed's two main sorts ("newest found", "most recently posted") read these in order and stop
-        # after a page, instead of sorting every open job (~800k) on each request.
-        Index("ix_jobs_by_found", "closed_at", "is_repost", "no_sponsor", "first_seen_at", "listed_at", "remote",
-              "exp_level", "min_years", "h1b_filings", "role_match"),
+        # after a page, instead of sorting every open job (~800k) on each request. no_sponsor comes after the
+        # sort column: no-sponsorship jobs are shown by default, and with it before the sort column the
+        # walk only worked while they were hidden ("All jobs" took 2.7 s instead of 0.02 s).
+        Index("ix_jobs_by_found_v2", "closed_at", "is_repost", "first_seen_at", "listed_at", "no_sponsor", "remote",
+              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
         Index("ix_jobs_company_described", "company_id", "described", "closed_at"),
         # Keyed by id: a search that starts from its full-text matches checks each job's filters here
         # instead of reading the job's row (whose description comes before these columns).
         Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match"),
-        Index("ix_jobs_by_listed", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
-              "exp_level", "min_years", "h1b_filings", "role_match"),
+        Index("ix_jobs_by_listed_v2", "closed_at", "is_repost", "listed_at", "first_seen_at", "no_sponsor", "remote",
+              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -107,6 +109,12 @@ class Job(Base):
     is_repost: Mapped[bool] = mapped_column(Boolean, default=False)
     repost_of_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"))
     no_sponsor: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the description says about F-1 students (pipeline/sponsorship.student_visa_signal):
+    # "welcome" (OPT/CPT/STEM OPT candidates accepted), "excluded" (OPT/CPT ruled out), or None (not mentioned).
+    student_visa: Mapped[str | None] = mapped_column(String(10))
+    everify_text: Mapped[bool] = mapped_column(Boolean, default=False)  # the description says the employer uses E-Verify
+    # The employer in USCIS's E-Verify list (app/everify.py): "yes" (an account is enrolled), "ended" (all ended), None.
+    everify: Mapped[str | None] = mapped_column(String(8))
     us_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
     role_match: Mapped[bool] = mapped_column(Boolean, default=False)
     seniority: Mapped[str] = mapped_column(String(32), default="unknown")  # from the title: entry | mid | senior | unknown
@@ -225,3 +233,51 @@ class H1BSponsor(Base):
     top_titles: Mapped[list] = mapped_column(JSON, default=list)
     top_states: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(200), default="")  # file it came from
+
+
+class USCISH1B(Base):
+    """An employer's H-1B petition decisions in one fiscal year, from USCIS's H-1B Employer Data Hub (app/uscis.py)."""
+
+    __tablename__ = "uscis_h1b"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    first_token: Mapped[str] = mapped_column(String(100), index=True)
+    name_key: Mapped[str] = mapped_column(String(300))
+    name: Mapped[str] = mapped_column(String(300))
+    fiscal_year: Mapped[int] = mapped_column(Integer)
+    new_approvals: Mapped[int] = mapped_column(Integer, default=0)  # new employment: workers new to H-1B (new grads)
+    new_denials: Mapped[int] = mapped_column(Integer, default=0)
+    approvals: Mapped[int] = mapped_column(Integer, default=0)  # every kind: new, continuing, transfers, amendments
+    denials: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class EVerifyAccount(Base):
+    """One E-Verify account from USCIS's E-Verify Employer Search export (see app/everify.py)."""
+
+    __tablename__ = "everify_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    first_token: Mapped[str] = mapped_column(String(100), index=True)  # name_key's first word, for lookups
+    name_key: Mapped[str] = mapped_column(String(300))  # h1b.name_tokens of the name, space-separated
+    name: Mapped[str] = mapped_column(String(300))  # the enrolled name (or its DBA)
+    open: Mapped[bool] = mapped_column(Boolean)  # enrolled now (status Open and no past termination date)
+    enrolled: Mapped[date | None] = mapped_column(Date)
+    terminated: Mapped[date | None] = mapped_column(Date)
+    workforce: Mapped[str] = mapped_column(String(40), default="")  # "10,000 and over"
+
+
+class H1BRole(Base):
+    """One employer's certified H-1B LCAs for one occupation (SOC code), from the same DOL file."""
+
+    __tablename__ = "h1b_roles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name_key: Mapped[str] = mapped_column(String(300), index=True)  # H1BSponsor.name_key
+    soc_code: Mapped[str] = mapped_column(String(20))  # "15-1252" (detail digits dropped)
+    soc_title: Mapped[str] = mapped_column(String(200))  # "Software Developers"
+    filings: Mapped[int] = mapped_column(Integer)
+    median_wage: Mapped[int | None] = mapped_column(Integer)  # offered wage, annualized USD
+    low_wage: Mapped[int | None] = mapped_column(Integer)  # 25th percentile
+    high_wage: Mapped[int | None] = mapped_column(Integer)  # 75th percentile
+    top_titles: Mapped[list] = mapped_column(JSON, default=list)  # the employer's own job titles, commonest first
+    top_cities: Mapped[list] = mapped_column(JSON, default=list)  # "Seattle, WA"

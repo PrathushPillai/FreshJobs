@@ -2,27 +2,40 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { APP_STATUSES, type AppStatus, type Job, REPEAT_LABELS, STATUS_STYLES, api } from '../api'
 
-export function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+/** A checkbox row drawn as a small switch. */
+export function Toggle({ label, checked, onChange }: { label: ReactNode; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer select-none items-center gap-1.5 text-sm text-slate-700">
-      <input type="checkbox" className="accent-emerald-600" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      {label}
+    <label className="flex cursor-pointer select-none items-center gap-2.5 rounded-lg px-1 py-1 text-sm text-slate-700 hover:bg-slate-50">
+      <span className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${checked ? 'bg-brand-600' : 'bg-slate-300'}`}>
+        <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+      </span>
+      <input type="checkbox" className="sr-only" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>{label}</span>
     </label>
   )
 }
 
 const TONES = {
-  green: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
-  amber: 'bg-amber-50 text-amber-800 ring-amber-200',
-  red: 'bg-red-50 text-red-700 ring-red-200',
-  slate: 'bg-slate-100 text-slate-600 ring-slate-200',
-  blue: 'bg-sky-50 text-sky-700 ring-sky-200',
-  violet: 'bg-violet-50 text-violet-700 ring-violet-200',
+  green: 'bg-emerald-50 text-emerald-700 ring-emerald-200/80',
+  amber: 'bg-amber-50 text-amber-800 ring-amber-200/80',
+  red: 'bg-rose-50 text-rose-700 ring-rose-200/80',
+  slate: 'bg-slate-100 text-slate-600 ring-slate-200/80',
+  blue: 'bg-sky-50 text-sky-700 ring-sky-200/80',
+  violet: 'bg-brand-50 text-brand-700 ring-brand-200/80',
+}
+const DOTS = {
+  green: 'bg-emerald-500',
+  amber: 'bg-amber-500',
+  red: 'bg-rose-500',
+  slate: 'bg-slate-400',
+  blue: 'bg-sky-500',
+  violet: 'bg-brand-500',
 }
 
-export function Badge({ children, tone, title }: { children: ReactNode; tone: keyof typeof TONES; title?: string }) {
+export function Badge({ children, tone, title, dot = false }: { children: ReactNode; tone: keyof typeof TONES; title?: string; dot?: boolean }) {
   return (
-    <span title={title} className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${TONES[tone]}`}>
+    <span title={title} className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${TONES[tone]}`}>
+      {dot && <span className={`h-1.5 w-1.5 rounded-full ${DOTS[tone]}`} aria-hidden />}
       {children}
     </span>
   )
@@ -53,11 +66,32 @@ export function RepeatBadge({ job }: { job: Pick<Job, 'repost_kind' | 'posted_at
   return <Badge tone="amber" title={hint}>{label}{since}</Badge>
 }
 
+/** What the posting itself says about F-1 students (OPT/CPT/STEM OPT) and E-Verify. */
+export function VisaSignalBadges({ job }: { job: Pick<Job, 'student_visa' | 'everify_text' | 'everify'> }) {
+  return (
+    <>
+      {job.student_visa === 'welcome' && (
+        <Badge tone="green" dot title="The posting says candidates on F-1 OPT, STEM OPT or CPT are welcome">OPT/CPT welcome</Badge>
+      )}
+      {job.student_visa === 'excluded' && (
+        <Badge tone="red" dot title="The posting rules out candidates on F-1 OPT, STEM OPT or CPT">No OPT/CPT</Badge>
+      )}
+      {(job.everify === 'yes' || job.everify_text) ? (
+        <Badge tone="blue" dot title="The employer uses E-Verify (USCIS's employer list, or the posting says so), which STEM OPT employers must">
+          E-Verify
+        </Badge>
+      ) : job.everify === 'ended' ? (
+        <Badge tone="amber" dot title="Every E-Verify account of this employer has ended (USCIS's employer list)">E-Verify ended</Badge>
+      ) : null}
+    </>
+  )
+}
+
 export function SponsorBadge({ filings }: { filings: number | null }) {
   if (!filings) return null
   const label = filings >= 1000 ? `${(filings / 1000).toFixed(filings >= 10_000 ? 0 : 1)}k` : String(filings)
   return (
-    <Badge tone="green" title={`${filings.toLocaleString()} certified H-1B filings (US Department of Labor data)`}>
+    <Badge tone="violet" dot title={`${filings.toLocaleString()} certified H-1B filings (US Department of Labor data)`}>
       H-1B · {label}
     </Badge>
   )
@@ -84,7 +118,7 @@ export function TrackControl({ job, compact = false }: { job: Pick<Job, 'id' | '
         value={job.application.status}
         onChange={(e) => update.mutate(e.target.value as AppStatus)}
         onClick={(e) => e.stopPropagation()}
-        className={`rounded-md border-0 py-1 pl-2 pr-6 text-xs font-medium capitalize ${STATUS_STYLES[job.application.status]}`}
+        className={`rounded-full border-0 py-1 pl-3 pr-7 text-xs font-semibold capitalize ${STATUS_STYLES[job.application.status]}`}
         title="Application status"
       >
         {APP_STATUSES.map((s) => (
@@ -95,23 +129,15 @@ export function TrackControl({ job, compact = false }: { job: Pick<Job, 'id' | '
       </select>
     )
   }
+  const secondary = 'rounded-full px-3 py-1.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50 hover:ring-slate-300 disabled:opacity-50'
   return (
-    <div className="flex gap-1">
-      <button
-        onClick={() => track.mutate('applied')}
-        disabled={track.isPending}
-        className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-        title="Add to your tracker as applied"
-      >
-        {compact ? '+ I applied' : 'Mark applied'}
+    <div className="flex gap-1.5">
+      <button onClick={() => track.mutate('applied')} disabled={track.isPending} className={secondary} title="Add to your tracker as applied">
+        {compact ? '+ Applied' : '✓ Mark applied'}
       </button>
       {!compact && (
-        <button
-          onClick={() => track.mutate('saved')}
-          disabled={track.isPending}
-          className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-        >
-          Save for later
+        <button onClick={() => track.mutate('saved')} disabled={track.isPending} className={secondary}>
+          ☆ Save for later
         </button>
       )}
     </div>
@@ -122,7 +148,14 @@ export function TrackControl({ job, compact = false }: { job: Pick<Job, 'id' | '
  * With onClear, an active pill shows a ✕ (and the panel a "Clear" link) that resets just this filter. */
 export function FilterPill({ label, active, onClear, children }: { label: ReactNode; active?: boolean; onClear?: () => void; children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  // Pills on the right half open their panel leftwards, so it never runs off the screen.
+  const [alignRight, setAlignRight] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const toggle = () => {
+    const box = ref.current?.getBoundingClientRect()
+    if (box) setAlignRight(box.left > window.innerWidth / 2)
+    setOpen(!open)
+  }
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false)
@@ -138,13 +171,21 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
   return (
     <div ref={ref} className="relative">
       <div
-        className={`flex items-center overflow-hidden whitespace-nowrap rounded-full border text-sm font-medium transition ${
-          active ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 bg-white text-slate-700'
+        className={`flex items-center overflow-hidden whitespace-nowrap rounded-full text-sm font-medium shadow-sm transition ${
+          active
+            ? 'bg-gradient-to-r from-brand-600 to-violet-600 text-white shadow-brand-600/25'
+            : open
+              ? 'bg-white text-slate-900 ring-2 ring-brand-300'
+              : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:ring-slate-300'
         }`}
       >
-        <button onClick={() => setOpen(!open)} className={`flex items-center gap-1 py-1.5 pl-3 ${clearable ? 'pr-1.5' : 'pr-3'} ${active ? 'hover:bg-emerald-700' : 'hover:bg-slate-100'}`}>
+        <button onClick={toggle} className={`flex items-center gap-1.5 py-1.5 pl-3.5 ${clearable ? 'pr-1.5' : 'pr-3'} ${active ? 'hover:bg-white/10' : 'hover:bg-slate-50'}`}>
           {label}
-          {!clearable && <span className="text-[10px] opacity-70">▾</span>}
+          {!clearable && (
+            <svg viewBox="0 0 20 20" className={`h-3.5 w-3.5 opacity-60 transition ${open ? 'rotate-180' : ''}`} fill="currentColor" aria-hidden>
+              <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.06l3.71-3.83a.75.75 0 1 1 1.08 1.04l-4.25 4.39a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06Z" clipRule="evenodd" />
+            </svg>
+          )}
         </button>
         {clearable && (
           <button
@@ -152,7 +193,7 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
               onClear()
               setOpen(false)
             }}
-            className="py-1.5 pl-1 pr-2.5 hover:bg-emerald-700"
+            className="py-1.5 pl-1 pr-3 hover:bg-white/10"
             aria-label="Clear this filter"
             title="Clear this filter"
           >
@@ -161,7 +202,11 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
         )}
       </div>
       {open && (
-        <div className="absolute left-0 z-30 mt-2 w-max min-w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-200 bg-white p-3 shadow-lg">
+        <div
+          className={`absolute z-30 mt-2 w-max min-w-60 max-w-[min(24rem,calc(100vw-2rem))] animate-rise rounded-2xl bg-white p-3 shadow-2xl shadow-slate-900/15 ring-1 ring-slate-200 ${
+            alignRight ? 'right-0' : 'left-0'
+          }`}
+        >
           {children}
           {onClear && (
             // Always there, so every filter can be put back to its default from its own menu.
@@ -172,7 +217,7 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
                   onClear()
                   setOpen(false)
                 }}
-                className="rounded-full border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+                className="rounded-full px-3 py-1 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-default disabled:text-slate-400 disabled:hover:bg-transparent"
               >
                 Reset
               </button>
@@ -189,15 +234,27 @@ export function Choice({ selected, onClick, children }: { selected: boolean; onC
   return (
     <button
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${selected ? 'bg-emerald-50 font-medium text-emerald-800' : 'text-slate-700 hover:bg-slate-100'}`}
+      className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition ${selected ? 'bg-brand-50 font-semibold text-brand-800' : 'text-slate-700 hover:bg-slate-50'}`}
     >
-      <span className={`h-3.5 w-3.5 shrink-0 rounded-full border ${selected ? 'border-4 border-emerald-600' : 'border-slate-300'}`} />
+      <span className={`h-4 w-4 shrink-0 rounded-full border-2 transition ${selected ? 'border-[5px] border-brand-600' : 'border-slate-300'}`} />
       {children}
     </button>
   )
 }
 
-const AVATAR_COLORS = ['bg-sky-600', 'bg-violet-600', 'bg-emerald-600', 'bg-amber-600', 'bg-rose-600', 'bg-indigo-600', 'bg-teal-600', 'bg-fuchsia-600']
+// Two-tone gradients for company initials, picked from the name so a company keeps its colour.
+const AVATAR_GRADIENTS = [
+  'from-sky-500 to-indigo-600',
+  'from-violet-500 to-fuchsia-600',
+  'from-emerald-500 to-teal-600',
+  'from-amber-400 to-orange-600',
+  'from-rose-500 to-pink-600',
+  'from-indigo-500 to-brand-700',
+  'from-teal-400 to-cyan-600',
+  'from-fuchsia-500 to-purple-700',
+  'from-lime-500 to-emerald-600',
+  'from-orange-400 to-rose-600',
+]
 
 /** Company initials on a colour picked from the name, standing in for a logo. */
 export function CompanyAvatar({ name, size = 'md' }: { name: string; size?: 'md' | 'lg' }) {
@@ -205,7 +262,29 @@ export function CompanyAvatar({ name, size = 'md' }: { name: string; size?: 'md'
   const initials = (words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? '?').slice(0, 2)).toUpperCase()
   let hash = 0
   for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) | 0
-  const color = AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
-  const box = size === 'lg' ? 'h-14 w-14 text-lg rounded-xl' : 'h-11 w-11 text-sm rounded-lg'
-  return <div className={`flex shrink-0 items-center justify-center font-semibold text-white ${color} ${box}`}>{initials}</div>
+  const gradient = AVATAR_GRADIENTS[Math.abs(hash) % AVATAR_GRADIENTS.length]
+  const box = size === 'lg' ? 'h-16 w-16 text-xl rounded-2xl' : 'h-12 w-12 text-sm rounded-xl'
+  return (
+    <div className={`flex shrink-0 items-center justify-center bg-gradient-to-br font-display font-bold text-white shadow-md shadow-slate-900/10 ring-1 ring-white/40 ${gradient} ${box}`}>
+      {initials}
+    </div>
+  )
+}
+
+/** The violet band at the top of each tab other than the Feed. */
+export function PageHeader({ icon, title, children }: { icon: string; title: string; children?: ReactNode }) {
+  return (
+    <section className="hero relative overflow-hidden rounded-3xl px-6 py-6 text-white shadow-xl shadow-brand-950/20 sm:px-8">
+      <div className="hero-grid pointer-events-none absolute inset-0" aria-hidden />
+      <div className="relative flex items-start gap-4">
+        <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-2xl ring-1 ring-white/20" aria-hidden>
+          {icon}
+        </span>
+        <div>
+          <h2 className="font-display text-2xl font-extrabold tracking-tight sm:text-3xl">{title}</h2>
+          {children && <p className="mt-1 max-w-3xl text-sm text-brand-100/80">{children}</p>}
+        </div>
+      </div>
+    </section>
+  )
 }

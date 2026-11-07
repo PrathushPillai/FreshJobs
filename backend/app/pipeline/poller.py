@@ -29,7 +29,8 @@ from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
 from app.pipeline.normalize import company_key, experience_level, experience_years, listed_window, seniority
-from app.pipeline.sponsorship import find_no_sponsor_phrase
+from app.everify import status_for as everify_status
+from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, student_visa_signal
 from app.prefs import get_prefs, sync_companies
 from app.sources import ADAPTERS, NormalizedJob
 
@@ -50,7 +51,11 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.exp_level = experience_level(job.min_years, job.seniority)
     job.role_match = role_matches(job.title, prefs.include_keywords, prefs.exclude_keywords)
     job.us_eligible = is_us_location(job.location, job.remote)
-    job.no_sponsor = find_no_sponsor_phrase(job.description) is not None
+    job.student_visa = student_visa_signal(job.description)
+    # Ruling out OPT/CPT ("not eligible for visa sponsorship (H1B, OPT/CPT)") rules out an F-1 student too.
+    job.no_sponsor = find_no_sponsor_phrase(job.description) is not None or job.student_visa == "excluded"
+    job.everify_text = mentions_everify(job.description)
+    job.everify = everify_status(session, job.company_name or "")
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
@@ -83,6 +88,31 @@ def refresh_role_match(include: list[str], exclude: list[str], batch: int = 50_0
                 session.execute(text("UPDATE jobs SET role_match = :m WHERE id = :i"), updates)
                 session.commit()
                 changed += len(updates)
+
+
+def refresh_role_match_for(terms: list[str], include: list[str], exclude: list[str], batch: int = 5_000) -> int | None:
+    """Recheck role_match only for jobs whose title contains one of `terms` (role keywords just added or removed).
+
+    Every other job's answer can't change, so this finds the candidates through the title index (jobs_fts)
+    and takes a second or two where refresh_role_match reads all 1.7M titles (about a minute). Returns how
+    many changed, or None when there's no title index (not SQLite) and the full refresh is needed instead.
+    """
+    from app.db import is_sqlite
+    from app.pipeline.search import fts_any_term
+
+    match = fts_any_term([t for t in terms if t.strip()])
+    if not is_sqlite or not match:
+        return None
+    with SessionLocal() as session:
+        rows = session.execute(
+            text("SELECT id, title, role_match FROM jobs WHERE id IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :m)"),
+            {"m": match},
+        ).all()
+        updates = [{"i": i, "m": m} for i, t, old in rows if (m := role_matches(t or "", include, exclude)) != bool(old)]
+        for start in range(0, len(updates), batch):
+            session.execute(text("UPDATE jobs SET role_match = :m WHERE id = :i"), updates[start : start + batch])
+            session.commit()
+    return len(updates)
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
