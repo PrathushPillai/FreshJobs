@@ -133,7 +133,7 @@ export default function Tracker() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
-                <th className="px-3 py-2">Job</th>
+                <th className="min-w-64 px-3 py-2">Job</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Applied</th>
                 <th className="px-3 py-2">Contact</th>

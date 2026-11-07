@@ -13,19 +13,23 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import and_, case, exists, func, or_, select, text, true
+from sqlalchemy import Integer, and_, case, column, exists, func, or_, select, text, true
 from sqlalchemy.orm import Session, defer, selectinload
 
 from app.config import settings
 from app.db import SessionLocal, engine, get_session, init_db, is_sqlite
 from app.everify import lookup as everify_lookup
+from app.logos import logo_domain
 from app.uscis import lookup as uscis_lookup
 from app.h1b import role_history, sponsor_index
 from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobEvent, JobLocation
-from app.notify.email import email_configured
+from app.notify.email import email_configured, email_mode, send_test
 from app.pipeline.detect import detect_from_page
 from app.pipeline import liveness
-from app.pipeline.poller import USER_AGENT, backfill, poll_once, refresh_role_match, refresh_role_match_for
+from app.pipeline.describe import fetch_description
+from app.pipeline.poller import (
+    MIN_DESCRIPTION_CHARS, USER_AGENT, apply_flags, backfill, poll_once, refresh_role_match, refresh_role_match_for,
+)
 from app.pipeline.search import distinct_roles, expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
 from app.recruiters import hunter_configured, hunter_lookup, search_links
@@ -94,6 +98,8 @@ async def lifespan(app: FastAPI):
             include, exclude = list(p.include_keywords), list(p.exclude_keywords)
         threading.Thread(target=refresh_role_match, args=(include, exclude), daemon=True).start()  # rules may have changed
         threading.Thread(target=_warm_suggestions, daemon=True).start()  # the "Your roles" bar's counts
+        _open_counts_lock.acquire()
+        threading.Thread(target=_recount_open_jobs, daemon=True).start()  # the Sources page's counts
         first_run = datetime.now() if settings.poll_on_startup else None
         for lane in LANES:
             scheduler.add_job(run_poll, "interval", args=[lane], minutes=settings.poll_minutes,
@@ -119,7 +125,7 @@ async def _cache_job_lists(request: Request, call_next):
     if request.method != "GET":
         # Opening a job checks its apply page (POST .../verify) every time: that mustn't empty the cache. A job
         # it finds closed drops out of cached pages at the next poll.
-        if request.url.path.startswith("/api/") and not request.url.path.endswith("/verify"):
+        if request.url.path.startswith("/api/") and not request.url.path.endswith(("/verify", "/describe")):
             _jobs_cache.clear()
         return await call_next(request)
     if request.url.path != "/api/jobs":
@@ -175,6 +181,7 @@ class JobOut(BaseModel):
     student_visa: str | None  # "welcome" / "excluded": what the description says about OPT/CPT (F-1)
     everify_text: bool  # the description says the employer uses E-Verify
     everify: str | None  # the employer in USCIS's E-Verify list: "yes" (enrolled), "ended", None (not found)
+    logo_domain: str | None  # the employer's website, for its logo (app/logos.py); None shows initials
     seniority: str
     min_years: int | None
     exp_level: str
@@ -350,13 +357,14 @@ def _repeat_kinds(session: Session, jobs: list[Job]) -> dict[int, str]:
 
 
 def _job_out(job: Job, repeat_kind: str | None = None) -> dict:
-    skip = ("company", "source", "places", "application", "repost_kind")
+    skip = ("company", "source", "places", "application", "repost_kind", "logo_domain")
     data = {k: getattr(job, k) for k in JobOut.model_fields if k not in skip}
     if job.is_repost:  # jobs flagged before kinds were recorded: no original means resurfaced
         data["repost_kind"] = repeat_kind or ("repost" if job.repost_of_id else "resurfaced")
     else:
         data["repost_kind"] = None
     data["company"] = job.company_name or job.company.name
+    data["logo_domain"] = logo_domain(job.url or "", job.company.ats, job.company.slug, data["company"])
     data["source"] = job.company.ats
     data["exp_level"] = job.exp_level or "unknown"
     data["places"] = [{"city": p.city, "state": p.state, "country": p.country} for p in job.places]
@@ -384,7 +392,9 @@ def _has_all_words(q: str):
 
 def _fts(name: str, match: str):
     """jobs whose title/company FTS5 entry matches (db._ensure_title_search keeps jobs_fts in sync)."""
-    return and_(text(f"jobs.id IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :{name})").bindparams(**{name: match}))
+    # A real IN expression (not raw SQL), so a search's ranking tiers can negate it ("typed but not the phrase").
+    matches = text(f"SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :{name}").bindparams(**{name: match})
+    return Job.id.in_(matches.columns(column("rowid", Integer)))
 
 
 FTS_FIRST_MAX = 20_000
@@ -437,9 +447,14 @@ def list_jobs(
     offset: int = 0,
     fresh_counts: bool = False,  # instead of a page: how many matches were posted in the last 1, 6, 24 hours
 ):
+    if q.strip() and not re.search(r"\w", q):
+        # Only symbols ("*&^%"): nothing a title can match. The LIKE fallback scanned every job (17 s).
+        return {"total": 0, "total_capped": False, "related_terms": [], "items": [], "fresh": {"1": 0, "6": 0, "24": 0} if fresh_counts else None}
     # Title search first: how many jobs it matches decides the query plan (below).
     related_terms: list[str] = []
-    relevance = search_clause = None
+    search_clause = None
+    tiers: list = []  # a search's ranking groups, best first (see the paging below)
+    tier_matches: list = []  # each tier's FTS match string (SQLite), to size it
     fts_first = False
     if q.strip():
         # related=true (the Feed's default) searches every related role except the ones the user
@@ -460,76 +475,91 @@ def list_jobs(
             fts_first = matches <= FTS_FIRST_MAX
         # The exact phrase first ("Data Analyst II"), then every word in any order ("Analyst, Data"),
         # then related roles; each group in the chosen sort.
-        relevance = case((phrase, 0), (typed, 1), else_=2)
+        # Each tier stands alone (it implies the search), so a narrow tier can be its own starting point.
+        tiers = [phrase, and_(typed, ~phrase)] + ([and_(related_match, ~typed, ~phrase)] if related_match is not None else [])
+        if combined is not None:
+            # Each tier's full-text match (a superset of it), to pick the tier's plan: a rare exact phrase
+            # ("backend engineer python") walked every open job looking for 50 of them (4-5 s).
+            tier_matches = [fts_any_term([q]), f"({fts_all_words(q)}) OR ({fts_company(q)})", fts_any_term(chosen)]
 
-    def flag(column: str, clause):
-        """A status filter; written as "+jobs.col" when the plan starts from the search matches, so SQLite
-        doesn't pick the open-jobs index for it instead."""
-        return text(f"+jobs.{column}") if fts_first else clause
-
-    stmt = select(Job)
-    if status == "open":
-        stmt = stmt.where(text("+jobs.closed_at IS NULL") if fts_first else Job.closed_at.is_(None))
-    elif status == "closed":
-        stmt = stmt.where(Job.closed_at.is_not(None))
-    shown_kinds = [k for k in repeat_kinds if k in REPEAT_KINDS]
-    if not show_reposts:
-        stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
-    elif shown_kinds and len(set(shown_kinds)) < len(REPEAT_KINDS):
-        stmt = stmt.where(or_(
-            Job.is_repost.is_(False),
-            select(JobEvent.id).where(JobEvent.job_id == Job.id, JobEvent.kind.in_(shown_kinds)).exists(),
-        ))
-    if hide_no_sponsor:
-        stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
-    if alert_roles_only:
-        stmt = stmt.where(Job.role_match.is_(True))
-    if remote_only:
-        stmt = stmt.where(Job.remote.is_(True))
-    if sponsors_only:
-        stmt = stmt.where(Job.h1b_filings > 0)
-    if everify_only:
-        stmt = stmt.where(or_(Job.everify == "yes", Job.everify_text.is_(True)))
-    if since_hours:
-        stmt = stmt.where(Job.first_seen_at >= datetime.now(timezone.utc) - timedelta(hours=since_hours))
     if fresh_counts:
         posted_within_hours = 24  # the strip's widest window; the 1 h and 6 h counts are taken inside it
-    if posted_within_hours:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=posted_within_hours)
-        stmt = stmt.where(Job.listed_at >= cutoff)  # undated jobs can't qualify
-    if company_id:
-        stmt = stmt.where(Job.company_id == company_id)
 
-    if search_clause is not None:
-        stmt = stmt.where(search_clause)
+    def build(fts_first: bool, with_search: bool = True):
+        """The filtered query. With fts_first, status filters are written so SQLite starts from the search's
+        full-text matches instead of walking the open-jobs index (see FTS_FIRST_MAX)."""
 
-    if countries or states or cities:
-        place = []
-        if countries:
-            place.append(JobLocation.country.in_(countries))
-        if states:
-            place.append(JobLocation.state.in_(states))
-        if cities:
-            place.append(JobLocation.city.in_(cities))
-        # A state or city matches few jobs: look those up first (Boston: 15 s -> 0.5 s). A country matches
-        # most, so check each job as the feed's index walks them, and stop after a page.
-        in_place = (Job.id.in_(select(JobLocation.job_id).where(*place)) if states or cities
-                    else exists().where(JobLocation.job_id == Job.id, *place))
-        if include_unplaced_remote and not (states or cities):
-            # "Remote" with no stated country: keep it, the country may still fit.
-            unplaced_remote = and_(Job.remote.is_(True), ~exists().where(JobLocation.job_id == Job.id))
-            stmt = stmt.where(or_(in_place, unplaced_remote))
-        else:
-            stmt = stmt.where(in_place)
+        def flag(column: str, clause):
+            """A status filter; written as "+jobs.col" when the plan starts from the search matches, so SQLite
+            doesn't pick the open-jobs index for it instead."""
+            return text(f"+jobs.{column}") if fts_first else clause
 
-    if exp_levels:
-        stmt = stmt.where(Job.exp_level.in_(exp_levels))
-    if max_years is not None:
-        stmt = stmt.where(or_(Job.min_years <= max_years, Job.min_years.is_(None)))
+        stmt = select(Job)
+        if status == "open":
+            stmt = stmt.where(text("+jobs.closed_at IS NULL") if fts_first else Job.closed_at.is_(None))
+        elif status == "closed":
+            stmt = stmt.where(Job.closed_at.is_not(None))
+        shown_kinds = [k for k in repeat_kinds if k in REPEAT_KINDS]
+        if not show_reposts:
+            stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
+        elif shown_kinds and len(set(shown_kinds)) < len(REPEAT_KINDS):
+            stmt = stmt.where(or_(
+                Job.is_repost.is_(False),
+                Job.id.in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))),
+            ))
+        if hide_no_sponsor:
+            stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
+        if alert_roles_only:
+            stmt = stmt.where(Job.role_match.is_(True))
+        if remote_only:
+            stmt = stmt.where(Job.remote.is_(True))
+        if sponsors_only:
+            stmt = stmt.where(Job.h1b_filings > 0)
+        if everify_only:
+            stmt = stmt.where(or_(Job.everify == "yes", Job.everify_text.is_(True)))
+        if since_hours:
+            stmt = stmt.where(Job.first_seen_at >= datetime.now(timezone.utc) - timedelta(hours=since_hours))
+        if posted_within_hours:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=posted_within_hours)
+            stmt = stmt.where(Job.listed_at >= cutoff)  # undated jobs can't qualify
+        if company_id:
+            stmt = stmt.where(Job.company_id == company_id)
 
-    if tracked != "any":
-        has_app = exists().where(Application.job_id == Job.id)
-        stmt = stmt.where(has_app if tracked == "tracked" else ~has_app)
+        if search_clause is not None and with_search:
+            stmt = stmt.where(search_clause)
+
+        if countries or states or cities:
+            place = []
+            if countries:
+                place.append(JobLocation.country.in_(countries))
+            if states:
+                place.append(JobLocation.state.in_(states))
+            if cities:
+                place.append(JobLocation.city.in_(cities))
+            # A state or city matches few jobs: look those up first (Boston: 15 s -> 0.5 s). A country matches
+            # most, so check each job as the feed's index walks them, and stop after a page.
+            in_place = (Job.id.in_(select(JobLocation.job_id).where(*place)) if states or cities
+                        else exists().where(JobLocation.job_id == Job.id, *place))
+            if include_unplaced_remote and not (states or cities):
+                # "Remote" with no stated country: keep it, the country may still fit.
+                unplaced_remote = and_(Job.remote.is_(True), ~exists().where(JobLocation.job_id == Job.id))
+                stmt = stmt.where(or_(in_place, unplaced_remote))
+            else:
+                stmt = stmt.where(in_place)
+
+        if exp_levels:
+            stmt = stmt.where(Job.exp_level.in_(exp_levels))
+        if max_years is not None:
+            stmt = stmt.where(or_(Job.min_years <= max_years, Job.min_years.is_(None)))
+
+        if tracked != "any":
+            if tracked == "tracked":  # the tracker's few jobs: an IN, not an EXISTS on every open job (5.6 s)
+                stmt = stmt.where(Job.id.in_(select(Application.job_id).where(Application.job_id.is_not(None))))
+            else:
+                stmt = stmt.where(~exists().where(Application.job_id == Job.id))
+        return stmt
+
+    stmt = build(fts_first)
 
     # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
     # (descriptions), then load just the page's jobs. Selecting full rows made a search take ~6 s.
@@ -544,7 +574,7 @@ def list_jobs(
             func.coalesce(func.sum(case((newest.c.listed_at >= now - timedelta(hours=1), 1), else_=0)), 0),
         )).one()
         return {"total": min(day, COUNT_CAP), "total_capped": day > COUNT_CAP, "related_terms": related_terms,
-                "items": [], "fresh": {"1": hour, "6": six, "24": min(day, COUNT_CAP)}}
+                "items": [], "fresh": {"1": min(hour, COUNT_CAP), "6": min(six, COUNT_CAP), "24": min(day, COUNT_CAP)}}
     # Counting every match of a broad query (800k open jobs) takes seconds, so stop at COUNT_CAP ("2,000+").
     total = session.scalar(select(func.count()).select_from(ids.limit(COUNT_CAP + 1).subquery()))
     order = {
@@ -552,11 +582,35 @@ def list_jobs(
         # listed_at is set whenever the source gives a date; undated jobs (NULL) sort last in DESC order.
         "posted": (Job.listed_at.desc(), Job.id.desc()),
         "company": (Job.company_name, Job.first_seen_at.desc()),
-        "sponsor": (func.coalesce(Job.h1b_filings, 0).desc(), Job.first_seen_at.desc()),
+        # Plain DESC so ix_jobs_by_sponsor can serve it; SQLite sorts NULL (no filings) last in DESC order.
+        "sponsor": (Job.h1b_filings.desc(), Job.first_seen_at.desc()),
     }[sort]
-    if relevance is not None:
-        order = (relevance, *order)
-    page_ids = list(session.scalars(ids.order_by(*order).limit(limit).offset(offset)))
+    if not tiers:
+        page_ids = list(session.scalars(ids.order_by(*order).limit(limit).offset(offset)))
+    else:
+        # Ranked search: exact phrase, then every word, then related roles, each in the chosen sort. Ranking
+        # every match before taking a page sorted tens of thousands of rows ("software engineer" 7-14 s), so
+        # the page is filled tier by tier instead, each tier walking the sort index and stopping when full.
+        page_ids, to_skip, wanted = [], offset, limit
+        for i, tier in enumerate(tiers):
+            tier_ids = ids.where(tier)
+            if tier_matches and not fts_first and tier_matches[i]:
+                few = session.scalar(text("SELECT count(*) FROM (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH :m LIMIT :cap)"),
+                                     {"m": tier_matches[i], "cap": FTS_FIRST_MAX + 1}) <= FTS_FIRST_MAX
+                if few:  # start this tier from its own matches, like a narrow search
+                    # Without the whole search's (broad) match set, so SQLite starts from this tier's few.
+                    tier_ids = build(True, with_search=False).with_only_columns(Job.id).where(tier)
+            if to_skip:
+                in_tier = session.scalar(select(func.count()).select_from(tier_ids.limit(to_skip).subquery()))
+                if in_tier < to_skip:
+                    to_skip -= in_tier
+                    continue
+            got = list(session.scalars(tier_ids.order_by(*order).limit(wanted).offset(to_skip)))
+            page_ids += got
+            wanted -= len(got)
+            to_skip = 0
+            if not wanted:
+                break
     loaded = {
         j.id: j
         for j in session.scalars(
@@ -645,6 +699,37 @@ def _company_and_title(job_id: int) -> tuple[str, str]:
     with SessionLocal() as session:
         job = _job_or_404(session, job_id)
         return job.company_name or job.company.name, job.title
+
+
+def _description_state(job_id: int) -> tuple[str, bool]:
+    with SessionLocal() as session:
+        job = _job_or_404(session, job_id)
+        return job.url or "", len((job.description or "").strip()) >= MIN_DESCRIPTION_CHARS
+
+
+def _save_description(job_id: int, text: str) -> dict:
+    with SessionLocal() as session:
+        job = _job_or_404(session, job_id)
+        if len(text.strip()) > len((job.description or "").strip()):
+            job.description = text
+            with session.no_autoflush:
+                apply_flags(session, job, get_prefs(session))  # sponsorship, OPT, E-Verify, experience
+            session.commit()
+        return {"description": job.description, "fetched": True}
+
+
+@app.post("/api/jobs/{job_id}/describe")
+async def describe_job(job_id: int):
+    """Fetch a job's description from its source now, when it was saved without one (pipeline/describe.py).
+    The Feed calls it on opening such a job; database work runs in threads (see verify_job)."""
+    url, has_one = await asyncio.to_thread(_description_state, job_id)
+    if has_one:
+        return {"description": None, "fetched": False}
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        text = await fetch_description(client, url)
+    if not text:
+        return {"description": None, "fetched": False}
+    return await asyncio.to_thread(_save_description, job_id, text)
 
 
 @app.get("/api/jobs/{job_id}/recruiters")
@@ -790,12 +875,56 @@ def delete_application(app_id: int, session: Session = Depends(get_session)):
 
 # ---------- sources, prefs, status ----------
 
+_open_counts: dict = {}  # "at" (monotonic seconds) and "counts" (company id -> open jobs)
+
+
+def _open_jobs_per_company(session: Session) -> dict[int, int]:
+    """Open jobs per source: counted at startup, then recounted in the background when 5 minutes old.
+
+    Forced onto ix_jobs_company_described (company_id, described, closed_at), which covers it: left to
+    itself SQLite took the open-jobs index, read company_id from every job's row and took 97 s, so the
+    Sources page never loaded. With the covering index it's ~5 s cold and 0.2 s warm.
+    """
+    if _open_counts:
+        if time.monotonic() - _open_counts["at"] >= 300 and _open_counts_lock.acquire(blocking=False):
+            # Stale: answer with the old counts and recount in the background (5 s cold).
+            threading.Thread(target=_recount_open_jobs, daemon=True).start()
+        return _open_counts["counts"]
+    return _count_open_jobs(session)
+
+
+_open_counts_lock = threading.Lock()
+
+
+def _recount_open_jobs() -> None:
+    try:
+        with SessionLocal() as session:
+            _count_open_jobs(session)
+    except Exception:
+        log.warning("Counting open jobs per source failed", exc_info=True)
+    finally:
+        if _open_counts_lock.locked():
+            _open_counts_lock.release()
+
+
+def _count_open_jobs(session: Session) -> dict[int, int]:
+    sql = ("SELECT company_id, count(*) FROM jobs INDEXED BY ix_jobs_company_described WHERE closed_at IS NULL GROUP BY company_id"
+           if is_sqlite else "SELECT company_id, count(*) FROM jobs WHERE closed_at IS NULL GROUP BY company_id")
+    _open_counts.update(at=time.monotonic(), counts=dict(session.execute(text(sql)).all()))
+    return _open_counts["counts"]
+
+
 @app.get("/api/companies", response_model=list[CompanyOut])
-def list_companies(session: Session = Depends(get_session)):
-    counts = dict(
-        session.execute(select(Job.company_id, func.count()).where(Job.closed_at.is_(None)).group_by(Job.company_id)).all()
-    )
-    return [_company_out(c, counts.get(c.id, 0)) for c in session.scalars(select(Company).order_by(Company.name))]
+def list_companies(q: str = "", limit: int = Query(200, ge=1, le=50_000), session: Session = Depends(get_session)):
+    """Sources with the most open jobs first; `q` filters by name, slug or ATS. All 25k sources at once was a
+    4.7 MB answer and a table too long for the browser to draw quickly, so the Sources page asks for 200."""
+    counts = _open_jobs_per_company(session)
+    stmt = select(Company)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Company.name.ilike(like), Company.slug.ilike(like), Company.ats == q.strip().lower()))
+    rows = sorted(session.scalars(stmt), key=lambda c: (-counts.get(c.id, 0), c.name.lower()))
+    return [_company_out(c, counts.get(c.id, 0)) for c in rows[:limit]]
 
 
 @app.post("/api/companies", response_model=CompanyOut, status_code=201)
@@ -836,7 +965,7 @@ async def add_company_from_url(body: CareersUrlIn, session: Session = Depends(ge
     ats, slug = found
     existing = session.scalar(select(Company).where(Company.ats == ats, Company.slug == slug))
     if existing:
-        return {"added": False, "company": _company_out(existing, 0)}
+        return {"added": False, "company": _company_out(existing, _open_jobs_per_company(session).get(existing.id, 0))}
     name = body.name.strip() or _guess_name(url, slug)
     company = Company(name=name, ats=ats, slug=slug)
     session.add(company)
@@ -953,6 +1082,13 @@ def _compute_suggestions(session: Session, picked: set[str]) -> list[dict]:
     return suggestions
 
 
+@app.post("/api/alerts/test")
+def test_alert_email():
+    """Send a test email to the alert address, so the user can confirm alerts reach their inbox."""
+    sent, detail = send_test()
+    return {"sent": sent, "detail": detail, "mode": email_mode()}
+
+
 @app.post("/api/poll")
 def trigger_poll():
     # "Check now" refreshes the fast lane; the slow lane keeps its own schedule.
@@ -991,6 +1127,7 @@ def status(session: Session = Depends(get_session)):
         "last_poll": _last_poll.get("fast"),
         "last_slow_poll": _last_poll.get("slow"),
         "email_configured": email_configured(),
+        "email_mode": email_mode(),  # "off", "test" (local test server, nothing delivered) or "on"
         "hunter_configured": hunter_configured(),
         "adzuna_configured": "adzuna" in ADAPTERS and ADAPTERS["adzuna"].is_configured(),
         "companies": counts["companies"],

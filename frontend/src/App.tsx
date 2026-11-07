@@ -65,7 +65,10 @@ export default function App() {
             {TABS.map((t) => (
               <button
                 key={t}
-                onClick={() => setTab(t)}
+                onClick={() => {
+                  setTab(t)
+                  window.scrollTo(0, 0)
+                }}
                 className={`flex items-center whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm font-semibold transition ${
                   tab === t ? 'bg-white text-ink shadow' : 'text-slate-300 hover:bg-white/10 hover:text-white'
                 }`}

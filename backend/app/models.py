@@ -45,6 +45,7 @@ class Company(Base):
     last_status: Mapped[str | None] = mapped_column(String(300))  # "ok (42 jobs)" or the error
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # last successful fetch
     poll_count: Mapped[int] = mapped_column(Integer, default=0)
+    fail_streak: Mapped[int] = mapped_column(Integer, default=0)  # failed polls in a row (poller.DEAD_BOARD_FAILS)
 
     jobs: Mapped[list["Job"]] = relationship(back_populates="company")
 
@@ -68,6 +69,11 @@ class Job(Base):
         # instead of reading the job's row (whose description comes before these columns).
         Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match"),
+        # "Company A-Z" and "Most H-1B filings" sorts (each was a sort of every open job: 21 s and 4 s).
+        Index("ix_jobs_by_company", "closed_at", "is_repost", "company_name", "first_seen_at", "listed_at", "no_sponsor",
+              "remote", "exp_level", "min_years", "h1b_filings", "role_match"),
+        Index("ix_jobs_by_sponsor", "closed_at", "is_repost", "h1b_filings", "first_seen_at", "listed_at", "no_sponsor",
+              "remote", "exp_level", "min_years", "role_match"),
         Index("ix_jobs_by_listed_v2", "closed_at", "is_repost", "listed_at", "first_seen_at", "no_sponsor", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
     )

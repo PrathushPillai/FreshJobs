@@ -26,6 +26,7 @@ def session():
     main._jobs_cache.clear()  # cached /api/jobs pages and header counts would outlive the test's data
     main._status_counts.clear()
     main._suggestion_cache.clear()
+    main._open_counts.clear()
     with db.SessionLocal() as s:
         yield s
 

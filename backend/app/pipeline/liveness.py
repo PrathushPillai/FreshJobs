@@ -37,6 +37,15 @@ _CLOSED = re.compile(
     re.I,
 )
 _LOCALE = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
+_HIDDEN = re.compile(r"<(script|style|noscript|template)\b.*?</\1\s*>", re.I | re.S)
+_TAG = re.compile(r"<[^>]+>")
+
+
+def visible_text(html: str) -> str:
+    """The page's text without scripts, styles and tags. Many job sites ship every message they might show
+    as data in a script ("Sorry, this role does not exist or is no longer available"), so matching the raw
+    HTML closed open jobs: every Apple job opened in the UI was marked closed."""
+    return _TAG.sub(" ", _HIDDEN.sub(" ", html))
 
 
 def _workday_api(url: str) -> str | None:
@@ -71,7 +80,7 @@ async def check(client: httpx.AsyncClient, url: str) -> tuple[bool | None, str]:
         return None, f"HTTP {r.status_code}"
     if "error=true" in str(r.url):
         return False, "apply page redirects to an error"
-    m = _CLOSED.search(r.text[:300_000])
+    m = _CLOSED.search(visible_text(r.text[:600_000]))
     if m:
         return False, f'apply page says "{m.group(0)}"'
     return True, "open"

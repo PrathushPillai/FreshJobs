@@ -22,7 +22,9 @@ function Integration({ name, ok, hint }: { name: string; ok: boolean; hint: stri
 }
 
 export default function Settings({ status }: { status: Status | undefined }) {
-  const emailConfigured = status?.email_configured ?? false
+  const emailMode = status?.email_mode ?? (status?.email_configured ? 'on' : 'off')
+  const emailConfigured = emailMode === 'on'
+  const testEmail = useMutation({ mutationFn: api.testEmail })
   const queryClient = useQueryClient()
   const prefs = useQuery({ queryKey: ['prefs'], queryFn: api.prefs })
   const [draft, setDraft] = useState<Prefs | null>(null)
@@ -86,13 +88,38 @@ export default function Settings({ status }: { status: Status | undefined }) {
           {check(
             'email_alerts',
             'Email me new matching jobs right away',
-            emailConfigured ? undefined : 'Email isn’t set up yet. Add the SMTP settings to .env and restart the backend (see the README).',
+            emailMode === 'on'
+              ? undefined
+              : emailMode === 'test'
+                ? 'Not delivering: .env points at a local test mail server (localhost). Put your Gmail SMTP settings in .env and restart the backend.'
+                : 'Email isn’t set up yet. Add the SMTP settings to .env and restart the backend (see the README).',
           )}
         </div>
         <div className="space-y-2 border-t border-slate-100 pt-4">
           <h3 className="text-sm font-medium">Integrations</h3>
           <ul className="space-y-1.5">
-            <Integration name="Email alerts" ok={emailConfigured} hint="Add your Gmail SMTP settings to .env (see .env.example)." />
+            <Integration
+              name="Email alerts"
+              ok={emailConfigured}
+              hint={
+                emailMode === 'test'
+                  ? 'Test mode: .env points at a local test mail server, so alerts never reach your inbox. Add your Gmail SMTP settings (see .env.example).'
+                  : 'Add your Gmail SMTP settings to .env (see .env.example).'
+              }
+            />
+            <li className="flex flex-wrap items-center gap-2 pl-5 text-xs">
+              <button
+                type="button"
+                onClick={() => testEmail.mutate()}
+                disabled={testEmail.isPending || emailMode === 'off'}
+                className="rounded-full px-3 py-1 font-semibold text-brand-700 ring-1 ring-brand-200 hover:bg-brand-50 disabled:opacity-40"
+              >
+                {testEmail.isPending ? 'Sending…' : 'Send test email'}
+              </button>
+              {testEmail.data && (
+                <span className={testEmail.data.sent ? 'text-emerald-700' : 'text-rose-700'}>{testEmail.data.detail}</span>
+              )}
+            </li>
             <Integration name="Adzuna" ok={status?.adzuna_configured ?? false} hint="Free key from developer.adzuna.com. Set ADZUNA_APP_ID and ADZUNA_APP_KEY in .env for jobs from thousands more employers." />
             <Integration name="Google Jobs (LinkedIn, Indeed, Glassdoor)" ok={status?.jsearch_configured ?? false} hint="Free key from JSearch on RapidAPI. Set JSEARCH_API_KEY in .env, then add searches on the Sources page." />
             <Integration name={`H-1B sponsor data${status?.h1b_sponsors ? ` (${status.h1b_sponsors.toLocaleString()} employers)` : ''}`} ok={(status?.h1b_sponsors ?? 0) > 0} hint="Download the DOL LCA disclosure file into backend/data/h1b/ and run: python -m app.h1b import <file> (see README)." />

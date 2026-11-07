@@ -1,5 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
 import { api, timeAgo } from '../api'
 import { PageHeader } from './ui'
 
@@ -31,7 +31,14 @@ const ATS_HINTS: Record<string, string> = {
 
 export default function Companies() {
   const queryClient = useQueryClient()
-  const companies = useQuery({ queryKey: ['companies'], queryFn: api.companies })
+  // The 200 sources with the most open jobs, or the ones matching a search (drawing all 25k rows was slow).
+  const [search, setSearch] = useState('')
+  const [q, setQ] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setQ(search.trim()), 300)
+    return () => clearTimeout(t)
+  }, [search])
+  const companies = useQuery({ queryKey: ['companies', q], queryFn: () => api.companies(q), placeholderData: keepPreviousData })
   const [form, setForm] = useState({ name: '', ats: 'greenhouse', slug: '' })
   const add = useMutation({
     mutationFn: api.addCompany,
@@ -124,6 +131,18 @@ export default function Companies() {
           {add.isError && <span className="ml-2 text-red-600">{(add.error as Error).message}</span>}
         </p>
       </form>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Find a source: company name, board slug or ATS (greenhouse, workday…)"
+          className="min-w-0 flex-1 rounded-full bg-white px-4 py-2 text-sm shadow-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-brand-300"
+        />
+        <span className="text-sm text-slate-500">
+          {companies.isFetching ? 'Loading…' : q ? `${companies.data?.length ?? 0}${companies.data?.length === 200 ? '+' : ''} matching` : 'Top 200 by open jobs'}
+        </span>
+      </div>
 
       <div className="overflow-x-auto rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70">
         <table className="w-full text-sm">

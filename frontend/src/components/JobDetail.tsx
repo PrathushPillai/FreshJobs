@@ -122,7 +122,7 @@ function Recruiters({ jobId }: { jobId: number }) {
 }
 
 /** The job's full details: header, apply/track actions, facts, recruiter finder and description. */
-export function JobDetailContent({ id }: { id: number }) {
+export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawer?: boolean }) {
   const job = useQuery({ queryKey: ['job', id], queryFn: () => api.job(id) })
   const j = job.data
   // Before you spend time on it: open its apply page and see if it's still up (once per 6 h per job).
@@ -134,6 +134,19 @@ export function JobDetailContent({ id }: { id: number }) {
     staleTime: Infinity,
   })
   const closedNow = check.data?.open === false
+  // Saved without a description (older Workday jobs, list stubs, blank Lever postings): fetch it now.
+  const queryClient = useQueryClient()
+  const needsDescription = !!j && (j.description ?? '').trim().length < 100
+  const describe = useQuery({
+    queryKey: ['describe', id],
+    queryFn: async () => {
+      const got = await api.describe(id)
+      if (got.description) queryClient.setQueryData(['job', id], (old: JobDetailType | undefined) => (old ? { ...old, description: got.description! } : old))
+      return got
+    },
+    enabled: needsDescription,
+    staleTime: Infinity,
+  })
   // When it went live: the company's own time, or when we caught it if the company only gives a date.
   const listed = j?.listed_at ?? j?.posted_at ?? null
   if (job.isLoading) {
@@ -156,8 +169,9 @@ export function JobDetailContent({ id }: { id: number }) {
   return (
     <div className="animate-rise space-y-6">
       <div className="-mx-6 -mt-6 rounded-t-3xl border-b border-slate-100 bg-gradient-to-br from-brand-50 via-white to-emerald-50/60 px-6 pb-5 pt-6">
-        <div className="flex items-start gap-4">
-          <CompanyAvatar name={j.company} size="lg" />
+        {/* In the phone drawer, leave room on the right for its Close button. */}
+        <div className={`flex items-start gap-4 ${inDrawer ? 'pr-20' : ''}`}>
+          <CompanyAvatar key={j.logo_domain ?? j.company} name={j.company} domain={j.logo_domain} size="lg" />
           <div className="min-w-0">
             <h2 className="font-display text-2xl font-extrabold leading-tight tracking-tight text-slate-900">{j.title}</h2>
             <p className="mt-1 text-sm text-slate-600">
@@ -263,7 +277,24 @@ export function JobDetailContent({ id }: { id: number }) {
       <Recruiters jobId={j.id} />
       <div>
         <h3 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-slate-500">About the job</h3>
-        <div className="whitespace-pre-line text-[15px] leading-relaxed text-slate-700">{j.description || 'No description.'}</div>
+        {needsDescription && describe.isFetching ? (
+          <div className="space-y-2">
+            <p className="flex items-center gap-2 text-sm text-slate-500">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-200 border-t-brand-600" /> Loading the full description from the company's site…
+            </p>
+            {[90, 75, 85, 60].map((w) => <div key={w} className="skeleton h-3" style={{ width: `${w}%` }} />)}
+          </div>
+        ) : needsDescription && !(j.description ?? '').trim() ? (
+          <p className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-100">
+            The company's site didn't give a description here.{' '}
+            <a href={j.url} target="_blank" rel="noreferrer" className="font-semibold text-brand-700 hover:underline">
+              Open the posting ↗
+            </a>{' '}
+            for the details.
+          </p>
+        ) : (
+          <div className="whitespace-pre-line text-[15px] leading-relaxed text-slate-700">{j.description}</div>
+        )}
       </div>
     </div>
   )
@@ -286,7 +317,7 @@ export default function JobDetail({ id, onClose }: { id: number; onClose: () => 
         >
           Close ✕
         </button>
-        <JobDetailContent id={id} />
+        <JobDetailContent id={id} inDrawer />
       </aside>
     </div>
   )

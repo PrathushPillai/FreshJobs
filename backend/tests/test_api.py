@@ -16,6 +16,8 @@ def nj(ext_id, title, location="New York, NY", description="", company_name=""):
 
 
 @pytest.fixture()
+
+
 def client(session, now):
     acme = Company(name="Acme", ats="greenhouse", slug="acme")
     session.add(acme)
@@ -282,3 +284,36 @@ def test_adding_or_removing_a_role_updates_for_you_at_once(client):
     assert "Registered Nurse" in for_you()  # no waiting for a background recheck
     client.put("/api/prefs", json={**prefs, "include_keywords": [k for k in prefs["include_keywords"] if k != "data analyst"]})
     assert "Registered Nurse" not in for_you() and "Data Analyst" not in for_you()
+
+
+def test_ranked_search_pages_in_the_same_order_as_one_page(client):
+    params = {"q": "data analyst", "countries": ["United States", "Canada", "United Kingdom"], "hide_no_sponsor": False}
+    whole = [j["id"] for j in client.get("/api/jobs", params={**params, "limit": 50}).json()["items"]]
+    paged = [j["id"] for off in range(len(whole)) for j in client.get("/api/jobs", params={**params, "limit": 1, "offset": off}).json()["items"]]
+    assert len(whole) >= 2 and paged == whole
+    titles_in_order = [j["title"] for j in client.get("/api/jobs", params={**params, "limit": 50}).json()["items"]]
+    assert titles_in_order[0] == "Data Analyst"  # the exact title ranks before related roles
+
+
+def test_symbols_only_search_returns_nothing_quickly(client):
+    page = client.get("/api/jobs", params={"q": "*&^%$"}).json()
+    assert page["total"] == 0 and page["items"] == []
+
+
+def test_tracked_only_filter(client):
+    job_id = client.get("/api/jobs", params={"q": "nurse", "countries": "United Kingdom"}).json()["items"][0]["id"]
+    client.post("/api/applications", json={"job_id": job_id, "status": "saved"})
+    tracked = client.get("/api/jobs", params={"tracked": "tracked", "countries": "United Kingdom"}).json()["items"]
+    assert [j["id"] for j in tracked] == [job_id]
+
+
+def test_companies_list_busiest_first_and_searchable(client, session):
+    other = Company(name="Zqglobex", ats="lever", slug="zqglobex")
+    session.add(other)
+    session.commit()
+    names = [c["name"] for c in client.get("/api/companies", params={"limit": 50_000}).json()]
+    assert names[0] == "Acme" and "Zqglobex" in names  # Acme has the open jobs; the YAML sources have none
+
+    assert [c["name"] for c in client.get("/api/companies", params={"q": "zqglob"}).json()] == ["Zqglobex"]
+    assert "Zqglobex" in [c["name"] for c in client.get("/api/companies", params={"q": "lever", "limit": 50_000}).json()]
+    assert len(client.get("/api/companies", params={"limit": 1}).json()) == 1

@@ -216,3 +216,47 @@ def test_still_listed_jobs_are_not_rewritten_every_poll(session, now):
     assert job.last_seen_at == now and job not in session.dirty  # nothing to write for the job
     process_company(session, company, [nj("1")], prefs, now + timedelta(hours=7))
     assert job.last_seen_at == now + timedelta(hours=7)
+
+
+@pytest.mark.asyncio
+async def test_dead_boards_are_switched_off_after_three_404s(session, monkeypatch, tmp_path):
+    import asyncio
+
+    import httpx
+
+    from app.config import settings
+    from app.pipeline import poller
+    from app.sources import ADAPTERS
+    from app.sources.base import Adapter
+
+    class Gone(Adapter):
+        ats = "gone"
+
+        async def fetch(self, client, slug, **_):
+            request = httpx.Request("GET", f"https://example.com/{slug}")
+            raise httpx.HTTPStatusError("not found", request=request, response=httpx.Response(404, request=request))
+
+    monkeypatch.setitem(ADAPTERS, "gone", Gone())
+    empty = tmp_path / "companies.yaml"
+    empty.write_text("[]")
+    monkeypatch.setattr(settings, "companies_file", empty)
+
+    async def nothing(*a, **k):
+        return []
+
+    monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
+    monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
+    from datetime import datetime, timezone
+
+    session.add_all([Company(name="Dead", ats="gone", slug="dead"),
+                     Company(name="Was Fine", ats="gone", slug="fine", last_ok_at=datetime(2026, 1, 1, tzinfo=timezone.utc))])
+    session.commit()
+    for _ in range(3):
+        session.query(Company).update({Company.last_polled_at: None})  # due again
+        session.commit()
+        await poller.poll_once("fast")
+    session.expire_all()
+    dead, fine = session.query(Company).filter_by(slug="dead").one(), session.query(Company).filter_by(slug="fine").one()
+    assert not dead.enabled and "never worked" in dead.last_status and dead.fail_streak == 3
+    assert fine.enabled and fine.fail_streak == 3  # it worked before: a 404 may be temporary

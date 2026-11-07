@@ -14,6 +14,41 @@ def email_configured() -> bool:
     return bool(settings.smtp_host and settings.alert_to)
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def email_mode() -> str:
+    """"off" (not set up), "test" (a local test mail server: nothing reaches a real inbox) or "on"."""
+    if not email_configured():
+        return "off"
+    to_domain = (settings.alert_to or "").rsplit("@", 1)[-1].lower()
+    if settings.smtp_host.lower() in _LOCAL_HOSTS or to_domain in _LOCAL_HOSTS:
+        return "test"
+    return "on"
+
+
+def send_test() -> tuple[bool, str]:
+    """Send a short test email now; (sent, what happened)."""
+    if not email_configured():
+        return False, "Email isn't set up: add the SMTP settings to .env and restart the backend."
+    msg = EmailMessage()
+    msg["Subject"] = "FreshJobs test email"
+    msg["From"] = settings.alert_from or settings.smtp_user
+    msg["To"] = settings.alert_to
+    msg.set_content("This is a test from FreshJobs. Job alerts will arrive at this address.")
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+            if settings.smtp_starttls:
+                smtp.starttls()
+            if settings.smtp_user:
+                smtp.login(settings.smtp_user, settings.smtp_password)
+            smtp.send_message(msg)
+    except (OSError, smtplib.SMTPException) as e:
+        where = f"{settings.smtp_host}:{settings.smtp_port}"
+        return False, f"Couldn't send through {where}: {type(e).__name__}: {e}"[:300]
+    return True, f"Sent to {settings.alert_to}."
+
+
 def _minutes_ago(job: Job, now: datetime) -> int:
     seen = job.first_seen_at if job.first_seen_at.tzinfo else job.first_seen_at.replace(tzinfo=timezone.utc)
     return max(0, int((now - seen).total_seconds() // 60))

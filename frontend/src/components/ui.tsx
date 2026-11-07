@@ -256,8 +256,33 @@ const AVATAR_GRADIENTS = [
   'from-orange-400 to-rose-600',
 ]
 
-/** Company initials on a colour picked from the name, standing in for a logo. */
-export function CompanyAvatar({ name, size = 'md' }: { name: string; size?: 'md' | 'lg' }) {
+/** The company's logo (its website's icon, via Google's favicon service) when it has a real one, otherwise
+ * its initials on a colour picked from the name. Google answers unknown sites with a 16 px globe, so an icon
+ * that small counts as "no logo". */
+export function CompanyAvatar({ name, domain, size = 'md' }: { name: string; domain?: string | null; size?: 'md' | 'lg' }) {
+  const [logo, setLogo] = useState<'loading' | 'ok' | 'none'>(domain ? 'loading' : 'none')
+  const box = size === 'lg' ? 'h-16 w-16 rounded-2xl' : 'h-12 w-12 rounded-xl'
+  return (
+    <div className={`relative shrink-0 ${box}`}>
+      {logo !== 'ok' && <Initials name={name} size={size} />}
+      {domain && logo !== 'none' && (
+        <img
+          src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=128`}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onLoad={(e) => setLogo(e.currentTarget.naturalWidth > 16 ? 'ok' : 'none')}
+          onError={() => setLogo('none')}
+          className={`absolute inset-0 h-full w-full bg-white object-contain p-1.5 shadow-md shadow-slate-900/10 ring-1 ring-slate-200 ${box} ${
+            logo === 'ok' ? 'opacity-100' : 'opacity-0'
+          } transition-opacity duration-300`}
+        />
+      )}
+    </div>
+  )
+}
+
+function Initials({ name, size }: { name: string; size: 'md' | 'lg' }) {
   const words = name.replace(/[^A-Za-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean)
   const initials = (words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? '?').slice(0, 2)).toUpperCase()
   let hash = 0

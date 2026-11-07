@@ -33,6 +33,8 @@ export interface Job {
   everify_text: boolean
   /** The employer in USCIS's E-Verify list: enrolled, every account ended, or not found. */
   everify: 'yes' | 'ended' | null
+  /** The employer's website, for its logo; null means show initials. */
+  logo_domain: string | null
   seniority: string
   min_years: number | null
   exp_level: ExpLevel
@@ -113,6 +115,8 @@ export interface Status {
   poll_minutes: number
   last_poll: { started_at: string; finished_at: string; new_jobs: number; matches: number; errors: number; discovered?: string[] } | null
   email_configured: boolean
+  /** "test" means a local test mail server: alerts don't reach a real inbox. */
+  email_mode?: 'off' | 'test' | 'on'
   hunter_configured: boolean
   adzuna_configured: boolean
   companies: number
@@ -213,6 +217,8 @@ export const api = {
   job: (id: number) => request<JobDetail>(`/api/jobs/${id}`),
   verify: (id: number) =>
     request<{ open: boolean | null; detail: string; checked_at: string; closed_at: string | null }>(`/api/jobs/${id}/verify`, { method: 'POST' }),
+  /** Fetch a job's description from its source when it was saved without one. */
+  describe: (id: number) => request<{ description: string | null; fetched: boolean }>(`/api/jobs/${id}/describe`, { method: 'POST' }),
   recruiters: (id: number, lookup = false, refresh = false) =>
     request<RecruiterInfo>(`/api/jobs/${id}/recruiters?${toParams({ lookup, refresh })}`),
   locationFacets: (country?: string, state?: string) =>
@@ -223,7 +229,7 @@ export const api = {
   updateApplication: (id: number, body: Partial<Pick<Application, 'status' | 'notes' | 'contact' | 'applied_at'>>) =>
     request<Application>(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteApplication: (id: number) => request<void>(`/api/applications/${id}`, { method: 'DELETE' }),
-  companies: () => request<Company[]>('/api/companies'),
+  companies: (q = '', limit = 200) => request<Company[]>(`/api/companies?${toParams({ q, limit })}`),
   addCompany: (body: { name: string; ats: string; slug: string }) =>
     request<Company>('/api/companies', { method: 'POST', body: JSON.stringify(body) }),
   addCompanyFromUrl: (url: string) =>
@@ -235,6 +241,7 @@ export const api = {
   savePrefs: (prefs: Prefs) => request<Prefs>('/api/prefs', { method: 'PUT', body: JSON.stringify(prefs) }),
   status: () => request<Status>('/api/status'),
   poll: () => request<{ started: boolean }>('/api/poll', { method: 'POST' }),
+  testEmail: () => request<{ sent: boolean; detail: string; mode: string }>('/api/alerts/test', { method: 'POST' }),
 }
 
 export function timeAgo(iso: string): string {

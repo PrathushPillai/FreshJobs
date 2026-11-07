@@ -43,7 +43,8 @@ LAST_SEEN_RESOLUTION = timedelta(hours=6)
 
 def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     """Compute every derived field of a job from its raw data."""
-    job.described = bool(job.description)
+    # A blank line (Lever) or a stub ("Category: … Terms: …" from the SimplifyJobs list) isn't a description.
+    job.described = len((job.description or "").strip()) >= MIN_DESCRIPTION_CHARS
     job.company_key = company_key(job.company_name or "")
     job.fingerprint = fingerprint(job.company_key, job.title, job.location)
     job.seniority = seniority(job.title)
@@ -113,6 +114,13 @@ def refresh_role_match_for(terms: list[str], include: list[str], exclude: list[s
             session.execute(text("UPDATE jobs SET role_match = :m WHERE id = :i"), updates[start : start + batch])
             session.commit()
     return len(updates)
+
+
+# Shorter than this, a job counts as having no description (enrichment and the UI fetch it again).
+MIN_DESCRIPTION_CHARS = 100
+
+# Failed polls in a row after which a never-working board that answers 404/410 is switched off.
+DEAD_BOARD_FAILS = 3
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -322,11 +330,13 @@ async def poll_once(lane: str | None = None) -> dict:
         # adapters fetch their details again and process_company fills them in: without a description
         # there's no sponsorship or experience check.
         undescribed: dict[int, int] = {}
+        # Newest first, and jobs found after tracking began before the ones already listed then: in database
+        # order, a board's new jobs waited behind tens of thousands of old ones (JazzHR: 93k).
         for company_id, ext_id in session.execute(
             select(Job.company_id, Job.external_id).where(
                 Job.company_id.in_([c.id for c in companies]), Job.closed_at.is_(None),
                 Job.described.is_(False),
-            )
+            ).order_by(Job.company_id, Job.baseline, Job.id.desc())
         ):
             if undescribed.get(company_id, 0) < settings.enrich_per_poll:
                 known.get(company_id, set()).discard(ext_id)
@@ -365,6 +375,12 @@ async def poll_once(lane: str | None = None) -> dict:
                     errors += 1
                     company.last_polled_at = now
                     company.last_status = f"error: {error}"
+                    company.fail_streak = (company.fail_streak or 0) + 1
+                    if company.last_ok_at is None and company.fail_streak >= DEAD_BOARD_FAILS and str(error).startswith(("HTTP 404", "HTTP 410")):
+                        # A board that has never worked and keeps saying "not found" is a dead link from
+                        # discovery or a list (2,078 of them were retried every 3 hours): switch it off.
+                        company.enabled = False
+                        company.last_status = f"error: {error} (switched off: this board never worked)"
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
                     continue
                 try:
@@ -381,6 +397,7 @@ async def poll_once(lane: str | None = None) -> dict:
                     company.last_status = f"error: save failed ({type(e).__name__})"
                     session.commit()
                     continue
+                company.fail_streak = 0
                 new_total += len(new_jobs)
                 to_alert += [j for j in new_jobs if is_alert_worthy(j, prefs)]
                 if ADAPTERS[company.ats].aggregator:

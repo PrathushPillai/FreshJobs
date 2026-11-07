@@ -55,6 +55,7 @@ LinkedIn, Indeed, Glassdoor and Meta's careers site are never scraped, against t
   - **Resurfaced:** an old job re-listed as new. Its badge shows the original date, such as "Resurfaced · from Sep 30".
   - The job's detail panel explains why it was flagged and links to the original.
 - **H-1B sponsors:** every job shows its employer's certified H-1B filings from Department of Labor data. You can filter to sponsors only or sort by filings.
+- **Company logos:** jobs show the employer's real logo when its website can be identified (Apple's apple, Amazon's arrow…); otherwise coloured initials.
 - **H-1B for this role:** the job panel shows how many H-1Bs the employer filed for this kind of role, with the median offered salary and the main cities. For example: "1,240 filings as Software Developers · median $148k · mostly in Seattle". It also lists the employer's other sponsored occupations.
 - **OPT, CPT and E-Verify:**
   - **OPT/CPT welcome:** the posting says F-1 students on OPT, STEM OPT or CPT can apply.

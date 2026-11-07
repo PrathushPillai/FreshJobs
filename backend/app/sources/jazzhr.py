@@ -22,7 +22,7 @@ from app.sources.http_util import json_ld_jobs, ld_locations
 
 SITEMAP = "http://app.jazz.co/feeds/google/xml/{n}"
 MAX_SITEMAPS = 20
-DETAILS_PER_POLL = 400
+DETAILS_PER_POLL = 2500  # its sitemaps add a day's jobs at once (1,600-2,200); 400 left most without a description
 DETAIL_CONCURRENCY = 6
 _LOC = re.compile(r"<loc>https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)/([^<?]*)")
 

@@ -95,3 +95,12 @@ async def test_workable_search_stops_at_jobs_already_seen():
         assert first[1].company_name == "Acme" and first[1].remote and first[1].locations == ["Austin, Texas, United States"]
         later = await adapter.fetch(client, "location=United States", known_ids={"id0", "id2", "id3"})
     assert [j.external_id for j in later] == ["id0", "id1", "id2", "id3"]  # page 2 was all known: stop
+
+
+def test_messages_inside_scripts_dont_close_a_job():
+    from app.pipeline.liveness import _CLOSED, visible_text
+
+    page = ('<html><script>window.i18n={"noRoleFound":"Sorry, this role does not exist or is no longer available."}</script>'
+            '<div id="app"><h1>Senior Engineer</h1><p>Apply now</p></div></html>')
+    assert _CLOSED.search(page) and not _CLOSED.search(visible_text(page))
+    assert _CLOSED.search(visible_text("<p>This job is no longer available.</p>"))

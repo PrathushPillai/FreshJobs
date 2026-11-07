@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, type ExpLevel, type Job, type JobQuery, type Status, postedText, REPEAT_KINDS, REPEAT_LABELS, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
@@ -154,7 +154,7 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
     >
       {selected && <span className="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-brand-500 to-fuchsia-500" aria-hidden />}
       <div className="flex gap-3.5">
-        <CompanyAvatar name={job.company} />
+        <CompanyAvatar key={job.logo_domain ?? job.company} name={job.company} domain={job.logo_domain} />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -233,7 +233,8 @@ function FreshnessStrip({ base, active, onPick }: { base: JobQuery; active?: num
     <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap">
       {counts.map((c, i) => {
         const n = results.data?.fresh?.[String(c.hours) as '1' | '6' | '24']
-        const capped = c.hours === 24 && results.data?.total_capped
+        // Counting stops at 2,000 (COUNT_CAP): any bucket that reaches it means "2,000 or more".
+        const capped = n !== undefined && n >= 2000
         const on = active === c.hours
         return (
           <button
@@ -316,6 +317,12 @@ export default function Feed({ stats }: { stats?: Status }) {
     placeholderData: keepPreviousData,
   })
   const items = jobs.data?.items
+  // Next/Previous: show the new page from its top, not from the pager at the bottom.
+  const resultsTop = useRef<HTMLDivElement>(null)
+  const goToPage = (next: number) => {
+    setOffset(next)
+    resultsTop.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   // Two-pane view: keep a job open on the right, defaulting to the first result.
   useEffect(() => {
@@ -596,7 +603,13 @@ export default function Feed({ stats }: { stats?: Status }) {
               {q && !exact && related.length > 0 && exactCount.data && (
                 <>
                   {' '}
-                  · <b className="text-slate-800">{exactCount.data.total.toLocaleString()}{exactCount.data.total_capped && '+'}</b> with that exact title, shown first; the rest are related roles
+                  {exactCount.data.total_capped && jobs.data.total_capped ? (
+                    <>· exact-title matches first, then related roles</>
+                  ) : (
+                    <>
+                      · <b className="text-slate-800">{exactCount.data.total.toLocaleString()}{exactCount.data.total_capped && '+'}</b> with that exact title, shown first; the rest are related roles
+                    </>
+                  )}
                 </>
               )}
             </>
@@ -638,7 +651,7 @@ export default function Feed({ stats }: { stats?: Status }) {
 
       {jobs.isError && <p className="text-sm text-red-600">{(jobs.error as Error).message}</p>}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
+      <div ref={resultsTop} className="grid scroll-mt-24 gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <div className="min-w-0 space-y-3">
           <ul className="space-y-2.5">
             {!items && jobs.isLoading && Array.from({ length: 6 }, (_, i) => <CardSkeleton key={i} />)}
@@ -658,7 +671,7 @@ export default function Feed({ stats }: { stats?: Status }) {
 
           {jobs.data && jobs.data.total > PAGE && (
             <div className="flex items-center justify-center gap-3 text-sm">
-              <button disabled={offset === 0} onClick={() => setOffset(offset - PAGE)} className="rounded-full bg-white px-4 py-1.5 font-medium shadow-sm ring-1 ring-slate-200 hover:ring-brand-300 disabled:opacity-40">
+              <button disabled={offset === 0} onClick={() => goToPage(offset - PAGE)} className="rounded-full bg-white px-4 py-1.5 font-medium shadow-sm ring-1 ring-slate-200 hover:ring-brand-300 disabled:opacity-40">
                 Previous
               </button>
               <span className="text-slate-500">
@@ -666,7 +679,7 @@ export default function Feed({ stats }: { stats?: Status }) {
               </span>
               <button
                 disabled={offset + PAGE >= jobs.data.total}
-                onClick={() => setOffset(offset + PAGE)}
+                onClick={() => goToPage(offset + PAGE)}
                 className="rounded-full bg-white px-4 py-1.5 font-medium shadow-sm ring-1 ring-slate-200 hover:ring-brand-300 disabled:opacity-40"
               >
                 Next
