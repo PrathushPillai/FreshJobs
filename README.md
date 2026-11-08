@@ -173,7 +173,8 @@ Where things live:
 - `backend/app/sources/`: one adapter per job site
 - `backend/app/pipeline/`: polling, repost and duplicate detection, location, experience and sponsorship parsing, search, discovery and harvesting
 - `backend/app/main.py`: the REST API
-- `frontend/src/`: the React app (Feed, LinkedIn & more, Tracker, Sources, Settings)
+- `frontend/src/`: the React app (Feed, My profile, LinkedIn & more, Tracker, Sources, Settings)
+- `backend/app/matching.py`, `backend/app/pipeline/scoring.py`: resume match scores
 
 [CLAUDE.md](CLAUDE.md) has the full technical details and every known gotcha.
 
@@ -183,6 +184,7 @@ Where things live:
 2. ~~Any-role search, related roles, location and experience filters, tracker, recruiter finder, Workday, SmartRecruiters, Workable, job APIs, discovery~~
 3. ~~H-1B sponsor data, big-company career sites, Google Jobs, add-by-careers-URL~~
 4. ~~Startups (YC, HN), JazzHR, Gem, Polymer, GitHub job lists, exact-title search, faster feed~~
-5. Laptop stability: lighter polling on battery, daily database backup (proposed, not built)
-6. Chatbot (Claude) that answers questions about the collected jobs
-7. Cloud deploy (so polling runs while your laptop is off), resume matching
+5. ~~Resume match: upload a resume in My profile and every job gets a 0–100 score with the reasons (runs locally, no API key)~~
+6. Laptop stability: lighter polling on battery, daily database backup (proposed, not built)
+7. Chatbot (Claude) that answers questions about the collected jobs
+8. Cloud deploy (so polling runs while your laptop is off), logins so each person has their own profile

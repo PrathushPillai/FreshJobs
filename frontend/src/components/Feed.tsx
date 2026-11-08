@@ -5,7 +5,7 @@ import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
 import RolesBar from './RolesBar'
-import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, RepeatBadge, SponsorBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
 
 const PAGE = 50
 // "Date posted" uses the company's own posting date; "Found" uses when we first saw the job.
@@ -28,6 +28,7 @@ const FOUND_WINDOWS = [
   { label: 'Past week', hours: 168 },
 ]
 const SORTS = [
+  { value: 'match', label: 'Best match' },
   { value: 'posted', label: 'Most recently posted' },
   { value: 'newest', label: 'Most recently found' },
   { value: 'sponsor', label: 'Most H-1B filings' },
@@ -179,6 +180,7 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
             {job.no_sponsor && <Badge tone="red" dot>No sponsorship</Badge>}
             {job.closed_at && <Badge tone="slate">Closed</Badge>}
           </div>
+          {job.match && <MatchLine match={job.match} />}
           <div className="mt-3 flex items-center justify-between gap-2 border-t border-dashed border-slate-200 pt-3">
             <span className="truncate text-xs font-medium text-slate-400">via {SOURCE_LABELS[job.source] ?? job.source}</span>
             <div className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
@@ -264,7 +266,43 @@ function FreshnessStrip({ base, active, onPick }: { base: JobQuery; active?: num
   )
 }
 
-export default function Feed({ stats }: { stats?: Status }) {
+/** "🔥 Top matches posted today": the best-fitting jobs of the last 24 hours, one click to open. */
+function TopMatches({ base, onOpen }: { base: JobQuery; onOpen: (id: number) => void }) {
+  const top = useQuery({
+    queryKey: ['top-matches', base],
+    queryFn: () => api.jobs({ ...base, sort: 'match', posted_within_hours: 24, limit: 8, offset: 0 }),
+    refetchInterval: 60_000,
+  })
+  const items = (top.data?.items ?? []).filter((j) => j.match && j.match.score >= 50)
+  if (!items.length) return null
+  return (
+    <section className="rounded-3xl bg-gradient-to-r from-emerald-50 via-white to-brand-50 p-4 ring-1 ring-emerald-100">
+      <h3 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-emerald-800">🔥 Your top matches posted today</h3>
+      <div className="no-scrollbar -mx-1 flex gap-3 overflow-x-auto px-1 pb-1">
+        {items.map((j) => (
+          <button
+            key={j.id}
+            onClick={() => onOpen(j.id)}
+            className="flex w-64 shrink-0 items-center gap-3 rounded-2xl bg-white p-3 text-left shadow-sm ring-1 ring-slate-200/80 transition hover:-translate-y-0.5 hover:shadow-md hover:ring-brand-300"
+          >
+            <MatchRing score={j.match!.score} size={44} />
+            <span className="min-w-0">
+              <span className="line-clamp-2 font-display text-sm font-bold leading-snug text-slate-900">{j.title}</span>
+              <span className="block truncate text-xs text-slate-500">{j.company} · {postedText(j.listed_at ?? j.posted_at ?? j.first_seen_at, j.listed_until)}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// Once a resume is uploaded, "Best match" becomes the sort, once (the user can change it back).
+const MATCH_SORT_MIGRATION = 'freshjobs.migrated.matchSort'
+
+export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenProfile: () => void }) {
+  const profile = useQuery({ queryKey: ['profile'], queryFn: api.profile, staleTime: 60_000 })
+  const hasResume = !!profile.data?.has_resume
   const [search, setSearch] = useState('')
   const [q, setQ] = useState('')
   const [skip, setSkip] = useState<string[]>([])  // related roles switched off for this search
@@ -272,6 +310,16 @@ export default function Feed({ stats }: { stats?: Status }) {
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
   const wide = useWideScreen()
+  useEffect(() => {
+    if (!hasResume) return
+    try {
+      if (localStorage.getItem(MATCH_SORT_MIGRATION)) return
+      localStorage.setItem(MATCH_SORT_MIGRATION, '1')
+    } catch {
+      return
+    }
+    setFilters((f) => ({ ...f, sort: 'match' }))
+  }, [hasResume])
 
   useEffect(() => {
     const t = setTimeout(() => setQ(search.trim()), 300)
@@ -593,6 +641,21 @@ export default function Feed({ stats }: { stats?: Status }) {
       </section>
 
       <FreshnessStrip base={{ ...query, limit: 1, offset: 0 }} active={filters.posted_within_hours} onPick={(hours) => set({ posted_within_hours: hours })} />
+
+      {forYou && hasResume && <TopMatches base={{ ...query, limit: 8, offset: 0 }} onOpen={(id) => setSelected(id)} />}
+      {forYou && profile.data && !hasResume && (
+        <button
+          onClick={onOpenProfile}
+          className="flex w-full items-center gap-4 rounded-3xl bg-gradient-to-r from-brand-600 to-violet-600 p-4 text-left text-white shadow-lg shadow-brand-600/20 transition hover:brightness-110"
+        >
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/15 text-2xl" aria-hidden>🎯</span>
+          <span className="min-w-0 flex-1">
+            <span className="block font-display font-bold">See how well you match every job</span>
+            <span className="block text-sm text-brand-100">Upload your resume: skills, experience, education and visa fit, scored for each job.</span>
+          </span>
+          <span className="shrink-0 rounded-full bg-white px-4 py-1.5 text-sm font-bold text-brand-700">Upload resume →</span>
+        </button>
+      )}
 
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 px-1 text-sm text-slate-500">
         <span>

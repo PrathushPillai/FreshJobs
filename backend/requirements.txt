@@ -10,3 +10,5 @@ pytest>=8
 pytest-asyncio>=0.23
 respx>=0.21
 openpyxl>=3.1
+fastembed>=0.9
+pypdf>=5

@@ -8,3 +8,6 @@ frontend/dist/
 backend/data/h1b/
 backend/data/everify/
 backend/data/uscis_h1b/
+
+# resume-match model files and scoring state (tests and Docker)
+backend/data/models/

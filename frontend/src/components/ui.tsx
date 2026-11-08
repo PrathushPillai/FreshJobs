@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { APP_STATUSES, type AppStatus, type Job, REPEAT_LABELS, STATUS_STYLES, api } from '../api'
+import { APP_STATUSES, type AppStatus, type Job, type MatchBrief, matchTone, REPEAT_LABELS, STATUS_STYLES, api } from '../api'
 
 /** A checkbox row drawn as a small switch. */
 export function Toggle({ label, checked, onChange }: { label: ReactNode; checked: boolean; onChange: (v: boolean) => void }) {
@@ -311,5 +311,47 @@ export function PageHeader({ icon, title, children }: { icon: string; title: str
         </div>
       </div>
     </section>
+  )
+}
+
+const MATCH_STYLES = {
+  strong: { ring: 'stroke-emerald-500', text: 'text-emerald-700', bg: 'bg-emerald-50 ring-emerald-200', label: 'Strong match' },
+  good: { ring: 'stroke-teal-500', text: 'text-teal-700', bg: 'bg-teal-50 ring-teal-200', label: 'Good match' },
+  fair: { ring: 'stroke-amber-500', text: 'text-amber-700', bg: 'bg-amber-50 ring-amber-200', label: 'Fair match' },
+  weak: { ring: 'stroke-slate-400', text: 'text-slate-500', bg: 'bg-slate-50 ring-slate-200', label: 'Weak match' },
+}
+
+/** A circular gauge with the match score in the middle. */
+export function MatchRing({ score, size = 44 }: { score: number; size?: number }) {
+  const style = MATCH_STYLES[matchTone(score)]
+  const r = size / 2 - 4
+  const c = 2 * Math.PI * r
+  return (
+    <span className="relative inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }} title={`${style.label}: ${score}/100`}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} className="fill-none stroke-slate-100" strokeWidth={4} />
+        <circle cx={size / 2} cy={size / 2} r={r} className={`fill-none ${style.ring} transition-all`} strokeWidth={4} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - score / 100)} />
+      </svg>
+      <span className={`absolute font-display font-extrabold ${style.text} ${size >= 60 ? 'text-xl' : 'text-xs'}`}>{score}</span>
+    </span>
+  )
+}
+
+/** A job card's match line: the score and a few skills you have (✓) and lack (✗). */
+export function MatchLine({ match }: { match: MatchBrief }) {
+  const style = MATCH_STYLES[matchTone(match.score)]
+  return (
+    <div className={`mt-2.5 flex flex-wrap items-center gap-1.5 rounded-xl px-2 py-1.5 ring-1 ring-inset ${style.bg}`}>
+      <MatchRing score={match.score} size={32} />
+      <span className={`text-xs font-bold ${style.text}`}>{style.label}</span>
+      {match.matched.slice(0, 3).map((s) => (
+        <span key={s} className="rounded-full bg-white/80 px-1.5 text-[11px] font-semibold text-emerald-700">✓ {s}</span>
+      ))}
+      {match.missing.slice(0, 2).map((s) => (
+        <span key={s} className="rounded-full bg-white/80 px-1.5 text-[11px] font-semibold text-rose-600">✗ {s}</span>
+      ))}
+      {match.notes[0] && <span className="text-[11px] text-slate-500">· {match.notes[0]}</span>}
+    </div>
   )
 }

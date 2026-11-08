@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     enrich_per_poll: int = 200
     # Jobs per fast poll whose apply page is opened to catch ones taken down (pipeline/liveness.py). 0 = off.
     verify_per_poll: int = 150
+    # Resume matching (app/matching.py). Where the embedding model is kept: next to the database by default,
+    # never under AppData (the Claude app redirects that folder; see the DATABASE_URL note in CLAUDE.md).
+    models_dir: str = ""
+    # CPU threads the embedding model may use, so scoring doesn't make the laptop sluggish.
+    embed_threads: int = 2
     # Hours between syncs of hiring Y Combinator startups into sources (pipeline/startups.py). 0 = off.
     yc_sync_hours: int = 24
     # Hours between syncs of the community GitHub job lists into sources (pipeline/startup_lists.py). 0 = off.

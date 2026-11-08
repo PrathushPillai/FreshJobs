@@ -35,6 +35,8 @@ export interface Job {
   everify: 'yes' | 'ended' | null
   /** The employer's website, for its logo; null means show initials. */
   logo_domain: string | null
+  /** How well the uploaded resume fits this job; null without a resume. */
+  match: MatchBrief | null
   seniority: string
   min_years: number | null
   exp_level: ExpLevel
@@ -81,6 +83,7 @@ export interface JobDetail extends Job {
   description: string
   repost_of: { id: number; title: string; company: string; url: string; first_seen_at: string; closed_at: string | null } | null
   h1b_roles: H1BHistory | null
+  match: MatchDetail | null
   uscis: {
     years: { fiscal_year: number; new_approvals: number; new_denials: number; approvals: number; denials: number }[]
     names: string[]
@@ -99,6 +102,49 @@ export interface Company {
   last_polled_at: string | null
   last_status: string | null
   open_jobs: number
+}
+
+/** A job's resume match as cards show it (app/matching.py). */
+export interface MatchBrief {
+  score: number
+  matched: string[]
+  missing: string[]
+  skills_asked: number
+  notes: string[]
+}
+
+/** The full match, for the job panel: every part out of 100 and every matched and missing skill. */
+export interface MatchDetail extends MatchBrief {
+  parts: { skills: number; fit: number; role: number; experience: number; education: number }
+}
+
+export interface Profile {
+  has_resume: boolean
+  filename?: string
+  uploaded_at?: string
+  skills?: string[]
+  years?: number | null
+  degree?: '' | 'bachelors' | 'masters' | 'phd'
+  target_roles?: string[]
+  suggested_roles?: string[]
+  needs_sponsorship?: boolean
+  visa_status?: string
+  opt_end?: string | null
+  locations?: string[]
+  resume_preview?: string
+  your_roles: string[]
+  scoring: { running: boolean; scored: number; total: number }
+  scored?: number
+  version?: number
+  /** Every skill the matcher knows, for the skill picker. */
+  vocabulary: string[]
+}
+
+export type ProfileEdit = Partial<Pick<Profile, 'skills' | 'years' | 'degree' | 'target_roles' | 'needs_sponsorship' | 'visa_status' | 'opt_end' | 'locations'>>
+
+/** Match colour by score: strong, good, fair, weak. */
+export function matchTone(score: number): 'strong' | 'good' | 'fair' | 'weak' {
+  return score >= 75 ? 'strong' : score >= 60 ? 'good' : score >= 45 ? 'fair' : 'weak'
 }
 
 export interface Prefs {
@@ -170,7 +216,7 @@ export interface JobQuery {
   related?: boolean
   also?: string[]
   skip?: string[]
-  sort?: 'newest' | 'posted' | 'company' | 'sponsor'
+  sort?: 'newest' | 'posted' | 'company' | 'sponsor' | 'match'
   countries?: string[]
   states?: string[]
   cities?: string[]
@@ -238,6 +284,11 @@ export const api = {
     request<Company>(`/api/companies/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
   prefs: () => request<Prefs>('/api/prefs'),
   roleSuggestions: (roles: string[]) => request<{ role: string; open_jobs: number }[]>(`/api/roles/suggestions?${toParams({ roles })}`),
+  profile: () => request<Profile>('/api/profile'),
+  uploadResume: (filename: string, data_base64: string) =>
+    request<Profile>('/api/profile/resume', { method: 'POST', body: JSON.stringify({ filename, data_base64 }) }),
+  updateProfile: (edit: ProfileEdit) => request<Profile>('/api/profile', { method: 'PUT', body: JSON.stringify(edit) }),
+  deleteResume: () => request<Profile>('/api/profile/resume', { method: 'DELETE' }),
   savePrefs: (prefs: Prefs) => request<Prefs>('/api/prefs', { method: 'PUT', body: JSON.stringify(prefs) }),
   status: () => request<Status>('/api/status'),
   poll: () => request<{ started: boolean }>('/api/poll', { method: 'POST' }),

@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy import DateTime as _DateTime
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -181,6 +181,52 @@ class UserPrefs(Base):
     email_alerts: Mapped[bool] = mapped_column(Boolean, default=True)
     hide_no_sponsor: Mapped[bool] = mapped_column(Boolean, default=True)
     exclude_senior: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class UserProfile(Base):
+    """The user's resume and what was read from it (single row for now; per user once logins exist).
+
+    `version` goes up whenever anything that affects scores changes, so stale JobMatch rows are recomputed.
+    """
+
+    __tablename__ = "user_profile"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    filename: Mapped[str] = mapped_column(String(300), default="")
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resume_text: Mapped[str] = mapped_column(Text, default="")
+    skills: Mapped[list] = mapped_column(JSON, default=list)  # canonical names (app/matching.py SKILLS)
+    years: Mapped[float | None] = mapped_column(Float)  # professional experience, editable
+    degree: Mapped[str] = mapped_column(String(20), default="")  # "", "bachelors", "masters", "phd"
+    target_roles: Mapped[list] = mapped_column(JSON, default=list)  # roles found in the resume (plus the prefs')
+    needs_sponsorship: Mapped[bool] = mapped_column(Boolean, default=True)
+    visa_status: Mapped[str] = mapped_column(String(30), default="")  # "f1_opt", "stem_opt", "h1b", "citizen_gc", ""
+    opt_end: Mapped[date | None] = mapped_column(Date)
+    locations: Mapped[list] = mapped_column(JSON, default=list)  # preferred US states or cities; empty = anywhere
+    vector: Mapped[bytes | None] = mapped_column(LargeBinary)  # the resume's embedding (float32)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class JobVector(Base):
+    """A job's embedding (title + the start of its description), computed once and reused for every profile."""
+
+    __tablename__ = "job_vectors"
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    vector: Mapped[bytes] = mapped_column(LargeBinary)  # float32, normalized
+    described: Mapped[bool] = mapped_column(Boolean, default=False)  # embedded with a description, not just the title
+
+
+class JobMatch(Base):
+    """How well the profile fits a job (app/matching.py score), for one profile version."""
+
+    __tablename__ = "job_matches"
+    __table_args__ = (Index("ix_job_matches_version_score", "profile_version", "score"),)
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    profile_version: Mapped[int] = mapped_column(Integer)
+    score: Mapped[int] = mapped_column(Integer)
+    detail: Mapped[dict] = mapped_column(JSON)  # parts, matched/missing skills, notes
 
 
 APPLICATION_STATUSES = ["saved", "applied", "assessment", "interviewing", "offer", "rejected", "withdrawn", "ghosted"]

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 
@@ -22,11 +23,14 @@ from app.everify import lookup as everify_lookup
 from app.logos import logo_domain
 from app.uscis import lookup as uscis_lookup
 from app.h1b import role_history, sponsor_index
-from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobEvent, JobLocation
+from app.models import APPLICATION_STATUSES, Application, Company, H1BSponsor, Job, JobEvent, JobLocation, JobMatch, UserProfile
 from app.notify.email import email_configured, email_mode, send_test
 from app.pipeline.detect import detect_from_page
 from app.pipeline import liveness
+from app import matching
+from app.pipeline import scoring
 from app.pipeline.describe import fetch_description
+from app.pipeline.scoring import ensure_scores
 from app.pipeline.poller import (
     MIN_DESCRIPTION_CHARS, USER_AGENT, apply_flags, backfill, poll_once, refresh_role_match, refresh_role_match_for,
 )
@@ -76,6 +80,7 @@ def run_poll(lane: str) -> dict:
         if lane == "fast":
             _place_counts(force=True)  # location picker counts include this poll's jobs
             threading.Thread(target=_warm_suggestions, daemon=True).start()
+            scoring.refresh_in_background()  # score this poll's new jobs against the resume
         return summary
     except Exception:
         log.exception("Poll of %s lane failed", lane)
@@ -98,6 +103,7 @@ async def lifespan(app: FastAPI):
             include, exclude = list(p.include_keywords), list(p.exclude_keywords)
         threading.Thread(target=refresh_role_match, args=(include, exclude), daemon=True).start()  # rules may have changed
         threading.Thread(target=_warm_suggestions, daemon=True).start()  # the "Your roles" bar's counts
+        scoring.refresh_in_background()  # jobs found while the backend was off
         _open_counts_lock.acquire()
         threading.Thread(target=_recount_open_jobs, daemon=True).start()  # the Sources page's counts
         first_run = datetime.now() if settings.poll_on_startup else None
@@ -182,6 +188,7 @@ class JobOut(BaseModel):
     everify_text: bool  # the description says the employer uses E-Verify
     everify: str | None  # the employer in USCIS's E-Verify list: "yes" (enrolled), "ended", None (not found)
     logo_domain: str | None  # the employer's website, for its logo (app/logos.py); None shows initials
+    match: dict | None = None  # resume match (app/matching.py): score, matched/missing skills; None without a resume
     seniority: str
     min_years: int | None
     exp_level: str
@@ -356,8 +363,17 @@ def _repeat_kinds(session: Session, jobs: list[Job]) -> dict[int, str]:
     return {job_id: kind for job_id, kind in rows}
 
 
+def _match_brief(m: JobMatch | None) -> dict | None:
+    """What a job card shows of a match: the score and a few matched and missing skills."""
+    if m is None:
+        return None
+    d = m.detail or {}
+    return {"score": m.score, "matched": (d.get("matched") or [])[:4], "missing": (d.get("missing") or [])[:3],
+            "skills_asked": d.get("skills_asked", 0), "notes": d.get("notes") or []}
+
+
 def _job_out(job: Job, repeat_kind: str | None = None) -> dict:
-    skip = ("company", "source", "places", "application", "repost_kind", "logo_domain")
+    skip = ("company", "source", "places", "application", "repost_kind", "logo_domain", "match")
     data = {k: getattr(job, k) for k in JobOut.model_fields if k not in skip}
     if job.is_repost:  # jobs flagged before kinds were recorded: no original means resurfaced
         data["repost_kind"] = repeat_kind or ("repost" if job.repost_of_id else "resurfaced")
@@ -424,7 +440,7 @@ def list_jobs(
     related: bool = True,
     also: list[str] = Query([]),
     skip: list[str] = Query([]),
-    sort: Literal["newest", "posted", "company", "sponsor"] = "newest",
+    sort: Literal["newest", "posted", "company", "sponsor", "match"] = "newest",
     status: Literal["open", "closed", "all"] = "open",
     countries: list[str] = Query([]),
     states: list[str] = Query([]),
@@ -564,6 +580,18 @@ def list_jobs(
     # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
     # (descriptions), then load just the page's jobs. Selecting full rows made a search take ~6 s.
     ids = stmt.with_only_columns(Job.id)
+    profile_version = None
+    if sort == "match":
+        profile = session.get(UserProfile, 1)
+        profile_version = profile.version if profile and profile.resume_text else -1
+
+    def with_match(q):
+        """Best match first (unscored jobs last), for sort=match."""
+        if profile_version is None:
+            return q
+        return q.outerjoin(JobMatch, and_(JobMatch.job_id == Job.id, JobMatch.profile_version == profile_version))
+
+    ids = with_match(ids)
     if fresh_counts:
         # One scan, newest first, so the 1 h and 6 h counts are exact even when the day's count is capped.
         now = datetime.now(timezone.utc)
@@ -584,8 +612,22 @@ def list_jobs(
         "company": (Job.company_name, Job.first_seen_at.desc()),
         # Plain DESC so ix_jobs_by_sponsor can serve it; SQLite sorts NULL (no filings) last in DESC order.
         "sponsor": (Job.h1b_filings.desc(), Job.first_seen_at.desc()),
+        "match": (JobMatch.score.desc().nulls_last(), Job.listed_at.desc(), Job.id.desc()),
     }[sort]
-    if not tiers:
+    if not tiers and profile_version is not None:
+        # Best match: walk ix_job_matches_version_score from the top and check each job's filters, stopping
+        # after a page. Sorting every matching job by a joined score took 12 s for "For you". Jobs not scored
+        # yet (only while the background scoring runs) follow, newest first.
+        scored = (stmt.with_only_columns(Job.id)
+                  .join(JobMatch, and_(JobMatch.job_id == Job.id, JobMatch.profile_version == profile_version))
+                  .order_by(JobMatch.score.desc(), JobMatch.job_id.desc()))
+        page_ids = list(session.scalars(scored.limit(limit).offset(offset)))
+        if len(page_ids) < limit:
+            n_scored = len(page_ids) + offset if page_ids else session.scalar(
+                select(func.count()).select_from(scored.order_by(None).limit(offset).subquery()))
+            unscored = ids.where(JobMatch.job_id.is_(None)).order_by(Job.listed_at.desc(), Job.id.desc())
+            page_ids += list(session.scalars(unscored.limit(limit - len(page_ids)).offset(max(0, offset - n_scored))))
+    elif not tiers:
         page_ids = list(session.scalars(ids.order_by(*order).limit(limit).offset(offset)))
     else:
         # Ranked search: exact phrase, then every word, then related roles, each in the chosen sort. Ranking
@@ -599,7 +641,7 @@ def list_jobs(
                                      {"m": tier_matches[i], "cap": FTS_FIRST_MAX + 1}) <= FTS_FIRST_MAX
                 if few:  # start this tier from its own matches, like a narrow search
                     # Without the whole search's (broad) match set, so SQLite starts from this tier's few.
-                    tier_ids = build(True, with_search=False).with_only_columns(Job.id).where(tier)
+                    tier_ids = with_match(build(True, with_search=False).with_only_columns(Job.id)).where(tier)
             if to_skip:
                 in_tier = session.scalar(select(func.count()).select_from(tier_ids.limit(to_skip).subquery()))
                 if in_tier < to_skip:
@@ -621,7 +663,8 @@ def list_jobs(
         )
     }
     kinds = _repeat_kinds(session, list(loaded.values()))
-    items = [_job_out(loaded[i], kinds.get(i)) for i in page_ids if i in loaded]
+    matches = ensure_scores(session, [i for i in page_ids if i in loaded])  # scores a page of search results on demand
+    items = [{**_job_out(loaded[i], kinds.get(i)), "match": _match_brief(matches.get(i))} for i in page_ids if i in loaded]
     return {"total": min(total, COUNT_CAP), "total_capped": total > COUNT_CAP, "related_terms": related_terms, "items": items}
 
 
@@ -642,6 +685,8 @@ def get_job(job_id: int, session: Session = Depends(get_session)):
     data["h1b_roles"] = role_history(session, job.company_name or job.company.name, job.title)
     data["everify_info"] = everify_lookup(session, job.company_name or job.company.name)
     data["uscis"] = uscis_lookup(session, job.company_name or job.company.name)
+    full = ensure_scores(session, [job.id]).get(job.id)
+    data["match"] = full.detail if full else None
     return data
 
 
@@ -1080,6 +1125,103 @@ def _compute_suggestions(session: Session, picked: set[str]) -> list[dict]:
     suggestions.sort(key=lambda s: -s["open_jobs"])
     _suggestion_cache[key] = (datetime.now(timezone.utc), suggestions)
     return suggestions
+
+
+class ResumeIn(BaseModel):
+    filename: str
+    data_base64: str  # the file's bytes (PDF, .docx or .txt), base64-encoded by the browser
+
+
+class ProfileIn(BaseModel):
+    skills: list[str] | None = None
+    years: float | None = None
+    degree: str | None = None
+    target_roles: list[str] | None = None
+    needs_sponsorship: bool | None = None
+    visa_status: str | None = None
+    opt_end: date | None = None
+    locations: list[str] | None = None
+
+
+def _profile_out(session: Session, profile: UserProfile | None) -> dict:
+    prefs = get_prefs(session)
+    if not profile or not profile.resume_text:
+        return {"has_resume": False, "scoring": scoring.status(), "your_roles": prefs.include_keywords,
+                "vocabulary": list(matching.SKILLS)}
+    roles = {r.lower() for r in prefs.include_keywords}
+    return {
+        "has_resume": True, "filename": profile.filename, "uploaded_at": profile.uploaded_at,
+        "skills": profile.skills, "years": profile.years, "degree": profile.degree,
+        "target_roles": profile.target_roles, "needs_sponsorship": profile.needs_sponsorship,
+        "visa_status": profile.visa_status, "opt_end": profile.opt_end, "locations": profile.locations,
+        "suggested_roles": [r for r in profile.target_roles if r.lower() not in roles],
+        "your_roles": prefs.include_keywords, "resume_preview": profile.resume_text[:1500],
+        "scoring": scoring.status(), "version": profile.version, "vocabulary": list(matching.SKILLS),
+        "scored": session.scalar(select(func.count()).select_from(JobMatch).where(JobMatch.profile_version == profile.version)),
+    }
+
+
+@app.get("/api/profile")
+def read_profile(session: Session = Depends(get_session)):
+    return _profile_out(session, session.get(UserProfile, 1))
+
+
+@app.post("/api/profile/resume")
+def upload_resume(body: ResumeIn, session: Session = Depends(get_session)):
+    """Read a resume, extract its skills, years, degree and roles, embed it, and rescore the feed."""
+    try:
+        data = base64.b64decode(body.data_base64, validate=True)
+    except ValueError:
+        raise HTTPException(400, "The file couldn't be read.")
+    if len(data) > 5_000_000:
+        raise HTTPException(400, "The file is over 5 MB.")
+    try:
+        text_ = matching.resume_text(body.filename, data)
+    except Exception:
+        raise HTTPException(400, "The file couldn't be read. Try a PDF, a .docx or plain text.")
+    if len(text_.strip()) < 200:
+        raise HTTPException(400, "Very little text came out of that file (a scanned image?). Try another PDF or paste the text as a .txt file.")
+    profile = session.get(UserProfile, 1) or UserProfile(id=1, version=0)
+    session.add(profile)
+    profile.filename = body.filename[:300]
+    profile.uploaded_at = datetime.now(timezone.utc)
+    profile.resume_text = text_
+    profile.skills = matching.extract_skills(text_)
+    profile.years = matching.resume_years(text_)
+    profile.degree = matching.resume_degree(text_)
+    profile.target_roles = matching.resume_roles(text_)
+    profile.vector = matching.embed([matching.resume_for_embedding(text_)])[0].tobytes()
+    profile.version = (profile.version or 0) + 1
+    session.commit()
+    scoring.refresh_in_background()
+    return _profile_out(session, profile)
+
+
+@app.put("/api/profile")
+def update_profile(body: ProfileIn, session: Session = Depends(get_session)):
+    """Correct what was read from the resume, or set visa status and places; the feed is rescored."""
+    profile = session.get(UserProfile, 1)
+    if not profile or not profile.resume_text:
+        raise HTTPException(400, "Upload a resume first.")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(profile, field, value)
+    profile.version += 1
+    session.commit()
+    scoring.refresh_in_background()
+    return _profile_out(session, profile)
+
+
+@app.delete("/api/profile/resume")
+def delete_resume(session: Session = Depends(get_session)):
+    """Remove the resume and everything read from it (the scores go with it)."""
+    profile = session.get(UserProfile, 1)
+    if profile:
+        profile.resume_text, profile.filename, profile.vector = "", "", None
+        profile.skills, profile.target_roles, profile.years, profile.degree = [], [], None, ""
+        profile.version += 1
+        session.execute(text("DELETE FROM job_matches"))
+        session.commit()
+    return _profile_out(session, profile)
 
 
 @app.post("/api/alerts/test")

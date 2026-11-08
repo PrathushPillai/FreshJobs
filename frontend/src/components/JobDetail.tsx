@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
-import { api, formatDateTime, type H1BHistory, type JobDetail as JobDetailType, money, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
-import { Badge, CompanyAvatar, ExperienceBadge, RepeatBadge, SponsorBadge, TrackControl, VisaSignalBadges } from './ui'
+import { api, formatDateTime, type H1BHistory, type JobDetail as JobDetailType, type MatchDetail, money, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
+import { Badge, CompanyAvatar, ExperienceBadge, MatchRing, RepeatBadge, SponsorBadge, TrackControl, VisaSignalBadges } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
 function guessEmail(pattern: string, domain: string, name: string): string | null {
@@ -225,6 +225,7 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
         </p>
       )}
       <RepeatNote job={j} />
+      {j.match && <WhyMatch match={j.match} />}
       <VisaSnapshot job={j} />
       <h3 className="font-display text-sm font-bold uppercase tracking-wider text-slate-500">Details</h3>
       <dl className="-mt-3 grid grid-cols-[auto_1fr] gap-x-5 gap-y-2.5 rounded-2xl bg-slate-50/80 p-5 text-sm ring-1 ring-slate-100">
@@ -488,6 +489,58 @@ function VisaSnapshot({ job }: { job: JobDetailType }) {
           </div>
         ))}
       </div>
+    </section>
+  )
+}
+
+const MATCH_PARTS: { key: keyof MatchDetail['parts']; label: string; weight: string }[] = [
+  { key: 'skills', label: 'Skills asked for', weight: '35%' },
+  { key: 'fit', label: 'Overall fit with your resume', weight: '30%' },
+  { key: 'role', label: 'Role you want', weight: '15%' },
+  { key: 'experience', label: 'Experience asked', weight: '15%' },
+  { key: 'education', label: 'Education', weight: '5%' },
+]
+
+/** "Why it matches you": the score, each weighted part, the skills you have and lack, and the adjustments. */
+function WhyMatch({ match }: { match: MatchDetail }) {
+  return (
+    <section className="rounded-2xl bg-gradient-to-br from-brand-50 via-white to-emerald-50 p-5 ring-1 ring-brand-100">
+      <div className="flex items-center gap-4">
+        <MatchRing score={match.score} size={64} />
+        <div>
+          <h3 className="font-display text-sm font-bold uppercase tracking-wider text-brand-800">Why it matches you</h3>
+          <p className="text-sm text-slate-600">Scored from your resume: skills, overall fit, role, experience and education, then adjusted for your visa and places.</p>
+        </div>
+      </div>
+      <div className="mt-4 space-y-2">
+        {MATCH_PARTS.map((p) => {
+          const v = Math.round(match.parts[p.key])
+          return (
+            <div key={p.key} className="grid grid-cols-[1fr_auto] items-center gap-x-3 text-sm">
+              <span className="text-slate-700">{p.label} <span className="text-xs text-slate-400">({p.weight})</span></span>
+              <span className="font-display font-bold text-slate-800">{v}</span>
+              <span className="col-span-2 h-1.5 overflow-hidden rounded-full bg-slate-200/70">
+                <span className="block h-full rounded-full bg-gradient-to-r from-brand-500 to-violet-500" style={{ width: `${Math.max(2, Math.min(100, v))}%` }} />
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      {(match.matched.length > 0 || match.missing.length > 0) && (
+        <div className="mt-4 flex flex-wrap gap-1.5 text-xs">
+          {match.matched.map((s) => (
+            <span key={s} className="rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-800">✓ {s}</span>
+          ))}
+          {match.missing.map((s) => (
+            <span key={s} className="rounded-full bg-rose-50 px-2 py-0.5 font-medium text-rose-700 ring-1 ring-rose-200">✗ {s}</span>
+          ))}
+        </div>
+      )}
+      {match.notes.length > 0 && (
+        <ul className="mt-3 list-disc space-y-0.5 pl-5 text-xs text-slate-600">
+          {match.notes.map((n) => <li key={n}>{n}</li>)}
+        </ul>
+      )}
     </section>
   )
 }

@@ -4,10 +4,11 @@ import { api, timeAgo } from './api'
 import Companies from './components/Companies'
 import Elsewhere from './components/Elsewhere'
 import Feed from './components/Feed'
+import Profile from './components/Profile'
 import Settings from './components/Settings'
 import Tracker from './components/Tracker'
 
-const TABS = ['Feed', 'LinkedIn & more', 'Tracker', 'Sources', 'Settings'] as const
+const TABS = ['Feed', 'My profile', 'LinkedIn & more', 'Tracker', 'Sources', 'Settings'] as const
 type Tab = (typeof TABS)[number]
 
 function Logo() {
@@ -40,6 +41,10 @@ function Stat({ value, label, accent = false, title }: { value: number; label: s
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('Feed')
+  const goTo = (t: Tab) => {
+    setTab(t)
+    window.scrollTo(0, 0)
+  }
   const queryClient = useQueryClient()
   const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: (q) => (q.state.data?.polling ? 10_000 : 30_000) })
   const poll = useMutation({
@@ -65,10 +70,7 @@ export default function App() {
             {TABS.map((t) => (
               <button
                 key={t}
-                onClick={() => {
-                  setTab(t)
-                  window.scrollTo(0, 0)
-                }}
+                onClick={() => goTo(t)}
                 className={`flex items-center whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm font-semibold transition ${
                   tab === t ? 'bg-white text-ink shadow' : 'text-slate-300 hover:bg-white/10 hover:text-white'
                 }`}
@@ -113,7 +115,8 @@ export default function App() {
             Can't reach the backend. Is it running on port 8000?
           </p>
         )}
-        {tab === 'Feed' && <Feed stats={s} />}
+        {tab === 'Feed' && <Feed stats={s} onOpenProfile={() => goTo('My profile')} />}
+        {tab === 'My profile' && <Profile onSeeMatches={() => goTo('Feed')} />}
         {tab === 'LinkedIn & more' && <Elsewhere />}
         {tab === 'Tracker' && <Tracker />}
         {tab === 'Sources' && <Companies />}

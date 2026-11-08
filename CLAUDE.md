@@ -20,7 +20,8 @@ FreshJobs is a personal job feed for an international student looking for work i
 - **Shown but flagged:** jobs that rule out sponsorship or OPT/CPT (`no_sponsor`). The Feed's `hide_no_sponsor` defaults to false, because the user wants the chance to persuade those employers. A one-time localStorage migration (`freshjobs.migrated.showNoSponsor`) switches it off in old saved filters. The API parameter still defaults to true, and so do email alerts (a Settings pref).
 - **Other features:** an application tracker, a recruiter finder (search links plus Hunter.io lookup), and email alerts.
 - **H-1B sponsor data:** every job shows its employer's certified H-1B filings, imported from the DOL's LCA disclosure file (`app/h1b.py`).
-- **Not built yet:** a Claude chatbot with tools over the jobs DB, and a cloud deploy.
+- **Resume match:** upload a resume in **My profile** and every job gets a 0–100 match score with its reasons (see Architecture).
+- **Not built yet:** a Claude chatbot with tools over the jobs DB, logins (the profile is a single row, id 1), and a cloud deploy.
 
 Scraping LinkedIn, Indeed, Glassdoor or Meta's careers site is deliberately out of scope, including through third-party scrapers such as Apify actors (they work by getting around LinkedIn's bot protection) (it's against their terms, and Meta's robots.txt forbids it); their postings come in through the Google Jobs API instead. Never bypass bot protection: dol.gov blocks scripted downloads, so the user downloads the LCA file in a browser.
 
@@ -185,11 +186,43 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
   - `notify.email.email_mode()` is "off", "test" or "on". "test" means `SMTP_HOST` or `ALERT_TO` is a local address, so nothing reaches a real inbox. `/api/status` returns it as `email_mode`, and Settings says so instead of "connected".
   - `POST /api/alerts/test` sends a test email and returns the SMTP error if it fails. Settings has a "Send test email" button for it.
   - As of 2026-11-06 the user's `.env` still points at the local test sink from setup (`localhost:1025`, which isn't running), so alerts have never been delivered. The user has to add their Gmail SMTP settings (an app password) themselves.
+- **Resume match** (`app/matching.py`, `pipeline/scoring.py`, `Profile.tsx`). Everything runs locally; no API key.
+  - **Reading the resume:** `POST /api/profile/resume` takes `{filename, data_base64}` (PDF via pypdf, .docx via its XML, or text; max 5 MB; under 200 characters of text is a 400). It extracts:
+    - skills (`SKILLS`, ~130 canonical skills with regexes; Swift, R and Go are case-sensitive, so "swift" and "go" don't count);
+    - years of experience (the union of date ranges with education lines skipped, or a stated "N years");
+    - the highest degree;
+    - target roles (`resume_roles`): the job titles the resume itself writes (up to three words before a title noun such as engineer, developer, analyst or nurse), only at a line start or after a separator, so "worked with the product manager" isn't a role. Seniority words and "intern" are dropped, and the most mentioned titles come first. Taking titles from the search role families missed "Frontend Developer" and "Registered Nurse", whose families hold single words.
+  - **Editing the profile:** the user can correct all of it (`PUT /api/profile`, which bumps `version` and rescores). `DELETE /api/profile/resume` clears it and its scores. The table `user_profiles` (one row, id 1) also holds visa status, needs_sponsorship, OPT end date, preferred places and the resume embedding.
+  - **Score** (`matching.score`):
+    - Weights: skills 35%, fit 30%, role 15%, experience 15%, education 5%.
+    - Adjustments: ×0.55 if the job rules out sponsorship and the user needs it, +4 if it welcomes OPT/CPT, ×0.85 outside the preferred places.
+    - A job with under 100 characters of description is capped at `UNDESCRIBED_CAP` (70) with the note "scored from the title only": with no skills, years or degree to check, title fit alone gave 90.
+    - Generic skills (Excel, Git, communication...) weigh 0.3. When a job names few skills, the skills part leans on fit (confidence = min(1, skill weight/3)), so a job with one generic skill can't score high by luck.
+  - **Fit** is the cosine between the resume and job embeddings from fastembed's `BAAI/bge-small-en-v1.5` (384 dims, ONNX on `embed_threads`=2 CPU threads). It's mapped from `FIT_LOW`..`FIT_HIGH` (0.57..0.76) to 0..100.
+    - Measured on real jobs: unrelated roles 0.55–0.59, neighbouring roles ~0.66, the same role 0.70–0.75.
+    - Accuracy check (2026-11-07): four made-up resumes (data engineer, frontend, ML engineer, nurse) against the 25 newest open US jobs in nine role groups. Each resume's own group had the highest median: frontend 64, nurse 59, ML 55, data engineer 57 on Data Analyst and 42 on Data Engineer jobs (12 of those 25 rule out sponsorship, and many ask more years). Unrelated groups scored 19 to 33. Top matches had the right titles (Frontend Developer 91, Machine Learning Engineer 93, RN 91). 3,874 random jobs from all 32 source types scored with no errors, at about 17 ms each plus the embedding.
+  - **Model files** go to `models_dir` (65 MB). The default is the database's folder + `/models`, i.e. `C:\Users\prath\FreshJobs\models`. Never AppData (MSIX redirect, see Config).
+  - **Storage:**
+    - A job's embedding is computed once (`job_vectors`), from its title plus the first 1,000 characters of its description. With 2,000 it ran at ~1.6 jobs/s under load.
+    - Scores are stored per profile version (`job_matches`, index `(profile_version, score)`).
+  - **Refresh:**
+    - `scoring.refresh_in_background()` runs at startup, after each fast poll and after a profile change. It starts `python -m app.pipeline.scoring` as a separate below-normal-priority process (no window), unless one holds `scoring.lock` (in the models folder). Inside the busy backend, embedding ran at ~1 job/s, because the pollers compete for the GIL and CPU; on its own it runs at ~6 jobs/s.
+    - `refresh()` scores open, non-repost, US-eligible "For you" jobs that lack a current score, newest first, committing every 64. It stops if the profile changes, and the process repeats it until nothing is left, so jobs found and profile edits made meanwhile are picked up.
+    - Progress is written to `scoring.json`; `GET /api/profile` reports it (`scoring`, via `status()`). The process outlives a backend restart, and the lock stops a second one from starting.
+    - The first pass over the ~26k For-you jobs takes over an hour on this laptop. Later passes only embed new jobs.
+    - Search results outside "For you" are scored on demand, a page at a time (`ensure_scores`).
+  - **API:**
+    - Every job in a list carries `match` (score, a few matched and missing skills, notes); the detail carries the full breakdown.
+    - `sort=match` ("Best match") walks the score index and checks each job's filters, then lists unscored jobs newest first. Sorting every match by a joined score took 12 s; this takes 0.7 s.
+  - **UI:**
+    - Once a resume exists, the Feed switches to Best match once (localStorage `freshjobs.migrated.matchSort`).
+    - For you shows a "🔥 Your top matches posted today" strip (score ≥ 50), and an upload banner when there's no resume.
+    - Cards show a `MatchLine` (ring, ✓ matched, ✗ missing). The job panel has "Why it matches you" with each weighted part.
 - **Recruiters** (`app/recruiters.py`): LinkedIn and Google search links, plus an on-demand Hunter.io domain search (HR department first), cached 30 days in `recruiter_cache`.
 - **Tracker:** the `applications` table copies the job's basics (it survives the job closing) or holds a manual entry. The `/api/applications` routes provide CRUD. Moving a status past `saved` stamps `applied_at`.
 - **Config** (`app/config.py`): pydantic-settings reads the **repo-root** `.env`, not `backend/.env`. The user's `.env` sets `DATABASE_URL` to `C:\Users\prath\FreshJobs\jobs.db`: the repo lives in OneDrive, and syncing the multi-GB database slowed every query. Never put it under `AppData`: the Claude desktop app is a packaged (MSIX) app, so a folder that its processes create under `AppData\Local` is silently redirected to `AppData\Local\Packages\Claude_*\LocalCache\Local\`. The app's tools and preview servers then see the file, but `start-freshjobs.bat` and the user's own terminals don't, and the backend fails with "unable to open database file". Without it the default is `backend/jobs.db`. API keys: `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`, `HUNTER_API_KEY`, and SMTP settings.
 - **Frontend** (`frontend/src/`): TanStack Query plus Tailwind v4.
-  - Tabs: Feed, LinkedIn & more, Tracker, Sources and Settings.
+  - Tabs: Feed, My profile, LinkedIn & more, Tracker, Sources and Settings.
   - **Look** (redesigned 2026-11-06 to make people stay):
     - **Colour and type.** A violet-indigo `brand` palette is defined in `index.css` `@theme`. Primary actions, selections and active pills use `brand-*`, often as `from-brand-600 to-violet-600` gradients. Green (`emerald`) is reserved for freshness and good news (FreshnessBadge, Live dot, "new today", Enrolled), red (`rose`) for ruled-out signals, and `ink` (#0c0a1d) for the glassy header. Headings, numbers and the logo use Plus Jakarta Sans (`font-display`, loaded in `index.html`); body text is Inter.
     - **Background and banners.** The page has soft radial glows (`body` in `index.css`). The Feed's top is a dark violet `.hero` with a faint grid (`.hero-grid`) holding the big search bar and the For you / All jobs switch. Other tabs open with `PageHeader` (`ui.tsx`), the same band in a smaller size.
