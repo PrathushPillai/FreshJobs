@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api, type ExpLevel, type Job, type JobQuery, type Status, postedText, REPEAT_KINDS, REPEAT_LABELS, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { LAST_QUERY_KEY } from './Elsewhere'
@@ -61,7 +61,11 @@ const DEFAULT_FILTERS: Filters = {
   since_hours: undefined,
   posted_within_hours: undefined,
 }
-const STORAGE_KEY = 'freshjobs.filters.v2'
+const STORAGE_KEY = 'freshjobs.filters.v2'  // before v3: one set shared by both views; seeds both
+// For you and All jobs each keep their own filters and sort, so Best match in For you doesn't change All jobs.
+const VIEWS_KEY = 'freshjobs.filters.v3'
+type View = 'forYou' | 'all'
+type ViewFilters = { view: View; forYou: Filters; all: Filters }
 
 /** Countries, plus the states and cities inside the one country (and state) picked, with open-job counts. */
 function useLocationFacets(countries: string[], states: string[]) {
@@ -95,6 +99,24 @@ function loadFilters(): Filters {
   } catch {
     return DEFAULT_FILTERS
   }
+}
+
+function loadViews(): ViewFilters {
+  try {
+    const saved = localStorage.getItem(VIEWS_KEY)
+    if (saved) {
+      const v = JSON.parse(saved) as Partial<ViewFilters>
+      return {
+        view: v.view === 'all' ? 'all' : 'forYou',
+        forYou: { ...DEFAULT_FILTERS, ...v.forYou, for_you: true },
+        all: { ...DEFAULT_FILTERS, ...v.all, for_you: false },
+      }
+    }
+  } catch {
+    // storage unavailable or unreadable: start from the old shared set
+  }
+  const old = loadFilters()  // the one set both views shared before; each view starts from it
+  return { view: old.for_you ? 'forYou' : 'all', forYou: { ...old, for_you: true }, all: { ...old, for_you: false } }
 }
 
 function isNew(job: Job) {
@@ -306,7 +328,11 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const [search, setSearch] = useState('')
   const [q, setQ] = useState('')
   const [skip, setSkip] = useState<string[]>([])  // related roles switched off for this search
-  const [filters, setFilters] = useState<Filters>(loadFilters)
+  const [views, setViews] = useState<ViewFilters>(loadViews)
+  const filters = views[views.view]
+  const setFilters = (update: Filters | ((f: Filters) => Filters)) =>
+    setViews((v) => ({ ...v, [v.view]: { ...(typeof update === 'function' ? update(v[v.view]) : update), for_you: v.view === 'forYou' } }))
+  const setView = (forYouView: boolean) => setViews((v) => ({ ...v, view: forYouView ? 'forYou' : 'all' }))
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
   const wide = useWideScreen()
@@ -318,7 +344,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
     } catch {
       return
     }
-    setFilters((f) => ({ ...f, sort: 'match' }))
+    setViews((v) => ({ ...v, forYou: { ...v.forYou, sort: 'match' } }))  // For you only; All jobs keeps its sort
   }, [hasResume])
 
   useEffect(() => {
@@ -328,11 +354,11 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   useEffect(() => {
     setOffset(0)
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(filters))
+      localStorage.setItem(VIEWS_KEY, JSON.stringify(views))
     } catch {
       // storage unavailable: filters just won't persist
     }
-  }, [filters])
+  }, [views])
   useEffect(() => {
     setOffset(0)
     setSkip([])
@@ -343,19 +369,61 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
     }
   }, [q])
 
-  // About 1 in 5 postings never states a level; picking "Entry" shouldn't silently drop them.
-  const { include_unstated, for_you, ...rest } = filters
-  const exp_levels = rest.exp_levels.length && include_unstated ? [...rest.exp_levels, 'unknown' as const] : rest.exp_levels
-  // "For you": titles matching the roles in Settings. A search looks through every job instead.
-  const forYou = for_you && !q
-  // A search includes related roles (exact-title matches always rank first); "Exact title" turns them
-  // off, and each related role can be switched off on its own (the chips under the count).
+  // The API query for a set of filters (the applied ones, or a staged draft being prefetched).
+  const queryFor = (fl: Filters, page: number): JobQuery => {
+    // About 1 in 5 postings never states a level; picking "Entry" shouldn't silently drop them.
+    const { include_unstated, for_you: forYouView, ...rest } = fl
+    const levels = rest.exp_levels.length && include_unstated ? [...rest.exp_levels, 'unknown' as const] : rest.exp_levels
+    // A search includes related roles (exact-title matches always rank first); "Exact title" turns them
+    // off, and each related role can be switched off on its own (the chips under the count).
+    const exactOnly = !fl.related
+    // "For you": titles matching the roles in Settings. A search looks through every job instead.
+    return { ...rest, related: !exactOnly, skip: exactOnly ? [] : skip, exp_levels: levels, q, alert_roles_only: forYouView && !q, limit: PAGE, offset: page }
+  }
+  const forYou = filters.for_you && !q
   const exact = !filters.related
-  const query: JobQuery = { ...rest, related: !exact, skip: exact ? [] : skip, exp_levels, q, alert_roles_only: forYou, limit: PAGE, offset }
+  const query = queryFor(filters, offset)
   const jobs = useQuery({ queryKey: ['jobs', query], queryFn: () => api.jobs(query), placeholderData: keepPreviousData, refetchInterval: 60_000 })
-  const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
+  const set = (patch: Partial<Filters>) => setFilters((fl) => ({ ...fl, ...patch }))
+
+  // Filter panels stage their changes in `draft` until Apply, so a filter takes effect only when the user says
+  // so. While they choose, the draft's first page loads in the background (and lands in the backend's response
+  // cache), so Apply usually shows the new results at once.
+  const [draft, setDraft] = useState<Filters | null>(null)
+  const f = draft ?? filters  // what the open panel shows
+  const stage = (patch: Partial<Filters>) => setDraft((d) => ({ ...(d ?? filters), ...patch }))
+  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(filters)
+  const [appliedAt, setAppliedAt] = useState(0)
+  const applyDraft = () => {
+    if (draft && dirty) {
+      setFilters(draft)
+      setAppliedAt(Date.now())
+    }
+    setDraft(null)
+  }
+  const cancelDraft = () => setDraft(null)
+  const staging = { onApply: applyDraft, onCancel: cancelDraft, dirty }
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    if (!draft || !dirty) return
+    const t = setTimeout(() => {
+      const dq = queryFor(draft, 0)
+      queryClient.prefetchQuery({ queryKey: ['jobs', dq], queryFn: () => api.jobs(dq), staleTime: 30_000 })
+    }, 350)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- queryFor reads q and skip, which the draft key covers
+  }, [draft, dirty, q, skip])
+  // "Applying filters…" until the new results arrive, then "✓ Filters applied" for a few seconds.
+  const [showApplied, setShowApplied] = useState(false)
+  useEffect(() => {
+    if (!appliedAt || jobs.isFetching) return
+    setShowApplied(true)
+    const t = setTimeout(() => setShowApplied(false), 3000)
+    return () => clearTimeout(t)
+  }, [appliedAt, jobs.isFetching])
+  const applying = appliedAt > 0 && jobs.isFetching && jobs.isPlaceholderData
   const toggleLevel = (level: ExpLevel) =>
-    set({ exp_levels: filters.exp_levels.includes(level) ? filters.exp_levels.filter((l) => l !== level) : [...filters.exp_levels, level] })
+    stage({ exp_levels: f.exp_levels.includes(level) ? f.exp_levels.filter((l) => l !== level) : [...f.exp_levels, level] })
   const related = jobs.data?.related_terms ?? []
   // How many of the results have the exact title, shown next to the total while related roles are on.
   const exactCount = useQuery({
@@ -364,7 +432,16 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
     enabled: !!q && !exact,  // in parallel with the results, not after them
     placeholderData: keepPreviousData,
   })
-  const items = jobs.data?.items
+  // Jobs without a saved score (searches, All jobs) get one a moment after the page shows, so the list never
+  // waits for the resume scoring.
+  const unscored = hasResume ? (jobs.data?.items ?? []).filter((j) => !j.match).map((j) => j.id) : []
+  const lateScores = useQuery({
+    queryKey: ['matches', unscored],
+    queryFn: () => api.matches(unscored),
+    enabled: unscored.length > 0,
+    staleTime: 5 * 60_000,
+  })
+  const items = jobs.data?.items.map((j) => (j.match || !lateScores.data?.[j.id] ? j : { ...j, match: lateScores.data[j.id] }))
   // Next/Previous: show the new page from its top, not from the pager at the bottom.
   const resultsTop = useRef<HTMLDivElement>(null)
   const goToPage = (next: number) => {
@@ -406,7 +483,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
                   key={String(v)}
                   role="tab"
                   aria-selected={filters.for_you === v}
-                  onClick={() => set({ for_you: v })}
+                  onClick={() => setView(v)}
                   className={`rounded-full px-4 py-1.5 transition ${filters.for_you === v ? 'bg-white text-brand-800 shadow' : 'text-white/80 hover:text-white'}`}
                 >
                   {v ? '✦ For you' : 'All jobs'}
@@ -467,39 +544,39 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
           </div>
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <FilterPill label={postedLabel !== 'Any time' ? `Posted: ${postedLabel}` : 'Date posted'} active={filters.posted_within_hours !== undefined} onClear={() => set({ posted_within_hours: undefined })}>
+          <FilterPill {...staging} label={postedLabel !== 'Any time' ? `Posted: ${postedLabel}` : 'Date posted'} active={filters.posted_within_hours !== undefined} onClear={() => set({ posted_within_hours: undefined })}>
             <p className="mb-1 px-2 text-xs text-slate-500">When the company posted it</p>
             {POSTED_WINDOWS.map((w) => (
-              <Choice key={w.label} selected={filters.posted_within_hours === w.hours} onClick={() => set({ posted_within_hours: w.hours })}>
+              <Choice key={w.label} selected={f.posted_within_hours === w.hours} onClick={() => stage({ posted_within_hours: w.hours })}>
                 {w.label}
               </Choice>
             ))}
           </FilterPill>
 
-          <FilterPill label={foundLabel !== 'Any time' ? `Found: ${foundLabel}` : 'Found by us'} active={filters.since_hours !== undefined} onClear={() => set({ since_hours: undefined })}>
+          <FilterPill {...staging} label={foundLabel !== 'Any time' ? `Found: ${foundLabel}` : 'Found by us'} active={filters.since_hours !== undefined} onClear={() => set({ since_hours: undefined })}>
             <p className="mb-1 px-2 text-xs text-slate-500">When FreshJobs first saw it (minutes after posting)</p>
             {FOUND_WINDOWS.map((w) => (
-              <Choice key={w.label} selected={filters.since_hours === w.hours} onClick={() => set({ since_hours: w.hours })}>
+              <Choice key={w.label} selected={f.since_hours === w.hours} onClick={() => stage({ since_hours: w.hours })}>
                 {w.label}
               </Choice>
             ))}
           </FilterPill>
 
-          <FilterPill
+          <FilterPill {...staging}
             label={expLabel}
             active={filters.exp_levels.length > 0 || filters.max_years !== undefined}
             onClear={() => set({ exp_levels: [], max_years: undefined, include_unstated: true })}
           >
             <div className="space-y-2">
               {EXP_LEVELS.map((level) => (
-                <Toggle key={level} label={EXP_LABELS[level]} checked={filters.exp_levels.includes(level)} onChange={() => toggleLevel(level)} />
+                <Toggle key={level} label={EXP_LABELS[level]} checked={f.exp_levels.includes(level)} onChange={() => toggleLevel(level)} />
               ))}
-              {filters.exp_levels.length > 0 && (
-                <Toggle label="Also jobs that don't say" checked={filters.include_unstated} onChange={(v) => set({ include_unstated: v })} />
+              {f.exp_levels.length > 0 && (
+                <Toggle label="Also jobs that don't say" checked={f.include_unstated} onChange={(v) => stage({ include_unstated: v })} />
               )}
               <select
-                value={filters.max_years ?? ''}
-                onChange={(e) => set({ max_years: e.target.value === '' ? undefined : Number(e.target.value) })}
+                value={f.max_years ?? ''}
+                onChange={(e) => stage({ max_years: e.target.value === '' ? undefined : Number(e.target.value) })}
                 className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
                 aria-label="Maximum years required"
               >
@@ -513,23 +590,23 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             </div>
           </FilterPill>
 
-          <FilterPill label={pillLabel('Country', filters.countries)} active={filters.countries.length > 0} onClear={() => set({ countries: [], states: [], cities: [] })}>
+          <FilterPill {...staging} label={pillLabel('Country', filters.countries)} active={filters.countries.length > 0} onClear={() => set({ countries: [], states: [], cities: [] })}>
             <FacetList
               options={places.data?.countries}
               loading={places.isLoading}
-              selected={filters.countries}
-              onChange={(countries) => set({ countries, states: [], cities: [] })}
+              selected={f.countries}
+              onChange={(countries) => stage({ countries, states: [], cities: [] })}
               placeholder="Search countries"
             />
           </FilterPill>
 
-          <FilterPill label={pillLabel('State', filters.states)} active={filters.states.length > 0} onClear={() => set({ states: [], cities: [] })}>
+          <FilterPill {...staging} label={pillLabel('State', filters.states)} active={filters.states.length > 0} onClear={() => set({ states: [], cities: [] })}>
             {oneCountry ? (
               <FacetList
                 options={places.data?.states}
                 loading={places.isFetching}
-                selected={filters.states}
-                onChange={(states) => set({ states, cities: [] })}
+                selected={f.states}
+                onChange={(states) => stage({ states, cities: [] })}
                 placeholder={oneCountry === 'United States' ? 'Search states (CA, NY, TX…)' : 'Search states / provinces'}
               />
             ) : (
@@ -537,14 +614,14 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             )}
           </FilterPill>
 
-          <FilterPill label={pillLabel('City', filters.cities)} active={filters.cities.length > 0} onClear={() => set({ cities: [] })}>
+          <FilterPill {...staging} label={pillLabel('City', filters.cities)} active={filters.cities.length > 0} onClear={() => set({ cities: [] })}>
             {oneCountry ? (
               <FacetList
                 options={places.data?.cities}
                 loading={places.isFetching}
-                selected={filters.cities}
-                onChange={(cities) => set({ cities })}
-                placeholder={filters.states.length === 1 ? `Search cities in ${filters.states[0]}` : 'Search cities'}
+                selected={f.cities}
+                onChange={(cities) => stage({ cities })}
+                placeholder={f.states.length === 1 ? `Search cities in ${f.states[0]}` : 'Search cities'}
               />
             ) : (
               <p className="max-w-56 text-sm text-slate-500">Pick one country first, then choose its cities.</p>
@@ -562,56 +639,56 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             ⌂ Remote
           </button>
 
-          <FilterPill
+          <FilterPill {...staging}
             label={filters.sponsors_only ? 'H-1B sponsors' : 'Visa'}
             active={filters.sponsors_only || filters.everify_only || filters.hide_no_sponsor}
             onClear={() => set({ sponsors_only: false, everify_only: false, hide_no_sponsor: false })}
           >
             <div className="space-y-2">
-              <Toggle label="Only companies that filed H-1Bs" checked={filters.sponsors_only} onChange={(v) => set({ sponsors_only: v })} />
+              <Toggle label="Only companies that filed H-1Bs" checked={f.sponsors_only} onChange={(v) => stage({ sponsors_only: v })} />
               <Toggle
                 label="Only E-Verify employers (needed for STEM OPT)"
-                checked={filters.everify_only}
-                onChange={(v) => set({ everify_only: v })}
+                checked={f.everify_only}
+                onChange={(v) => stage({ everify_only: v })}
               />
               <Toggle
                 label="Hide jobs that rule out sponsorship or OPT/CPT"
-                checked={filters.hide_no_sponsor}
-                onChange={(v) => set({ hide_no_sponsor: v })}
+                checked={f.hide_no_sponsor}
+                onChange={(v) => stage({ hide_no_sponsor: v })}
               />
             </div>
           </FilterPill>
 
-          <FilterPill
+          <FilterPill {...staging}
             label={`Sort: ${SORTS.find((s) => s.value === filters.sort)?.label}`}
             active={filters.sort !== DEFAULT_FILTERS.sort}
             onClear={() => set({ sort: DEFAULT_FILTERS.sort })}
           >
             {SORTS.map((s) => (
-              <Choice key={s.value} selected={filters.sort === s.value} onClick={() => set({ sort: s.value })}>
+              <Choice key={s.value} selected={f.sort === s.value} onClick={() => stage({ sort: s.value })}>
                 {s.label}
               </Choice>
             ))}
           </FilterPill>
 
-          <FilterPill label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any' })}>
+          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any' })}>
             <div className="space-y-2">
               <Toggle
                 label="Show repeated jobs (hidden by default)"
-                checked={filters.show_reposts}
-                onChange={(v) => set({ show_reposts: v, repeat_kinds: REPEAT_KINDS })}
+                checked={f.show_reposts}
+                onChange={(v) => stage({ show_reposts: v, repeat_kinds: REPEAT_KINDS })}
               />
-              {filters.show_reposts && (
+              {f.show_reposts && (
                 <div className="ml-5 space-y-1 border-l border-slate-200 pl-3">
                   {REPEAT_KINDS.map((k) => (
                     <label key={k} title={REPEAT_LABELS[k].hint} className="flex cursor-pointer select-none items-start gap-1.5 text-sm text-slate-700">
                       <input
                         type="checkbox"
                         className="mt-1 accent-brand-600"
-                        checked={filters.repeat_kinds.includes(k)}
+                        checked={f.repeat_kinds.includes(k)}
                         onChange={(e) => {
-                          const kinds = e.target.checked ? [...filters.repeat_kinds, k] : filters.repeat_kinds.filter((x) => x !== k)
-                          set(kinds.length ? { repeat_kinds: kinds } : { show_reposts: false, repeat_kinds: REPEAT_KINDS })
+                          const kinds = e.target.checked ? [...f.repeat_kinds, k] : f.repeat_kinds.filter((x) => x !== k)
+                          stage(kinds.length ? { repeat_kinds: kinds } : { show_reposts: false, repeat_kinds: REPEAT_KINDS })
                         }}
                       />
                       <span>
@@ -623,8 +700,8 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
                 </div>
               )}
               <select
-                value={filters.tracked}
-                onChange={(e) => set({ tracked: e.target.value as Filters['tracked'] })}
+                value={f.tracked}
+                onChange={(e) => stage({ tracked: e.target.value as Filters['tracked'] })}
                 className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
               >
                 <option value="any">Tracked and untracked</option>
@@ -634,7 +711,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             </div>
           </FilterPill>
 
-          <button onClick={() => setFilters(DEFAULT_FILTERS)} className="ml-auto rounded-full px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-rose-50 hover:text-rose-600">
+          <button onClick={() => setFilters(DEFAULT_FILTERS)} title="Resets this view's filters; the other view keeps its own" className="ml-auto rounded-full px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-rose-50 hover:text-rose-600">
             ↺ Reset all
           </button>
         </div>
@@ -659,6 +736,17 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
 
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 px-1 text-sm text-slate-500">
         <span>
+          {applying && (
+            <span role="status" className="mr-2 inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-0.5 text-xs font-semibold text-brand-700 ring-1 ring-brand-200">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-brand-200 border-t-brand-600" aria-hidden />
+              Applying filters…
+            </span>
+          )}
+          {!applying && showApplied && (
+            <span role="status" className="mr-2 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+              ✓ Filters applied
+            </span>
+          )}
           {jobs.data ? (
             <>
               <b className="font-display text-base font-extrabold text-slate-900">{jobs.data.total.toLocaleString()}{jobs.data.total_capped && '+'}</b> jobs{q && <> for “{q}”</>}

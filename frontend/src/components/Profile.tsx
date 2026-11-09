@@ -234,6 +234,13 @@ export default function Profile({ onSeeMatches }: { onSeeMatches: () => void }) 
             </button>
           </section>
 
+          {p.text_warning && (
+            <p role="alert" className="flex gap-3 rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-900 ring-1 ring-amber-200">
+              <span aria-hidden>⚠️</span>
+              <span>{p.text_warning}</span>
+            </p>
+          )}
+
           <Card title="What we read from your resume" hint="Correct anything that's off: scores update as soon as you save.">
             <Field label="Skills">
               <ChipEditor values={view.skills ?? []} onChange={(skills) => set({ skills })} placeholder="+ Add a skill" options={p.vocabulary} />

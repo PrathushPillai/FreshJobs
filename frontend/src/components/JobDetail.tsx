@@ -201,6 +201,15 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
           >
             Apply on company site ↗
           </a>
+          <a
+            href={j.hiring_posts_url}
+            target="_blank"
+            rel="noreferrer"
+            title={`LinkedIn posts from the past month by people at ${j.company} (or the company) saying they're hiring for this role. Message the poster after you apply.`}
+            className="rounded-full bg-white px-4 py-2.5 text-sm font-semibold text-brand-700 shadow-sm ring-1 ring-brand-200 transition hover:-translate-y-px hover:bg-brand-50"
+          >
+            🔎 Hiring posts on LinkedIn ↗
+          </a>
           <TrackControl job={j} />
         </div>
         {(j.closed_at || closedNow) ? (
@@ -470,9 +479,10 @@ function VisaSnapshot({ job }: { job: JobDetailType }) {
     },
     {
       label: 'OPT / CPT',
-      value: job.student_visa === 'welcome' ? 'Welcome' : job.student_visa === 'excluded' ? 'Ruled out' : 'Not mentioned',
-      sub: job.student_visa === 'welcome' ? 'the posting invites F-1 students' : job.student_visa === 'excluded' ? 'the posting excludes F-1 students' : 'the posting doesn\'t say',
-      tone: job.student_visa === 'welcome'
+      value: job.student_visa === 'welcome' ? 'Welcome' : job.student_visa === 'excluded' ? 'Ruled out' : job.sponsors_text ? 'Sponsors visas' : 'Not mentioned',
+      sub: job.student_visa === 'welcome' ? 'the posting invites F-1 students' : job.student_visa === 'excluded' ? 'the posting excludes F-1 students'
+        : job.sponsors_text ? 'the posting says it sponsors; OPT/CPT not named' : 'the posting doesn\'t say',
+      tone: job.student_visa === 'welcome' || (!job.student_visa && job.sponsors_text)
         ? 'from-emerald-500/15 to-lime-400/10 text-emerald-800 ring-emerald-200'
         : job.student_visa === 'excluded' ? 'from-rose-500/15 to-rose-50 text-rose-800 ring-rose-200' : 'from-slate-100 to-slate-50 text-slate-500 ring-slate-200',
     },

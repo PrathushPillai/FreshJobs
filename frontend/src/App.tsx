@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { api, timeAgo } from './api'
+import { api, BackendDown, timeAgo } from './api'
 import Companies from './components/Companies'
 import Elsewhere from './components/Elsewhere'
 import Feed from './components/Feed'
@@ -46,12 +46,28 @@ export default function App() {
     window.scrollTo(0, 0)
   }
   const queryClient = useQueryClient()
-  const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: (q) => (q.state.data?.polling ? 10_000 : 30_000) })
+  const status = useQuery({
+    queryKey: ['status'],
+    queryFn: api.status,
+    retry: false,
+    // While the backend is starting (or down), ask every 5 s so the page loads as soon as it's up.
+    refetchInterval: (q) => (q.state.status === 'error' ? 5_000 : q.state.data?.polling ? 10_000 : 30_000),
+  })
   const poll = useMutation({
     mutationFn: api.poll,
     onSuccess: () => setTimeout(() => queryClient.invalidateQueries({ queryKey: ['status'] }), 500),
   })
   const s = status.data
+
+  // When the backend comes back (after starting up), reload everything that failed meanwhile.
+  const wasDown = useRef(false)
+  useEffect(() => {
+    if (status.isError) wasDown.current = true
+    else if (wasDown.current && status.isSuccess) {
+      wasDown.current = false
+      queryClient.invalidateQueries()
+    }
+  }, [status.isError, status.isSuccess, queryClient])
 
   // When a check finishes (polling flips true -> false), reload everything so new jobs show up.
   const wasPolling = useRef(false)
@@ -97,7 +113,7 @@ export default function App() {
                 {live && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
                 <span className={`relative inline-flex h-2 w-2 rounded-full ${status.isError ? 'bg-rose-500' : 'bg-emerald-400'}`} />
               </span>
-              {status.isError ? 'Offline' : live ? 'Scanning' : 'Live'}
+              {status.isError ? (status.error instanceof BackendDown ? 'Starting…' : 'Error') : live ? 'Scanning' : 'Live'}
             </span>
             <button
               onClick={() => poll.mutate()}
@@ -110,11 +126,17 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6">
-        {status.isError && (
-          <p className="mb-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-200">
-            Can't reach the backend. Is it running on port 8000?
-          </p>
-        )}
+        {status.isError &&
+          (status.error instanceof BackendDown ? (
+            <p className="mb-4 flex items-center gap-3 rounded-xl bg-brand-50 px-4 py-3 text-sm text-brand-800 ring-1 ring-brand-200">
+              <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-brand-300 border-t-brand-700" aria-hidden />
+              {status.error.message}
+            </p>
+          ) : (
+            <p className="mb-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-200">
+              The backend answered with an error: {status.error.message}
+            </p>
+          ))}
         {tab === 'Feed' && <Feed stats={s} onOpenProfile={() => goTo('My profile')} />}
         {tab === 'My profile' && <Profile onSeeMatches={() => goTo('Feed')} />}
         {tab === 'LinkedIn & more' && <Elsewhere />}

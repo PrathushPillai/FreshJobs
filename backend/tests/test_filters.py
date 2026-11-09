@@ -111,6 +111,10 @@ from app.pipeline.normalize import experience_level, experience_years  # noqa: E
         ("Bengaluru, India", [Place("Bangalore", None, "India")]),
         ("Remote - Washington", [Place(None, "WA", "United States")]),
         ("Washington D.C.", [Place("Washington", "DC", "United States")]),
+        # SuccessFactors (Wipro): country-state codes between commas, not a city called "USA-CO"
+        ("Denver, USA-CO, USA, 12421", [Place("Denver", "CO", "United States")]),
+        ("Toronto, CAN-ON", [Place("Toronto", "ON", "Canada")]),
+        ("Bangalore, IND-KA, India", [Place("Bangalore", None, "India")]),
     ],
 )
 def test_parse_locations(location, expected):

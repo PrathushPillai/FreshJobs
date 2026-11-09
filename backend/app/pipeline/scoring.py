@@ -87,6 +87,15 @@ def _score_jobs(session: Session, jobs: list[Job], view: dict) -> list[JobMatch]
     return rows
 
 
+def stored_scores(session: Session, job_ids: list[int]) -> dict[int, JobMatch]:
+    """The current profile's saved matches for these jobs; scores nothing (lists never wait for embedding)."""
+    profile = get_profile(session)
+    if not profile or not profile.resume_text or not job_ids:
+        return {}
+    return {m.job_id: m for m in session.scalars(
+        select(JobMatch).where(JobMatch.job_id.in_(job_ids), JobMatch.profile_version == profile.version))}
+
+
 def ensure_scores(session: Session, job_ids: list[int]) -> dict[int, JobMatch]:
     """Matches for these jobs (a page of results), scoring the ones not scored for the current profile."""
     profile = get_profile(session)
@@ -213,12 +222,45 @@ def refresh_in_background() -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
 
+def repair_resume(session: Session) -> bool:
+    """Re-space a saved resume whose words ran together (matching.respace), once. Fields the user edited are kept:
+    a field is replaced only if it still equals what the old text gave. Bumps the version, so jobs are rescored."""
+    from datetime import date
+
+    profile = get_profile(session)
+    if not profile or not profile.resume_text or matching.spacing(profile.resume_text) >= matching.WELL_SPACED:
+        return False
+    old, new = profile.resume_text, matching.respace(profile.resume_text)
+    if matching.spacing(new) <= matching.spacing(old):
+        return False
+    today = date.today()
+    old_skills, new_skills = matching.extract_skills(old), matching.extract_skills(new)
+    if list(profile.skills or []) == old_skills:
+        profile.skills = new_skills
+    else:  # edited: keep the user's list, add what the clean text adds
+        profile.skills = list(dict.fromkeys([*(profile.skills or []), *[s for s in new_skills if s not in old_skills]]))
+    if profile.years == matching.resume_years(old, today):
+        profile.years = matching.resume_years(new, today)
+    if (profile.degree or "") == matching.resume_degree(old):
+        profile.degree = matching.resume_degree(new)
+    if list(profile.target_roles or []) == matching.resume_roles(old):
+        profile.target_roles = matching.resume_roles(new)
+    profile.resume_text = new
+    profile.vector = matching.embed([matching.resume_for_embedding(new)])[0].tobytes()
+    profile.version = (profile.version or 0) + 1
+    session.commit()
+    log.info("Re-spaced the saved resume (%.1f%% -> %.1f%% spaces) and rescoring", 100 * matching.spacing(old), 100 * matching.spacing(new))
+    return True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     lock = _try_lock()
     if lock is None:
         return  # another scoring process is running
     try:
+        with SessionLocal() as session:
+            repair_resume(session)  # resumes saved before re-spacing existed
         while refresh() > 0:  # again, for jobs found or a profile changed while scoring
             pass
     finally:

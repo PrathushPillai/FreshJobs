@@ -30,7 +30,7 @@ from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
 from app.pipeline.normalize import company_key, experience_level, experience_years, listed_window, seniority
 from app.everify import status_for as everify_status
-from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, student_visa_signal
+from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, says_sponsors, student_visa_signal
 from app.prefs import get_prefs, sync_companies
 from app.sources import ADAPTERS, NormalizedJob
 
@@ -56,6 +56,7 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     # Ruling out OPT/CPT ("not eligible for visa sponsorship (H1B, OPT/CPT)") rules out an F-1 student too.
     job.no_sponsor = find_no_sponsor_phrase(job.description) is not None or job.student_visa == "excluded"
     job.everify_text = mentions_everify(job.description)
+    job.sponsors_text = not job.no_sponsor and says_sponsors(job.description)
     job.everify = everify_status(session, job.company_name or "")
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]

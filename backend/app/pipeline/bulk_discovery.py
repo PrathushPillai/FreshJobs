@@ -7,6 +7,7 @@
     python -m app.pipeline.bulk_discovery workday --top 5000  # Workday career sites of the biggest H-1B sponsors
     python -m app.pipeline.bulk_discovery fix-workday         # repair Workday sources named after a file (robots.txt)
     python -m app.pipeline.bulk_discovery ai-portfolios       # boards behind AI investors' portfolio company websites
+    python -m app.pipeline.bulk_discovery niche --sector robotics|health|all [--dry-run]   # robotics and healthcare
 
 VC job sites: only ones whose robots.txt allows crawling and that don't ask scrapers to use a paid API
 instead. Getro-hosted boards (General Catalyst, Accel...) ask for that, and Consider-hosted ones
@@ -31,7 +32,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
 from app.models import Company
-from app.pipeline.detect import detect_from_page
+from app.pipeline.detect import detect_board as detect_board_url, detect_from_page
 from app.pipeline.harvest import board_key, harvest
 from app.pipeline.startups import US_REGIONS, YC_HIRING
 
@@ -82,8 +83,9 @@ async def from_websites(client: httpx.AsyncClient) -> int:
     return await _boards_behind(client, [(c["name"], c["website"]) for c in companies], "YC websites")
 
 
-async def _boards_behind(client: httpx.AsyncClient, sites: list[tuple[str, str]], label: str) -> int:
-    """Find and add the ATS board behind each (name, website): its /careers, /jobs, then home page."""
+async def _boards_behind(client: httpx.AsyncClient, sites: list[tuple[str, str]], label: str, dry_run: bool = False) -> int:
+    """Find and add the ATS board behind each (name, website): its /careers, /jobs, then home page. With
+    dry_run, only counts the untracked boards found."""
     with SessionLocal() as session:
         tracked = {board_key(c.ats, c.slug) for c in session.scalars(select(Company))}
     sem = asyncio.Semaphore(8)
@@ -104,7 +106,12 @@ async def _boards_behind(client: httpx.AsyncClient, sites: list[tuple[str, str]]
                     return
 
     await asyncio.gather(*(one(n, s) for n, s in sites))
-    return _save([link for link in links if link[1]], label)
+    links = [link for link in links if link[1]]
+    if dry_run:
+        found = {board_key(*b) for b in (detect_board_url(u) for _, u in links) if b}
+        log.info("%s (dry run): %d sites, %d untracked boards found, nothing saved", label, len(sites), len(found))
+        return len(found)
+    return _save(links, label)
 
 
 # AI-focused investors' own portfolio pages (not their Getro/Consider job boards), whose robots.txt allows
@@ -117,7 +124,10 @@ AI_PORTFOLIO_PAGES = [
 ]
 _NOT_COMPANY = ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com", "youtube.com", "github.com",
                 "medium.com", "substack.com", "techcrunch.com", "bloomberg.com", "forbes.com", "wsj.com", "nytimes.com",
-                "google.com", "apple.com", "crunchbase.com", "wikipedia.org", "shields.io", "notion.so", "bit.ly")
+                "google.com", "apple.com", "crunchbase.com", "wikipedia.org", "shields.io", "notion.so", "bit.ly",
+                "arxiv.org", "ros.org", "openrobotics.org", "readthedocs.io", "ieee.org", "gitlab.com", "bitbucket.org",
+                "huggingface.co", "kaggle.com", "coursera.org", "udemy.com", "udacity.com", "edx.org", "reddit.com",
+                "stackoverflow.com", "discord.gg", "discord.com", "slack.com", "t.co", "tiktok.com", "vimeo.com")
 
 
 def company_sites(html_text: str, page_url: str) -> list[str]:
@@ -129,6 +139,8 @@ def company_sites(html_text: str, page_url: str) -> list[str]:
         host = (urlparse(url).hostname or "").lower().removeprefix("www.")
         if not host or host == own or host.endswith("." + own) or any(host == d or host.endswith("." + d) for d in _NOT_COMPANY):
             continue
+        if re.search(r"\.(edu|gov|mil)$|\.ac\.[a-z]{2}$|\.edu\.[a-z]{2}$", host) or host.startswith(("docs.", "wiki.", "blog.")):
+            continue  # universities, labs, government and documentation sites: no company job board
         sites.setdefault(host, f"https://{host}")
     return list(sites.values())
 
@@ -175,6 +187,116 @@ async def from_vc(client: httpx.AsyncClient) -> int:
         added = await discover(session, client, list(dict.fromkeys(names)), limit=len(names))
     log.info("VC portfolios: %d companies, %d new boards", len(names), len(added))
     return len(added)
+
+
+# Robotics and healthcare: companies people rarely browse. Each page's robots.txt allowed it and it linked company
+# websites in plain HTML when checked (Nov 2026); robots.txt is checked again on every run (`_robots_allow`).
+# Left out: pages that refuse automated readers (HTTP 403: The Robot Report, Seedtable, Fundup, StartupSavant,
+# Flare Capital, F-Prime, .406 Ventures, Echo Health Ventures), pages drawn by JavaScript (Eclipse, Root, DCVC,
+# Rock Health, Define), and Getro/Consider job boards (see the module docstring).
+NICHE_PAGES = {
+    "robotics": [
+        "https://raw.githubusercontent.com/vmayoral/ros-robotics-companies/master/README.md",
+        "https://raw.githubusercontent.com/balloch/awesome-robotics-ai-companies/master/README.md",
+        "https://raw.githubusercontent.com/mathiasmantelli/awesome-mobile-robotics/master/README.md",
+        "https://techcrunch.com/2023/03/07/a-list-of-robotics-companies-that-are-hiring/",
+        "https://techcrunch.com/2023/08/08/these-robotics-companies-are-hiring/",
+        "https://techcrunch.com/2024/03/15/these-61-robotics-companies-are-hiring/",
+        "https://techcrunch.com/2024/04/12/these-75-robotics-companies-are-hiring/",
+        "https://techcrunch.com/2024/11/09/these-60-robotics-companies-are-hiring/",
+        "https://playground.global/portfolio/",
+    ],
+    "health": [
+        "https://www.optumventures.com/portfolio",
+        "https://kpventures.com/portfolio/",
+    ],
+}
+# Employer names that place an H-1B sponsor in the sector (DOL legal names: "Cerner Corporation", "Medtronic Inc").
+NICHE_WORDS = {
+    "robotics": re.compile(r"\b(robot\w*|automation|autonomous|autonomy|drones?|unmanned|mechatronics?|lidar)\b", re.I),
+    "health": re.compile(r"\b(health\w*|medical|medicine|hospitals?|clinics?|clinical|pharma\w*|therapeutics?|"
+                         r"diagnostics?|genomics?|surgical|dental|imaging|oncology|cardio\w*|biotech\w*|bio|biosciences?|"
+                         r"life sciences?|care|medtech|telehealth|healthcare)\b", re.I),
+}
+IT_SOC = "15-%"  # computer and mathematical occupations: software, data, IT
+
+
+async def _robots_allow(client: httpx.AsyncClient, url: str) -> bool:
+    """Whether the site's robots.txt lets us read this page (no robots.txt, or an unreadable one, allows it)."""
+    from urllib.robotparser import RobotFileParser
+
+    parts = urlparse(url)
+    rp = RobotFileParser()
+    try:
+        r = await client.get(f"{parts.scheme}://{parts.netloc}/robots.txt")
+        rp.parse(r.text.splitlines() if r.status_code == 200 else [])
+    except httpx.HTTPError:
+        return True
+    agent = str(client.headers.get("User-Agent", "*"))
+    return rp.can_fetch(agent, url) and rp.can_fetch("*", url)
+
+
+async def niche_sites(client: httpx.AsyncClient, sector: str) -> list[tuple[str, str]]:
+    """(name, website) for every company the sector's list pages link to, one per domain."""
+    sites: dict[str, tuple[str, str]] = {}
+    for page in NICHE_PAGES[sector]:
+        if not await _robots_allow(client, page):
+            log.info("%s: robots.txt disallows it, skipped", page)
+            continue
+        try:
+            r = await client.get(page)
+        except httpx.HTTPError as e:
+            log.info("%s: %s", page, type(e).__name__)
+            continue
+        if r.status_code != 200:
+            log.info("%s: HTTP %d, skipped", page, r.status_code)
+            continue
+        found = company_sites(r.text, str(r.url))
+        log.info("%s: %d company websites", page, len(found))
+        for site in found:
+            sites.setdefault(site, (urlparse(site).hostname.split(".")[0].title(), site))
+    return list(sites.values())
+
+
+def niche_sponsors(session, sector: str, limit: int) -> list[str]:
+    """H-1B sponsors in the sector that filed for computer and data jobs (SOC 15-), most such filings first:
+    companies that both use IT and sponsor, which the top-sponsor probes (by total filings) often miss."""
+    from sqlalchemy import func
+
+    from app.models import H1BRole, H1BSponsor
+
+    rows = session.execute(
+        select(H1BSponsor.name, func.sum(H1BRole.filings).label("it"))
+        .join(H1BRole, H1BRole.name_key == H1BSponsor.name_key)
+        .where(H1BRole.soc_code.like(IT_SOC))
+        .group_by(H1BSponsor.name_key, H1BSponsor.name)
+        .order_by(func.sum(H1BRole.filings).desc())
+    )
+    words = NICHE_WORDS[sector]
+    return [name for name, _ in rows if words.search(name)][:limit]
+
+
+async def from_niche(client: httpx.AsyncClient, sector: str, dry_run: bool = False, sponsors: int = 3000) -> int:
+    """Robotics and/or healthcare boards: behind the websites on NICHE_PAGES, and for the sector's H-1B sponsors
+    (Greenhouse, Lever and Ashby by name, then Workday). A dry run reads the lists and finds the boards behind the
+    websites, but saves nothing and probes no names."""
+    from app.pipeline.discovery import discover
+
+    sectors = list(NICHE_PAGES) if sector == "all" else [sector]
+    added = 0
+    for sec in sectors:
+        sites = await niche_sites(client, sec)
+        added += await _boards_behind(client, sites, f"{sec} lists", dry_run=dry_run)
+        with SessionLocal() as session:
+            names = niche_sponsors(session, sec, sponsors)
+        log.info("%s: %d H-1B sponsors with IT filings", sec, len(names))
+        if dry_run:
+            continue
+        with SessionLocal() as session:
+            found = await discover(session, client, names, limit=len(names))
+        log.info("%s sponsors: %d Greenhouse/Lever/Ashby boards", sec, len(found))
+        added += len(found) + await _workday_for(client, names)
+    return added
 
 
 # Workday hosts most tenants live on, and the site names companies most often give their career site.
@@ -283,6 +405,20 @@ async def from_workday(client: httpx.AsyncClient, top: int) -> int:
         probed = set(session.scalars(select(ProbeCache.company_key).where(ProbeCache.company_key.like("wd:%"))))
         names = [n for n in session.scalars(select(H1BSponsor.name).order_by(H1BSponsor.filings.desc()).limit(top))
                  if company_key(n) not in tracked and f"wd:{company_key(n)}" not in probed]
+    return await _workday_for(client, names)
+
+
+async def _workday_for(client: httpx.AsyncClient, names: list[str]) -> int:
+    """Probe each name for a Workday career site (results cached as wd:<key>) and add the ones found. Names
+    already tracked or already probed are skipped."""
+    from app.models import ProbeCache
+    from app.pipeline.normalize import company_key
+
+    with SessionLocal() as session:
+        tracked = {company_key(c.name) for c in session.scalars(select(Company))}
+        probed = set(session.scalars(select(ProbeCache.company_key).where(ProbeCache.company_key.like("wd:%"))))
+    names = list(dict.fromkeys(n for n in names if company_key(n) and company_key(n) not in tracked
+                               and f"wd:{company_key(n)}" not in probed))
     sem = asyncio.Semaphore(12)
     added = 0
 
@@ -373,6 +509,10 @@ def main() -> None:
     wd.add_argument("--top", type=int, default=5000)
     sub.add_parser("fix-workday")
     sub.add_parser("ai-portfolios")
+    niche = sub.add_parser("niche")
+    niche.add_argument("--sector", choices=["robotics", "health", "all"], default="all")
+    niche.add_argument("--dry-run", action="store_true", help="find boards behind the list websites, save nothing")
+    niche.add_argument("--sponsors", type=int, default=3000, help="how many of the sector's H-1B sponsors to probe")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
@@ -396,9 +536,12 @@ def main() -> None:
                 return await fix_workday(client)
             if args.cmd == "ai-portfolios":
                 return await from_ai_portfolios(client)
+            if args.cmd == "niche":
+                return await from_niche(client, args.sector, args.dry_run, args.sponsors)
             return await from_commoncrawl(client, args.indexes, args.patterns)
 
-    print(f"Added {asyncio.run(run())} new boards")
+    n = asyncio.run(run())
+    print(f"Found {n} new boards (dry run: nothing saved)" if getattr(args, "dry_run", False) else f"Added {n} new boards")
 
 
 if __name__ == "__main__":

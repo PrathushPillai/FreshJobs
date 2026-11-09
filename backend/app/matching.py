@@ -13,6 +13,7 @@ Then the user's situation: a job that rules out sponsorship, for someone who nee
 """
 
 import io
+import math
 import re
 import threading
 import zipfile
@@ -108,14 +109,115 @@ def extract_skills(text: str) -> list[str]:
 
 # ---------- resume reading ----------
 
+# Normal English text is ~15% spaces. Some PDFs (fonts without character widths, as some resume builders
+# export) come out with words run together: "DataEngineerwithhands-onexperience" (a real resume: 2.6%).
+# Skills still match inside run-on text, but titles, dates and the fit embedding don't.
+WELL_SPACED = 0.08
+
+
+def spacing(text: str) -> float:
+    """Share of spaces among the text's characters (line breaks not counted)."""
+    chars = (text or "").replace("\n", "")
+    return chars.count(" ") / len(chars) if chars else 0.0
+
+
+# Putting spaces back. The word list (data/wordfreq.txt) is ranked by frequency in 40,000 job descriptions, so
+# it knows tech words ("snowflake", "dbt", "kubernetes") as well as English. Each run of letters is split into
+# the likeliest words by dynamic programming over Zipf costs (cost of the word ranked r = log(r * log N)), with
+# an option to keep an unknown stretch whole (names, rare terms) so "Prathush" isn't cut into pieces.
+_WORDFREQ = Path(__file__).resolve().parent.parent / "data" / "wordfreq.txt"
+_COSTS: dict[str, float] | None = None
+_MAX_WORD = 24
+_UNKNOWN_BASE, _UNKNOWN_PER_CHAR = 18.0, 1.5
+
+
+def _word_costs() -> dict[str, float]:
+    global _COSTS
+    if _COSTS is None:
+        words = [w.strip() for w in _WORDFREQ.read_text(encoding="utf-8").splitlines() if w.strip() and not w.startswith("#")]
+        log_n = math.log(len(words))
+        costs = {w: math.log((i + 1) * log_n) for i, w in enumerate(words)}
+        # Skill names and title words count as common, so they're never split ("databricks", "analyst").
+        for name in list(SKILLS) + _TITLE_NOUNS.split("|"):
+            for w in re.findall(r"[a-z]+", name.lower()):
+                costs[w] = min(costs.get(w, 99.0), math.log(1000 * log_n))
+        _COSTS = costs
+    return _COSTS
+
+
+def _segment(run: str) -> list[str]:
+    """The likeliest words in a run of letters, keeping its capitals: "DataEngineerwith" -> Data, Engineer, with."""
+    costs, low, n = _word_costs(), run.lower(), len(run)
+    best = [0.0] + [math.inf] * n
+    back = [0] * (n + 1)
+    for end in range(1, n + 1):
+        for start in range(max(0, end - _MAX_WORD), end):
+            piece = low[start:end]
+            c = costs.get(piece)
+            if c is None:
+                c = _UNKNOWN_BASE + _UNKNOWN_PER_CHAR * len(piece)
+            if best[start] + c < best[end]:
+                best[end], back[end] = best[start] + c, start
+    words, end = [], n
+    while end > 0:
+        words.append(run[back[end]:end])
+        end = back[end]
+    return words[::-1]
+
+
+def respace(text: str) -> str:
+    """Put spaces back into run-together text (see WELL_SPACED). Text that's normally spaced is returned as is."""
+    if not text or spacing(text) >= WELL_SPACED:
+        return text
+    costs = _word_costs()
+    out_lines = []
+    for line in text.splitlines():
+        line = re.sub(r"(?<=[A-Za-z])(?=(?:19|20)\d\d\b)", " ", line)  # "Jan2024" -> "Jan 2024"
+        line = re.sub(r"([,;:|])(?=[A-Za-z0-9(])", r"\1 ", line)  # "Python,SQL" -> "Python, SQL"
+        line = re.sub(r"(?<=[a-z])\((?=[A-Za-z])", " (", line)  # "pipeline(AWS" -> "pipeline (AWS"
+        pieces = []
+        for part in re.split(r"([A-Za-z]+)", line):
+            if len(part) >= 4 and part.isalpha() and part.lower() not in costs:
+                pieces.append(" ".join(_segment(part)))
+            else:
+                pieces.append(part)
+        out_lines.append(re.sub(r" {2,}", " ", "".join(pieces)).strip())
+    return "\n".join(out_lines)
+
+
+def spacing_warning(text: str) -> str | None:
+    """A note for the profile page when the resume's text is still run together after respace(): no action asked,
+    just where to look."""
+    if text and spacing(text) < WELL_SPACED:
+        # Only text respace() couldn't fix reaches here (respace runs on every upload and on saved resumes).
+        return ("Part of this file couldn't be read cleanly, so your scores rely more on the skills, years and roles "
+                "below than on the resume's wording. They're worth a quick look: anything you correct updates your scores.")
+    return None
+
+
+def _pdf_text(data: bytes) -> str:
+    """A PDF's text, from pypdf's plain reading or, when that runs words together, its layout reading
+    (which places words by position): whichever keeps more of the spacing."""
+    from pypdf import PdfReader
+
+    pages = PdfReader(io.BytesIO(data)).pages
+    plain = "\n".join(page.extract_text() or "" for page in pages).strip()
+    if spacing(plain) >= WELL_SPACED:
+        return plain
+    try:
+        layout = "\n".join(page.extract_text(extraction_mode="layout") or "" for page in pages)
+    except Exception:  # layout mode is newer and stricter about odd PDFs
+        return plain
+    layout = re.sub(r"[ \t]{2,}", " ", layout)  # it pads columns with runs of spaces
+    layout = "\n".join(line.strip() for line in layout.splitlines() if line.strip())
+    return layout if spacing(layout) > spacing(plain) else plain
+
+
 def resume_text(filename: str, data: bytes) -> str:
     """Plain text of an uploaded resume: PDF, Word (.docx) or plain text."""
     name = (filename or "").lower()
     if name.endswith(".pdf") or data[:4] == b"%PDF":
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        return _pdf_text(data)
     if name.endswith(".docx") or data[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             xml = z.read("word/document.xml").decode("utf-8", "ignore")

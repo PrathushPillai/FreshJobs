@@ -31,6 +31,8 @@ export interface Job {
   student_visa: 'welcome' | 'excluded' | null
   /** The description says the employer uses E-Verify (needed to hire on STEM OPT). */
   everify_text: boolean
+  /** The posting says it sponsors visas ("We do sponsor visas!"). */
+  sponsors_text: boolean
   /** The employer in USCIS's E-Verify list: enrolled, every account ended, or not found. */
   everify: 'yes' | 'ended' | null
   /** The employer's website, for its logo; null means show initials. */
@@ -84,6 +86,8 @@ export interface JobDetail extends Job {
   repost_of: { id: number; title: string; company: string; url: string; first_seen_at: string; closed_at: string | null } | null
   h1b_roles: H1BHistory | null
   match: MatchDetail | null
+  /** LinkedIn post search: "hiring" + this role + this company, past month (a link only). */
+  hiring_posts_url: string
   uscis: {
     years: { fiscal_year: number; new_approvals: number; new_denials: number; approvals: number; denials: number }[]
     names: string[]
@@ -136,6 +140,8 @@ export interface Profile {
   scoring: { running: boolean; scored: number; total: number }
   scored?: number
   version?: number
+  /** Set when the file's words came out run together (some PDFs): what to upload instead. */
+  text_warning?: string | null
   /** Every skill the matcher knows, for the skill picker. */
   vocabulary: string[]
 }
@@ -239,10 +245,30 @@ export interface JobQuery {
   offset?: number
 }
 
+/** The backend isn't answering yet (still starting, or stopped): the dev server's proxy replies 500 with
+ * an empty body, or the request fails outright. The page shows "starting up" and retries. */
+export class BackendDown extends Error {
+  constructor() {
+    super('FreshJobs is starting up. This can take a few minutes after a restart; the page loads by itself.')
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init })
+  let res: Response
+  try {
+    res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init })
+  } catch {
+    throw new BackendDown()
+  }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
+    const text = await res.text().catch(() => '')
+    if (res.status >= 500 && !text.trim()) throw new BackendDown()
+    let body: { detail?: unknown } = {}
+    try {
+      body = JSON.parse(text)
+    } catch {
+      /* not JSON */
+    }
     throw new Error(typeof body.detail === 'string' ? body.detail : `${res.status} ${res.statusText}`)
   }
   return res.status === 204 ? (undefined as T) : res.json()
@@ -259,6 +285,8 @@ function toParams(query: object): URLSearchParams {
 }
 
 export const api = {
+  /** Scores for jobs a list showed without one (scored on the server now). */
+  matches: (ids: number[]) => request<Record<string, MatchBrief>>(`/api/matches?${toParams({ ids })}`),
   jobs: (query: JobQuery) => request<{ total: number; total_capped: boolean; related_terms: string[]; items: Job[]; fresh?: { '1': number; '6': number; '24': number } | null }>(`/api/jobs?${toParams(query)}`),
   job: (id: number) => request<JobDetail>(`/api/jobs/${id}`),
   verify: (id: number) =>

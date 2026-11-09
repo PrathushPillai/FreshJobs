@@ -46,9 +46,10 @@ LinkedIn, Indeed, Glassdoor and Meta's careers site are never scraped, against t
   - Exact matches always come first. The count line says how many results have the exact title.
   - Turn on **Exact title** in the search bar to search only what you typed.
 - **Fresh:** every job shows when it was **posted** and when we first **found** it. Sort by either, or filter by **Date posted** or **Found by us**. The strip above the list shows how many jobs came in during the last hour, 6 hours and 24 hours.
-- **Filters:** Country, State and City pills; experience level; remote. Every pill has a ✕ and a Reset button, and "Reset all" goes back to United States.
+- **Filters:** Country, State and City pills; experience level; remote. Changes inside a filter take effect when you press **Apply** (Cancel or Esc drops them), and the results load in the background while you choose, so Apply is usually instant. Every pill has a ✕ and a Reset button, and "Reset all" goes back to United States. **For you** and **All jobs** keep their own filters and sort.
 - **Hidden by default:** reposts, the same job on several sites, old jobs re-listed as new, and expired jobs (closed jobs are re-checked automatically).
-- **Shown, but flagged:** jobs that rule out sponsorship or OPT/CPT carry a red badge. Some employers can still be persuaded, so they stay in the feed. **Visa → Hide jobs that rule out sponsorship or OPT/CPT** removes them.
+- **Says it sponsors:** a green badge on jobs whose posting says it sponsors visas ("We do sponsor visas!").
+- **Shown, but flagged:** jobs that rule out sponsorship or OPT/CPT carry a red badge (checked by hand against real postings: it catches about 9 in 10). Some employers can still be persuaded, so they stay in the feed. **Visa → Hide jobs that rule out sponsorship or OPT/CPT** removes them.
 - **Repeated jobs:** to see them, open **More → Show repeated jobs** and tick the kinds you want:
   - **Repost:** the company posted the same job before.
   - **Duplicate:** the same job is also open on another site.
@@ -63,7 +64,8 @@ LinkedIn, Indeed, Glassdoor and Meta's careers site are never scraped, against t
   - **E-Verify:** the employer is in USCIS's E-Verify list (or its posting says it uses E-Verify), which a STEM OPT employer must be. **E-Verify ended** means every one of its accounts has been closed. **Visa → Only E-Verify employers** filters to them.
 - **H-1B approvals:** the job panel shows how many H-1B petitions USCIS approved and denied for the employer in FY2024–FY2026, including "new" workers, those new to H-1B as a new grad would be.
 - **Tracker:** save or mark jobs as applied, then move them through each stage, with notes and a contact.
-- **Recruiter finder:** LinkedIn and Google searches for each job's recruiters, plus a Hunter.io email lookup when that key is set.
+- **Recruiter finder:** LinkedIn and Google searches for each job's recruiters, plus a Hunter.io email lookup when that key is set. **🔎 Hiring posts on LinkedIn**, next to Apply, finds recent posts saying they're hiring for that role at that company.
+- **Resume match:** upload your resume in **My profile** (PDF, Word or text) and every job gets a 0–100 match with the reasons. It runs on your own machine. PDFs whose words come out joined together are repaired automatically.
 - **Email alerts:** one email per check, listing new jobs that match your roles.
 
 ## Effect on the laptop
@@ -156,6 +158,8 @@ Paste a careers link on the **Sources** page; the app finds the job board behind
 ```bash
 cd backend
 .venv/Scripts/python -m pytest                                  # tests
+.venv/Scripts/python scripts/check_portal.py                    # check the running portal end to end (read-only)
+.venv/Scripts/python -m app.pipeline.bulk_discovery niche --sector all --dry-run   # robotics and healthcare boards
 .venv/Scripts/python -m app.pipeline.poller --once              # one check without the web server
 .venv/Scripts/python -m app.pipeline.discovery --file data/discover_seed.txt   # find boards for company names
 .venv/Scripts/python -m app.pipeline.startups                   # add hiring YC startups now

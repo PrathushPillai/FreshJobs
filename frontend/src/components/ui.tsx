@@ -67,9 +67,12 @@ export function RepeatBadge({ job }: { job: Pick<Job, 'repost_kind' | 'posted_at
 }
 
 /** What the posting itself says about F-1 students (OPT/CPT/STEM OPT) and E-Verify. */
-export function VisaSignalBadges({ job }: { job: Pick<Job, 'student_visa' | 'everify_text' | 'everify'> }) {
+export function VisaSignalBadges({ job }: { job: Pick<Job, 'student_visa' | 'everify_text' | 'everify' | 'sponsors_text'> }) {
   return (
     <>
+      {job.sponsors_text && (
+        <Badge tone="green" dot title='The posting says it sponsors visas (for example "We do sponsor visas!")'>Says it sponsors</Badge>
+      )}
       {job.student_visa === 'welcome' && (
         <Badge tone="green" dot title="The posting says candidates on F-1 OPT, STEM OPT or CPT are welcome">OPT/CPT welcome</Badge>
       )}
@@ -146,8 +149,25 @@ export function TrackControl({ job, compact = false }: { job: Pick<Job, 'id' | '
 
 /** A filter "pill" that opens a small panel, like LinkedIn's and Jobright's filter bars.
  * With onClear, an active pill shows a ✕ (and the panel a "Clear" link) that resets just this filter. */
-export function FilterPill({ label, active, onClear, children }: { label: ReactNode; active?: boolean; onClear?: () => void; children: ReactNode }) {
-  const [open, setOpen] = useState(false)
+/** A filter in the bar: a pill that opens a panel. With `onApply`, changes made in the panel are only staged
+ * (the Feed keeps them as a draft) until Apply; closing the panel any other way (outside click, Esc, Cancel)
+ * calls `onCancel` and drops them. The pill's own ✕ and the panel's Reset apply at once: they're explicit. */
+export function FilterPill({ label, active, onClear, onApply, onCancel, dirty, children }: {
+  label: ReactNode
+  active?: boolean
+  onClear?: () => void
+  onApply?: () => void
+  onCancel?: () => void
+  dirty?: boolean
+  children: ReactNode
+}) {
+  const [open, setOpenState] = useState(false)
+  const onCancelRef = useRef(onCancel)
+  onCancelRef.current = onCancel
+  const setOpen = (next: boolean) => {
+    if (!next) onCancelRef.current?.()  // closed without Apply: drop what was staged
+    setOpenState(next)
+  }
   // Pills on the right half open their panel leftwards, so it never runs off the screen.
   const [alignRight, setAlignRight] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -158,8 +178,12 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
   }
   useEffect(() => {
     if (!open) return
-    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false)
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    const shut = () => {
+      onCancelRef.current?.()
+      setOpenState(false)
+    }
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && shut()
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && shut()
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', esc)
     return () => {
@@ -208,19 +232,38 @@ export function FilterPill({ label, active, onClear, children }: { label: ReactN
           }`}
         >
           {children}
-          {onClear && (
-            // Always there, so every filter can be put back to its default from its own menu.
-            <div className="mt-2 border-t border-slate-100 pt-2 text-right">
-              <button
-                disabled={!active}
-                onClick={() => {
-                  onClear()
-                  setOpen(false)
-                }}
-                className="rounded-full px-3 py-1 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-default disabled:text-slate-400 disabled:hover:bg-transparent"
-              >
-                Reset
-              </button>
+          {(onClear || onApply) && (
+            <div className="mt-2 flex items-center gap-2 border-t border-slate-100 pt-2">
+              {onClear && (
+                // Always there, so every filter can be put back to its default from its own menu.
+                <button
+                  disabled={!active}
+                  onClick={() => {
+                    onClear()
+                    setOpenState(false)
+                  }}
+                  className="rounded-full px-3 py-1 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:cursor-default disabled:text-slate-400 disabled:hover:bg-transparent"
+                >
+                  Reset
+                </button>
+              )}
+              {onApply && (
+                <>
+                  <button onClick={() => setOpen(false)} className="ml-auto rounded-full px-3 py-1 text-sm font-medium text-slate-600 hover:bg-slate-100">
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      onApply()
+                      setOpenState(false)
+                    }}
+                    disabled={!dirty}
+                    className="rounded-full bg-gradient-to-r from-brand-600 to-violet-600 px-4 py-1 text-sm font-bold text-white shadow-sm shadow-brand-600/25 transition hover:brightness-110 disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                  >
+                    Apply
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

@@ -118,3 +118,73 @@ def test_resume_roles_reads_titles_held():
     assert matching.resume_roles(resume) == ["frontend engineer", "frontend developer", "software engineer"]
     assert matching.resume_roles("Registered Nurse\nRegistered Nurse, City Hospital") == ["registered nurse"]
     assert matching.resume_roles("Machine Learning Engineer\nML Engineer Intern, VisionAI") == ["machine learning engineer", "ml engineer"]
+
+
+def test_run_together_upload_is_respaced_and_the_file_is_kept(client, session, monkeypatch):
+    """Some PDFs come out as "DataEngineerwithhands-on...": the portal puts the spaces back itself."""
+    from app.models import UserProfile
+
+    monkeypatch.setattr(scoring, "refresh_in_background", lambda: None)
+    good = client.post("/api/profile/resume", json={"filename": "resume.txt", "data_base64": base64.b64encode(RESUME.encode()).decode()}).json()
+    joined = "".join(RESUME.split(" ")).encode()  # every space gone, as a bad PDF reads
+    fixed = client.post("/api/profile/resume", json={"filename": "resume.txt", "data_base64": base64.b64encode(joined).decode()}).json()
+    assert fixed["text_warning"] is None
+    assert fixed["target_roles"] == good["target_roles"] and fixed["years"] == good["years"]
+    assert set(fixed["skills"]) >= set(good["skills"]) - {"A/B Testing"}
+    session.expire_all()
+    assert session.get(UserProfile, 1).resume_file == joined  # kept, so a better reader can re-read it later
+    # Text nothing can fix (no known words) still gets the warning.
+    junk = ("Zqxvbn" * 60 + "\n") * 2
+    bad = client.post("/api/profile/resume", json={"filename": "r.txt", "data_base64": base64.b64encode(junk.encode()).decode()}).json()
+    assert "couldn't be read cleanly" in bad["text_warning"] and "upload" not in bad["text_warning"].lower()
+    client.delete("/api/profile/resume")
+    session.expire_all()
+    assert session.get(UserProfile, 1).resume_file is None
+
+
+def test_respace_splits_run_together_words_and_leaves_normal_text_alone():
+    assert matching.respace("DataEngineerwithhands-onexperiencebuildingETLpipelinesusingPython,PySpark,andSQL") == (
+        "Data Engineer with hands-on experience building ETL pipelines using Python, PySpark, and SQL")
+    assert matching.respace("DataEngineerCo-OpJan2025–Jun2025") == "Data Engineer Co-Op Jan 2025–Jun 2025"
+    assert matching.respace("ZorvexaKumarDataAnalyst") .endswith("Data Analyst")  # an unknown name stays in one piece
+    assert "Zorvexa" in matching.respace("ZorvexaKumarDataAnalyst")
+    normal = "Data Engineer with hands-on experience. Built ETL pipelines in Python."
+    assert matching.respace(normal) == normal
+
+
+def test_saved_run_together_resume_is_repaired_keeping_user_edits(session, monkeypatch):
+    from app.models import UserProfile
+
+    monkeypatch.setattr(matching, "embed", fake_embed)
+    joined = "".join(RESUME.split(" "))
+    session.add(UserProfile(id=1, version=3, resume_text=joined, skills=matching.extract_skills(joined),
+                            years=4.0,  # the user typed 4; the joined text gives no years
+                            degree=matching.resume_degree(joined), target_roles=matching.resume_roles(joined)))
+    session.commit()
+    assert scoring.repair_resume(session) is True
+    p = session.get(UserProfile, 1)
+    assert matching.spacing(p.resume_text) >= matching.WELL_SPACED
+    assert "data engineer" in p.target_roles  # not edited: re-read from the clean text
+    assert p.years == 4.0  # edited: kept
+    assert p.version == 4 and p.vector  # rescored with a new embedding
+    assert scoring.repair_resume(session) is False  # once only
+
+
+def test_spacing_measure():
+    assert matching.spacing("Data Engineer with hands-on experience") > matching.WELL_SPACED
+    assert matching.spacing("DataEngineerwithhands-onexperience building") < matching.WELL_SPACED
+    assert matching.spacing("") == 0.0
+
+
+def test_lists_never_wait_for_scoring_and_matches_fills_in(client, monkeypatch):
+    """A list returns saved scores only; the jobs it shows without one are scored by /api/matches."""
+    monkeypatch.setattr(scoring, "refresh_in_background", lambda: None)  # no background pass: nothing saved yet
+    client.post("/api/profile/resume", json={"filename": "resume.txt", "data_base64": base64.b64encode(RESUME.encode()).decode()})
+    page = client.get("/api/jobs", params={"hide_no_sponsor": False, "countries": "United States"}).json()["items"]
+    assert page and all(j["match"] is None for j in page)  # the list didn't embed anything
+    ids = [j["id"] for j in page]
+    scores = client.get("/api/matches", params={"ids": ids}).json()
+    assert set(scores) == {str(i) for i in ids} and all(0 <= s["score"] <= 100 for s in scores.values())
+    # Once scored, the list carries them.
+    again = client.get("/api/jobs", params={"hide_no_sponsor": False, "countries": "United States", "limit": 49}).json()["items"]
+    assert all(j["match"] is not None for j in again)

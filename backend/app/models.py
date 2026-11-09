@@ -119,6 +119,8 @@ class Job(Base):
     # "welcome" (OPT/CPT/STEM OPT candidates accepted), "excluded" (OPT/CPT ruled out), or None (not mentioned).
     student_visa: Mapped[str | None] = mapped_column(String(10))
     everify_text: Mapped[bool] = mapped_column(Boolean, default=False)  # the description says the employer uses E-Verify
+    # The description says it sponsors visas ("We do sponsor visas!"), and nowhere rules it out (sponsorship.says_sponsors).
+    sponsors_text: Mapped[bool] = mapped_column(Boolean, default=False)
     # The employer in USCIS's E-Verify list (app/everify.py): "yes" (an account is enrolled), "ended" (all ended), None.
     everify: Mapped[str | None] = mapped_column(String(8))
     us_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -160,6 +162,8 @@ class JobLocation(Base):
 
 class JobEvent(Base):
     __tablename__ = "job_events"
+    # "Jobs with a repost event": a range read here, not a scan of every event (1.9M, mostly "seen").
+    __table_args__ = (Index("ix_job_events_kind_job", "kind", "job_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)
@@ -204,6 +208,8 @@ class UserProfile(Base):
     opt_end: Mapped[date | None] = mapped_column(Date)
     locations: Mapped[list] = mapped_column(JSON, default=list)  # preferred US states or cities; empty = anywhere
     vector: Mapped[bytes | None] = mapped_column(LargeBinary)  # the resume's embedding (float32)
+    # The uploaded file itself, so a better reader can re-read it later without a new upload. Local only.
+    resume_file: Mapped[bytes | None] = mapped_column(LargeBinary)
     version: Mapped[int] = mapped_column(Integer, default=0)
 
 

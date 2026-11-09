@@ -30,13 +30,13 @@ from app.pipeline import liveness
 from app import matching
 from app.pipeline import scoring
 from app.pipeline.describe import fetch_description
-from app.pipeline.scoring import ensure_scores
+from app.pipeline.scoring import ensure_scores, stored_scores
 from app.pipeline.poller import (
     MIN_DESCRIPTION_CHARS, USER_AGENT, apply_flags, backfill, poll_once, refresh_role_match, refresh_role_match_for,
 )
 from app.pipeline.search import distinct_roles, expand_query, fts_all_words, fts_any_term, fts_company
 from app.prefs import get_prefs, sync_companies
-from app.recruiters import hunter_configured, hunter_lookup, search_links
+from app.recruiters import hiring_posts_url, hunter_configured, hunter_lookup, search_links
 from app.sources import ADAPTERS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -186,6 +186,7 @@ class JobOut(BaseModel):
     no_sponsor: bool
     student_visa: str | None  # "welcome" / "excluded": what the description says about OPT/CPT (F-1)
     everify_text: bool  # the description says the employer uses E-Verify
+    sponsors_text: bool = False  # the description says it sponsors visas (and doesn't rule it out anywhere)
     everify: str | None  # the employer in USCIS's E-Verify list: "yes" (enrolled), "ended", None (not found)
     logo_domain: str | None  # the employer's website, for its logo (app/logos.py); None shows initials
     match: dict | None = None  # resume match (app/matching.py): score, matched/missing skills; None without a resume
@@ -270,6 +271,7 @@ class JobDetailOut(JobOut):
     uscis: USCISOut | None  # H-1B petitions USCIS approved and denied, per fiscal year
     events: list[EventOut]
     sponsor: SponsorOut | None
+    hiring_posts_url: str  # LinkedIn posts saying they're hiring for this role at this company (a link, never fetched)
 
 
 class JobPage(BaseModel):
@@ -361,6 +363,31 @@ def _repeat_kinds(session: Session, jobs: list[Job]) -> dict[int, str]:
         select(JobEvent.job_id, JobEvent.kind).where(JobEvent.job_id.in_(ids), JobEvent.kind.in_(REPEAT_KINDS))
     )
     return {job_id: kind for job_id, kind in rows}
+
+
+def repeats_page(session: Session, parts: list, order: tuple, sort: str, limit: int, offset: int) -> list[int]:
+    """One page from several queries that each walk the sort index (the repeats view's normal jobs and its
+    repeats): the first offset+limit of each, merged in the page's sort order."""
+    n = offset + limit
+    ids = [i for part in parts for i in session.scalars(part.order_by(*order).limit(n))]
+    if not ids:
+        return []
+    rows = {r.id: r for r in session.execute(
+        select(Job.id, Job.first_seen_at, Job.listed_at, Job.company_name, Job.h1b_filings).where(Job.id.in_(ids)))}
+
+    def desc_nulls_last(col):
+        return lambda i: (getattr(rows[i], col) is not None, getattr(rows[i], col) or 0)
+
+    # (key, reverse) from the least to the most significant: Python's sort is stable.
+    keys = {
+        "newest": [(lambda i: i, True), (lambda i: rows[i].first_seen_at, True)],
+        "posted": [(lambda i: i, True), (desc_nulls_last("listed_at"), True)],
+        "company": [(lambda i: rows[i].first_seen_at, True), (lambda i: rows[i].company_name or "", False)],
+        "sponsor": [(lambda i: rows[i].first_seen_at, True), (desc_nulls_last("h1b_filings"), True)],
+    }.get(sort, [(lambda i: i, True), (lambda i: rows[i].first_seen_at, True)])
+    for key, reverse in keys:
+        ids.sort(key=key, reverse=reverse)
+    return ids[offset:offset + limit]
 
 
 def _match_brief(m: JobMatch | None) -> dict | None:
@@ -501,7 +528,7 @@ def list_jobs(
     if fresh_counts:
         posted_within_hours = 24  # the strip's widest window; the 1 h and 6 h counts are taken inside it
 
-    def build(fts_first: bool, with_search: bool = True):
+    def build(fts_first: bool, with_search: bool = True, repeats_part: str = ""):
         """The filtered query. With fts_first, status filters are written so SQLite starts from the search's
         full-text matches instead of walking the open-jobs index (see FTS_FIRST_MAX)."""
 
@@ -515,10 +542,11 @@ def list_jobs(
             stmt = stmt.where(text("+jobs.closed_at IS NULL") if fts_first else Job.closed_at.is_(None))
         elif status == "closed":
             stmt = stmt.where(Job.closed_at.is_not(None))
-        shown_kinds = [k for k in repeat_kinds if k in REPEAT_KINDS]
-        if not show_reposts:
+        if repeats_part == "normal" or not show_reposts:
             stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
-        elif shown_kinds and len(set(shown_kinds)) < len(REPEAT_KINDS):
+        elif repeats_part == "chosen":
+            stmt = stmt.where(Job.is_repost.is_(True), Job.id.in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))))
+        elif split_repeats:
             stmt = stmt.where(or_(
                 Job.is_repost.is_(False),
                 Job.id.in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))),
@@ -575,6 +603,11 @@ def list_jobs(
                 stmt = stmt.where(~exists().where(Application.job_id == Job.id))
         return stmt
 
+    # "Show repeated jobs" with some kinds ticked is "not a repeat, or a repeat of a ticked kind". As one OR it
+    # can't walk a sort index (no equality on is_repost), so it sorted every open job: 8 s. The page is taken
+    # from the two parts instead, each walking the index, and merged (see repeats_page below).
+    shown_kinds = [k for k in repeat_kinds if k in REPEAT_KINDS]
+    split_repeats = show_reposts and bool(shown_kinds) and len(set(shown_kinds)) < len(REPEAT_KINDS)
     stmt = build(fts_first)
 
     # Count and sort on IDs only, so SQLite answers from ix_jobs_feed without reading the wide rows
@@ -627,6 +660,9 @@ def list_jobs(
                 select(func.count()).select_from(scored.order_by(None).limit(offset).subquery()))
             unscored = ids.where(JobMatch.job_id.is_(None)).order_by(Job.listed_at.desc(), Job.id.desc())
             page_ids += list(session.scalars(unscored.limit(limit - len(page_ids)).offset(max(0, offset - n_scored))))
+    elif not tiers and split_repeats and not fts_first:
+        page_ids = repeats_page(session, [build(False, repeats_part=p).with_only_columns(Job.id) for p in ("normal", "chosen")],
+                                order, sort, limit, offset)
     elif not tiers:
         page_ids = list(session.scalars(ids.order_by(*order).limit(limit).offset(offset)))
     else:
@@ -663,7 +699,9 @@ def list_jobs(
         )
     }
     kinds = _repeat_kinds(session, list(loaded.values()))
-    matches = ensure_scores(session, [i for i in page_ids if i in loaded])  # scores a page of search results on demand
+    # Saved scores only: jobs outside "For you" (searches, All jobs) may have none yet, and scoring them here meant
+    # embedding up to 50 descriptions before the list could show (3-7 s). The Feed asks /api/matches for those.
+    matches = stored_scores(session, [i for i in page_ids if i in loaded])
     items = [{**_job_out(loaded[i], kinds.get(i)), "match": _match_brief(matches.get(i))} for i in page_ids if i in loaded]
     return {"total": min(total, COUNT_CAP), "total_capped": total > COUNT_CAP, "related_terms": related_terms, "items": items}
 
@@ -685,6 +723,7 @@ def get_job(job_id: int, session: Session = Depends(get_session)):
     data["h1b_roles"] = role_history(session, job.company_name or job.company.name, job.title)
     data["everify_info"] = everify_lookup(session, job.company_name or job.company.name)
     data["uscis"] = uscis_lookup(session, job.company_name or job.company.name)
+    data["hiring_posts_url"] = hiring_posts_url(job.company_name or job.company.name, job.title)
     full = ensure_scores(session, [job.id]).get(job.id)
     data["match"] = full.detail if full else None
     return data
@@ -823,6 +862,13 @@ def _place_counts(force: bool = False) -> list[tuple]:
     finally:
         _facets_lock.release()
     return _facets["rows"]
+
+
+@app.get("/api/matches")
+def job_matches(ids: list[int] = Query([]), session: Session = Depends(get_session)):
+    """Match scores for jobs a list showed without one, scored now (at most 100): {job id: brief}. The Feed asks
+    right after a page loads, so the jobs show at once and their scores fill in a moment later."""
+    return {str(i): _match_brief(m) for i, m in ensure_scores(session, list(dict.fromkeys(ids))[:100]).items()}
 
 
 @app.get("/api/facets/locations")
@@ -1157,6 +1203,7 @@ def _profile_out(session: Session, profile: UserProfile | None) -> dict:
         "suggested_roles": [r for r in profile.target_roles if r.lower() not in roles],
         "your_roles": prefs.include_keywords, "resume_preview": profile.resume_text[:1500],
         "scoring": scoring.status(), "version": profile.version, "vocabulary": list(matching.SKILLS),
+        "text_warning": matching.spacing_warning(profile.resume_text),  # words run together in the file
         "scored": session.scalar(select(func.count()).select_from(JobMatch).where(JobMatch.profile_version == profile.version)),
     }
 
@@ -1176,7 +1223,7 @@ def upload_resume(body: ResumeIn, session: Session = Depends(get_session)):
     if len(data) > 5_000_000:
         raise HTTPException(400, "The file is over 5 MB.")
     try:
-        text_ = matching.resume_text(body.filename, data)
+        text_ = matching.respace(matching.resume_text(body.filename, data))  # some PDFs run words together
     except Exception:
         raise HTTPException(400, "The file couldn't be read. Try a PDF, a .docx or plain text.")
     if len(text_.strip()) < 200:
@@ -1186,6 +1233,7 @@ def upload_resume(body: ResumeIn, session: Session = Depends(get_session)):
     profile.filename = body.filename[:300]
     profile.uploaded_at = datetime.now(timezone.utc)
     profile.resume_text = text_
+    profile.resume_file = data
     profile.skills = matching.extract_skills(text_)
     profile.years = matching.resume_years(text_)
     profile.degree = matching.resume_degree(text_)
@@ -1216,7 +1264,7 @@ def delete_resume(session: Session = Depends(get_session)):
     """Remove the resume and everything read from it (the scores go with it)."""
     profile = session.get(UserProfile, 1)
     if profile:
-        profile.resume_text, profile.filename, profile.vector = "", "", None
+        profile.resume_text, profile.filename, profile.vector, profile.resume_file = "", "", None, None
         profile.skills, profile.target_roles, profile.years, profile.degree = [], [], None, ""
         profile.version += 1
         session.execute(text("DELETE FROM job_matches"))

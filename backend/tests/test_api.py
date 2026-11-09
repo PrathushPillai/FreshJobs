@@ -227,6 +227,23 @@ def test_repeat_kinds_labelled_and_filterable(client, session, now):
 
     only = client.get("/api/jobs", params={"show_reposts": True, "repeat_kinds": ["resurfaced"]}).json()["items"]
     assert {(j["title"], j["repost_kind"]) for j in only if j["repost_kind"]} == {("Product Manager", "resurfaced")}
+    # Some kinds ticked: the page comes from two index walks (normal jobs, ticked repeats) merged in sort order.
+    # It must hold the same jobs, in the same order, as showing every kind and dropping the unticked ones.
+    for sort in ["newest", "posted", "company", "sponsor"]:
+        every = client.get("/api/jobs", params={"show_reposts": True, "sort": sort, "hide_no_sponsor": False}).json()["items"]
+        expected = [j["id"] for j in every if j["repost_kind"] in (None, "resurfaced")]
+        got = client.get("/api/jobs", params={"show_reposts": True, "repeat_kinds": ["resurfaced"], "sort": sort,
+                                              "hide_no_sponsor": False}).json()["items"]
+        if sort in ("newest", "posted"):  # orders with an id tie-break: exactly the same
+            assert [j["id"] for j in got] == expected, sort
+        else:  # company / H-1B order has no tie-break (ties come in index order): same jobs, valid order
+            assert sorted(j["id"] for j in got) == sorted(expected), sort
+            key = "company" if sort == "company" else "h1b_filings"
+            values = [j[key] for j in got]
+            assert values == (sorted(values) if sort == "company" else sorted(values, key=lambda v: -(v or -1))), sort
+        page2 = client.get("/api/jobs", params={"show_reposts": True, "repeat_kinds": ["resurfaced"], "sort": sort,
+                                                "hide_no_sponsor": False, "limit": 2, "offset": 2}).json()["items"]
+        assert [j["id"] for j in page2] == [j["id"] for j in got][2:4], sort  # pages follow the same order
 
     dup = next(j for j in items if j["repost_kind"] == "duplicate")
     detail = client.get(f"/api/jobs/{dup['id']}").json()

@@ -13,18 +13,95 @@ _NO_SPONSOR_PATTERNS = [
     r"(\s+holders?)?\s+(status\s+)?(is\s+|are\s+)?(required|only)",
     r"must\s+be\s+(a\s+)?(u\.?s\.?\s+citizen|green\s*card\s+holder|(lawful\s+)?permanent\s+resident)\s+or\s+",
     r"(only|exclusively)\s+(open|available)\s+to\s+(u\.?s\.?\s+)?citizens",
-    r"(active|current|ability to obtain)\s+(\w+\s+){0,3}(security\s+)?clearance",
+    # "active U.S. Secret security clearance": words may carry dots and slashes ("U.S.", "TS/SCI")
+    r"(active|current|ability to obtain)\s+([\w./-]+\s+){0,3}(security\s+)?clearance",
+    # "Eligible to obtain and maintain an active U.S. Secret security clearance" (Anduril)
+    r"(eligib\w*|able)\s+to\s+(obtain|hold|maintain)\s+(and\s+maintain\s+)?(an?\s+)?(active\s+)?([\w./-]+\s+){0,3}(security\s+)?clearance",
     r"(ts/sci|top secret|secret clearance)",
     r"green card holders? only",
     r"(u\.?s\.?\s+)?persons?\s+as\s+defined\s+(by|in|under)\s+itar",
+    # Found missing in a 100-job check (2026-11-09), each with the posting it came from:
+    # "This position is not eligible for Intel immigration sponsorship" (Intel, Qualcomm)
+    r"not\s+eligible\s+for\s+(\w+\s+){0,3}(immigration|visa|h-?1b)\s+sponsorship",
+    # "Sponsorship not available." (Switchboard), "Sponsorship is not offered"
+    r"sponsorship\s+(is\s+)?(not|un)\s*(available|offered|provided|possible)",
+    # "The company will not consider candidates who require sponsorship for a work-authorized visa" (Philips)
+    r"(will\s+not|won'?t|does\s+not|do\s+not|cannot|can ?not|unable\s+to)\s+(consider|accept|hire|employ)\s+"
+    r"([\w-]+\s+){0,4}(who|that)\s+(will\s+)?(now\s+or\s+in\s+the\s+future\s+)?(require|need)s?\s+([\w-]+\s+){0,3}sponsorship",
+    # "PwC does not intend to hire ... job seekers who will need, now or in the future, PwC sponsorship" (PwC)
+    r"(not|no)\s+intend\s+to\s+hire\s+([\w-]+\s+){0,8}(who|that)\s+(will\s+)?(need|require)",
+    # "may not be able to employ candidates who have ... work authorization ... or support future H-1B sponsorship" (Roblox)
+    r"not\s+be\s+able\s+to\s+(employ|hire|support|sponsor)[^.;]{0,160}(visa|h-?1b|sponsorship)",
+    # Export control: "must be a U.S. citizen or national, (ii) U.S. lawful, permanent resident ..., (iii) Refugee" (SpaceX)
+    r"citizen\s+or\s+national\W{1,6}(\(?ii\)?\s*)?(u\.?s\.?\s+)?lawful,?\s+permanent\s+resident",
+    # "U.S. Citizen, U.S. National, lawful permanent resident, refugee, or asylee" (Boeing, export control)
+    r"citizen,?\s+(u\.?s\.?\s+)?national,?\s+(\w+\s+)?(lawful\s+)?permanent\s+resident,?\s+refugee",
+    # "U.S. Person status is required" (CHAOS Industries), "must be a U.S. person"
+    r"(u\.?s\.?|united states)\s+person\s+(status\s+)?(is\s+)?(required|only)",
+    r"must\s+be\s+(a\s+)?(u\.?s\.?|united states)\s+person",
+    # "requires U.S. citizenship and residence in an approved hiring hub" (Second Front)
+    r"requires?\s+(u\.?s\.?|united states)\s+citizenship",
+    r"(u\.?s\.?|united states)\s+citizenship\s+(is\s+)?(a\s+)?(requirement|mandatory)",
+    # "U.S. citizenship and residence in an approved hiring hub" as a requirement bullet (Second Front); not the
+    # EEO line "regardless of ... citizenship status"
+    r"(u\.?s\.?|united states)\s+citizenship(?!\s+status)\s+(and\s+(residence|residency|the\s+ability)|only)",
+    # Second, unseen sample (2026-11-09):
+    # "This role is not open for work sponsorship at this time." (Lovelytics)
+    r"not\s+open\s+(for|to)\s+(work\s+|visa\s+|h-?1b\s+)?sponsorship",
+    # "WSI will not now or in the future commence an immigration case or 'sponsor' an individual" (Williams-Sonoma)
+    r"(will\s+not|won'?t|does\s+not|do\s+not)\s+(now\s+or\s+in\s+the\s+future\s+)?(commence|file|initiate|start|pursue)\s+(an?\s+)?immigration\s+(case|petition|process)",
+    # "This role requires access to export-controlled information ... that require 'U.S. persons'" (Aurelius)
+    r"export[- ]controlled[^.;]{0,160}(require|requires|required|restricted\s+to)[^.;]{0,60}(us\s+persons?|citizens)",
+    # "Must be a U.S. Citizen or Permanent Resident", "US citizens or permanent residents only"
+    r"(must\s+be|requires?|required:?|only)\s+(a\s+)?(us\s+)?citizens?\s+or\s+(a\s+)?(lawful\s+)?permanent\s+residents?",
+    r"(us\s+)?citizens?\s+or\s+(lawful\s+)?permanent\s+residents?\s+(only|required)",
 ]
+# "must be legally authorized to work in the United States on a permanent basis" (Latitude AI): OPT and H-1B
+# are temporary, so it rules them out, unless the same posting also says it sponsors (then it's mixed: left
+# for the reader, with the "says it sponsors" badge showing).
+_PERMANENT_BASIS = re.compile(r"authori[sz]ed\s+to\s+work\s+(in\s+the\s+(u\.?s\.?|united states)\s+)?on\s+a\s+permanent\s+basis", re.I)
 _NO_SPONSOR = re.compile("|".join(f"(?:{p})" for p in _NO_SPONSOR_PATTERNS), re.I)
+_US_DOTS = re.compile(r"\bU\.\s?S\.(?:\s?A\.)?", re.I)
 
 
 def find_no_sponsor_phrase(text: str) -> str | None:
     """Return the matching phrase if the text rules out visa sponsorship, else None."""
-    m = _NO_SPONSOR.search(text or "")
-    return m.group(0) if m else None
+    # "U.S." -> "US" first: the dots ended "[^.]"-style spans early ("... certain U.S. visa categories, or support
+    # future H-1B sponsorship" at Roblox wasn't caught).
+    text = _US_DOTS.sub("US", text or "")
+    m = _NO_SPONSOR.search(text)
+    if m:
+        return m.group(0)
+    p = _PERMANENT_BASIS.search(text or "")
+    return p.group(0) if p and not says_sponsors(text) else None
+
+
+# Postings that say they *do* sponsor: "We do sponsor visas!" (Anthropic), "While Etsy supports visa sponsorship",
+# "Visa sponsorship is available for this position" (Latitude AI). A sentence with a "no" in it doesn't count,
+# and neither does a posting that rules sponsorship out anywhere (see says_sponsors).
+_SPONSOR_YES = re.compile(
+    r"\b(we|company|firm|employer|\w+)\s+(do|does|will|can|is\s+able\s+to|are\s+able\s+to|happily|proudly)?\s*"
+    r"(sponsor|sponsors)\s+(\w+\s+){0,2}(visas?|h-?1bs?|work\s+visas?|green\s+cards?|immigration)\b"
+    r"|\b(supports?|offers?|provides?|provide)\s+(\w+\s+){0,2}(visa|h-?1b|immigration)\s+sponsorship"
+    r"|\b(visa|h-?1b|immigration)\s+sponsorships?\s+(is\s+|are\s+)?(available|offered|provided|possible|supported)"
+    # "Is role eligible for Immigration Sponsorship?: Yes" (Palo Alto Networks)
+    r"|\beligible\s+for\s+(immigration|visa)\s+sponsorship\W{0,4}\s*yes\b"
+    # "Visa transfers are supported" (Raydar): an H-1B transfer is a sponsorship
+    r"|\b(visa|h-?1b)\s+transfers?\s+(are\s+|is\s+)?(supported|available|welcome)"
+    # "Visa Sponsorship & Immigration Support" in a benefits list (Resolve AI)
+    r"|\bvisa\s+sponsorship\s*(&|and)\s*immigration\s+support"
+    r"|\bopen\s+to\s+(sponsoring|sponsor)\b",
+    re.I,
+)
+_SPONSOR_YES_NEGATED = re.compile(r"\b(not|no|unable|cannot|can ?not|can'?t|won'?t|never|neither|nor)\b", re.I)
+
+
+def says_sponsors(text: str) -> bool:
+    """The posting says it sponsors visas (and nowhere says it doesn't)."""
+    text = _US_DOTS.sub("US", text or "")
+    if not text or not _SPONSOR_YES.search(text) or _NO_SPONSOR.search(text):
+        return False
+    return any(_SPONSOR_YES.search(s) and not _SPONSOR_YES_NEGATED.search(s) for s in _sentences(text))
 
 
 # F-1 student work permits. Phrases that can only mean them:

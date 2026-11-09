@@ -13,6 +13,7 @@ function lastQuery() {
 }
 
 const enc = encodeURIComponent
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 
 interface LinkGroup {
   title: string
@@ -69,9 +70,12 @@ function groups(role: string, location: string, visa: boolean): LinkGroup[] {
       links: [
         { label: 'Indeed · past 24 hours', hint: 'Sorted by date', url: `https://www.indeed.com/jobs?q=${enc(r)}&l=${enc(loc)}&fromage=1&sort=date` },
         { label: 'Glassdoor · past day', hint: '', url: `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${enc(r)}&locKeyword=${enc(loc)}&fromAge=1` },
-        { label: 'Google Jobs · today', hint: 'Indexes most job boards', url: `https://www.google.com/search?q=${enc(`${r} jobs ${loc}`)}&ibp=htl;jobs&htichips=date_posted:today` },
-        { label: 'Wellfound (startups)', hint: 'Startup roles, many with salary and equity', url: `https://wellfound.com/jobs?query=${enc(r)}` },
-        { label: 'Hacker News: who is hiring', hint: 'Searches this month\'s threads', url: `https://hn.algolia.com/?dateRange=pastMonth&query=${enc(r)}&type=comment` },
+        // Google Jobs (udm=8) dropped the old date chip (htichips); it reads "since yesterday" in the query instead.
+        { label: 'Google Jobs · past day', hint: 'Indexes most job boards', url: `https://www.google.com/search?q=${enc(`${r} jobs ${loc} since yesterday`)}&udm=8` },
+        // Wellfound ignores ?query=; its role pages (/role/data-analyst) are the search.
+        { label: 'Wellfound (startups)', hint: 'Startup roles, many with salary and equity', url: `https://wellfound.com/role/${slug(r)}` },
+        // hnhiring.com searches only this month's "Who is hiring?" thread; Algolia matched every comment.
+        { label: 'Hacker News: who is hiring', hint: 'This month\'s "Who is hiring?" thread', url: `https://hnhiring.com/search?q=${enc(r)}` },
       ],
     },
   ]

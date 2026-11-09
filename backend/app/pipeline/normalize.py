@@ -73,10 +73,26 @@ def normalize_location(location: str) -> str:
 
 _YEARS = re.compile(
     r"(?:(?:minimum|min\.?|at least)\s+(?:of\s+)?)?"
-    r"(\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*(\d{1,2})\s*\+?\s*)?(?:years?|yrs?)\b"
-    r"(?:\s+of)?(?:\s+[\w/&,.+#-]+){0,6}?\s+(?:experience|exp\b)",
+    r"(\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*(\d{1,2})\s*\+?\s*)?(?:years?|yrs?)\b['’]?"  # "8+ years’ experience"
+    r"(?:\s+of)?(?:\s+[\w/&,.+#()-]+){0,6}?\s+(?:experience|exp\b)",
     re.I,
 )
+# "8+ years building and operating backend systems", "6+ years of shipping native iOS apps": a "+" or a range
+# marks a requirement even without the word "experience", in a sentence about work, not the company's history.
+_YEARS_PLUS = re.compile(r"\b(\d{1,2})\s*(?:\+|plus|(?:-|–|to)\s*\d{1,2})\s*(?:years?|yrs?)\b", re.I)
+_WORK_WORDS = re.compile(r"\b(experience|experienced|building|developing|shipping|working|designing|engineering|"
+                         r"programming|coding|leading|professional|industry|hands-on|consulting|managing|operating|writing|"
+                         r"fluency|proficiency|background|expertise)\b", re.I)
+_COMPANY_HISTORY = re.compile(r"\b(we|our|company|founded|history|serving|in business|for over|more than)\b", re.I)
+# Alternatives by degree ("A high school diploma with 6 years; OR a Bachelor's degree with 2 years; OR a Master's
+# with 0"): the bar for a degree holder is the Bachelor's line, not the largest number. Years "in lieu of a
+# degree" don't apply to someone who has one.
+_DEGREE_WORDS = re.compile(r"\b(high school|diploma|ged|associate'?s|bachelor'?s|bachelors|master'?s|masters|ph\.?d|doctorate|degree|b\.?s\.?|m\.?s\.?)\b", re.I)
+_BACHELOR = re.compile(r"\bbachelor|\bb\.?s\.?\b|\bb\.?a\.?\b|\bb\.?tech\b|\bundergraduate", re.I)
+# Alternatives inside one sentence: "12 years and a Bachelor's, or 8 years and a Master's, or 5 years and a PhD".
+_OR_SPLIT = re.compile(r",?\s+or\s+(?=(?:a\s+|an\s+)?(?:\d|high school|associate|bachelor|master|ph\.?d|doctorate|b\.?s|m\.?s))", re.I)  # not "or equivalent": that belongs to the degree before it
+_IN_LIEU = re.compile(r"in\s+lieu\s+of|instead\s+of\s+a\s+degree|without\s+a\s+degree|in\s+place\s+of\s+a\s+degree", re.I)
+_CLAUSES = re.compile(r"(?<=[.;!?])\s+|\n+|\s(?=\bOR\b)|\s[-*•]\s")
 _YEARS_AFTER = re.compile(r"experience\s*(?:of|:)?\s*(\d{1,2})\s*\+?\s*(?:years?|yrs?)", re.I)
 
 _LEVEL_RANK = {"entry": 0, "mid": 1, "senior": 2}
@@ -85,11 +101,38 @@ _LEVEL_RANK = {"entry": 0, "mid": 1, "senior": 2}
 def experience_years(text: str) -> int | None:
     """Years of experience the posting asks for, e.g. "3+ years of Python experience" -> 3.
 
-    With several mentions ("5+ years overall, 2+ with Spark") the largest is the overall bar.
+    With several mentions ("5+ years overall, 2+ with Spark") the largest is the overall bar. Mentions that are
+    alternatives by degree count as one bar, the Bachelor's line (or the smallest), and years "in lieu of a
+    degree" are skipped. Checked against 100 real postings (2026-11-09): it used to take the largest of the
+    alternatives (Northrop's "high school + 6 / Bachelor's + 2" gave 6) and missed "8+ years building ...".
     """
-    found = [int(m.group(1)) for m in _YEARS.finditer(text or "")]
-    found += [int(m.group(1)) for m in _YEARS_AFTER.finditer(text or "")]
-    found = [y for y in found if 0 <= y <= 20]
+    general: list[int] = []
+    by_degree: list[tuple[int, bool]] = []  # (years, mentions a Bachelor's)
+    clauses = []
+    for clause in _CLAUSES.split(text or ""):
+        if clause and _DEGREE_WORDS.search(clause):
+            parts = _OR_SPLIT.split(clause)
+            clauses += [(p, i > 0) for i, p in enumerate(parts)]  # a part after "or" is an alternative
+        elif clause:
+            clauses.append((clause, clause.lstrip().upper().startswith("OR ")))  # Boeing: "OR 10+ years of ..."
+    for clause, alternative in clauses:
+        if not clause.strip():
+            continue
+        years = [int(m.group(1)) for m in _YEARS.finditer(clause)] + [int(m.group(1)) for m in _YEARS_AFTER.finditer(clause)]
+        if not years and _WORK_WORDS.search(clause) and not _COMPANY_HISTORY.search(clause):
+            years = [int(m.group(1)) for m in _YEARS_PLUS.finditer(clause)]
+        years = [y for y in years if 0 <= y <= 20]
+        if not years or _IN_LIEU.search(clause):
+            continue
+        if _DEGREE_WORDS.search(clause) or alternative:
+            by_degree += [(y, bool(_BACHELOR.search(clause))) for y in years]
+        else:
+            general += years
+    degree_bar = None
+    if by_degree:
+        bachelor = [y for y, b in by_degree if b]
+        degree_bar = min(bachelor) if bachelor else min(y for y, _ in by_degree)
+    found = general + ([degree_bar] if degree_bar is not None else [])
     return max(found) if found else None
 
 
