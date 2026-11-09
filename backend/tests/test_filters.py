@@ -111,6 +111,10 @@ from app.pipeline.normalize import experience_level, experience_years  # noqa: E
         ("Bengaluru, India", [Place("Bangalore", None, "India")]),
         ("Remote - Washington", [Place(None, "WA", "United States")]),
         ("Washington D.C.", [Place("Washington", "DC", "United States")]),
+        # SuccessFactors (Wipro): country-state codes between commas, not a city called "USA-CO"
+        ("Denver, USA-CO, USA, 12421", [Place("Denver", "CO", "United States")]),
+        ("Toronto, CAN-ON", [Place("Toronto", "ON", "Canada")]),
+        ("Bangalore, IND-KA, India", [Place("Bangalore", None, "India")]),
     ],
 )
 def test_parse_locations(location, expected):
@@ -136,3 +140,54 @@ def test_experience_level_takes_higher_of_title_and_years():
     assert experience_level(1, "unknown") == "entry"
     assert experience_level(7, "entry") == "senior"
     assert experience_level(None, "unknown") == "unknown"
+
+
+def test_listed_at_prefers_detection_time_for_date_only_postings():
+    from datetime import datetime, timezone
+
+    from app.pipeline.normalize import listed_at
+
+    found = datetime(2026, 11, 3, 14, 5, tzinfo=timezone.utc)
+    midnight = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    exact = datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)
+    assert listed_at(midnight, found, baseline=False) == found  # "Posted Today" caught at 2:05 pm
+    assert listed_at(exact, found, baseline=False) == exact  # an aggregator's exact time is kept
+    assert listed_at(midnight, found, baseline=True) == midnight  # baseline: the date is all we know
+    assert listed_at(None, found, baseline=False) == found
+    assert listed_at(None, found, baseline=True) is None  # undated and already listed: unknown
+    old_date = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    assert listed_at(old_date, found, baseline=False) == old_date  # re-listed old job keeps its date
+
+
+def test_listed_window_after_a_gap_in_checking():
+    from datetime import datetime, timezone
+
+    from app.pipeline.normalize import listed_window
+
+    prev = datetime(2026, 11, 3, 8, 0, tzinfo=timezone.utc)
+    found = datetime(2026, 11, 3, 14, 5, tzinfo=timezone.utc)
+    midnight = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    exact = datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc)
+    assert listed_window(midnight, found, False, prev) == (prev, found)  # date-only: sometime since 8 am
+    assert listed_window(None, found, False, prev) == (prev, found)
+    assert listed_window(exact, found, False, prev) == (exact, None)  # an exact time needs no window
+    late_prev = datetime(2026, 11, 2, 20, 0, tzinfo=timezone.utc)
+    assert listed_window(midnight, found, False, late_prev) == (midnight, found)  # not before the posted date
+    assert listed_window(None, found, True, prev) == (None, None)  # baseline stays unknown
+
+
+def test_roles_match_exactly_what_was_picked_in_any_spelling():
+    from app.pipeline.filters import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, role_matches
+
+    yes = ["Frontend Engineer", "Front-End Developer", "Software Engineers", "Senior Data Analyst", "Full-Stack Engineer"]
+    no = ["Software Development Engineer II", ".NET Developer", "Mobile Crane Operator", "Sales Engineer", "Software Engineer Intern"]
+    assert all(role_matches(t, DEFAULT_INCLUDE, DEFAULT_EXCLUDE) for t in yes)
+    assert not any(role_matches(t, DEFAULT_INCLUDE, DEFAULT_EXCLUDE) for t in no)  # related roles are only suggested
+    assert role_matches("Software Development Engineer II", [*DEFAULT_INCLUDE, "sde"], DEFAULT_EXCLUDE)  # once picked
+
+
+def test_search_terms_are_whole_words_in_every_spelling():
+    from app.pipeline.search import fts_all_words, query_variants
+
+    assert set(query_variants("frontend developer")) >= {"front end developer", "frontend engineer"}
+    assert "reactor" not in fts_all_words("react") and '"reacts"' in fts_all_words("react")

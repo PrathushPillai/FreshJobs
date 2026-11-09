@@ -1,6 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
 import { api, timeAgo } from '../api'
+import { PageHeader } from './ui'
 
 const ATS_HINTS: Record<string, string> = {
   jsearch: 'a Google Jobs search, e.g. query=data analyst jobs in Texas&date_posted=today (uses your JSearch quota)',
@@ -18,11 +19,26 @@ const ATS_HINTS: Record<string, string> = {
   icims: 'the portal in careers-<slug>.icims.com, or a full host such as uscareers-msci.icims.com',
   eightfold: 'tenant|domain[|location] from <tenant>.eightfold.ai, e.g. qualcomm|qualcomm.com|United States',
   successfactors: 'host[|filters] of the career site, e.g. careers.ey.com|optionsFacetsDD_country=US',
+  rippling: 'the board in ats.rippling.com/<slug>/jobs',
+  gem: 'the board in jobs.gem.com/<slug>',
+  polymer: 'the board in jobs.polymer.co/<slug>',
+  bamboohr: 'the subdomain in <slug>.bamboohr.com/careers',
+  recruitee: 'the subdomain in <slug>.recruitee.com',
+  breezy: 'the subdomain in <slug>.breezy.hr',
+  pinpoint: 'the subdomain in <slug>.pinpointhq.com',
+  simplify: 'a SimplifyJobs GitHub repo, e.g. SimplifyJobs/New-Grad-Positions',
 }
 
 export default function Companies() {
   const queryClient = useQueryClient()
-  const companies = useQuery({ queryKey: ['companies'], queryFn: api.companies })
+  // The 200 sources with the most open jobs, or the ones matching a search (drawing all 25k rows was slow).
+  const [search, setSearch] = useState('')
+  const [q, setQ] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setQ(search.trim()), 300)
+    return () => clearTimeout(t)
+  }, [search])
+  const companies = useQuery({ queryKey: ['companies', q], queryFn: () => api.companies(q), placeholderData: keepPreviousData })
   const [form, setForm] = useState({ name: '', ats: 'greenhouse', slug: '' })
   const add = useMutation({
     mutationFn: api.addCompany,
@@ -46,12 +62,15 @@ export default function Companies() {
 
   return (
     <div className="space-y-5">
+      <PageHeader icon="🛰️" title="Sources">
+        The company job boards and feeds FreshJobs checks every few minutes. Paste any careers page to add a company.
+      </PageHeader>
       <form
         onSubmit={(e) => {
           e.preventDefault()
           fromUrl.mutate(url)
         }}
-        className="space-y-2 rounded-lg border border-slate-200 bg-white p-4"
+        className="space-y-2 rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-4"
       >
         <label className="block text-sm font-medium" htmlFor="careers-url">
           Add a company from its careers page
@@ -65,7 +84,7 @@ export default function Companies() {
             placeholder="Paste a careers page or job link, e.g. careers.jpmorgan.com or jobs.lever.co/acme/123"
             className="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm"
           />
-          <button disabled={fromUrl.isPending} className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">
+          <button disabled={fromUrl.isPending} className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">
             {fromUrl.isPending ? 'Detecting…' : 'Detect and add'}
           </button>
         </div>
@@ -73,7 +92,7 @@ export default function Companies() {
           Works with Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, iCIMS, Oracle, Eightfold and SuccessFactors boards, even when they're embedded in a company's own site.
         </p>
         {fromUrl.isSuccess && (
-          <p className="text-sm text-emerald-700">
+          <p className="text-sm text-brand-700">
             {fromUrl.data.added ? 'Added' : 'Already tracking'} <b>{fromUrl.data.company.name}</b> ({fromUrl.data.company.ats}/{fromUrl.data.company.slug}).
             {fromUrl.data.added && ' Its jobs appear after the next check.'}
           </p>
@@ -86,7 +105,7 @@ export default function Companies() {
           e.preventDefault()
           add.mutate(form)
         }}
-        className="flex flex-wrap items-end gap-3 rounded-lg border border-slate-200 bg-white p-4"
+        className="flex flex-wrap items-end gap-3 rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-4"
       >
         <label className="text-sm">
           <span className="mb-1 block text-slate-600">Company</span>
@@ -113,7 +132,19 @@ export default function Companies() {
         </p>
       </form>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Find a source: company name, board slug or ATS (greenhouse, workday…)"
+          className="min-w-0 flex-1 rounded-full bg-white px-4 py-2 text-sm shadow-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-brand-300"
+        />
+        <span className="text-sm text-slate-500">
+          {companies.isFetching ? 'Loading…' : q ? `${companies.data?.length ?? 0}${companies.data?.length === 200 ? '+' : ''} matching` : 'Top 200 by open jobs'}
+        </span>
+      </div>
+
+      <div className="overflow-x-auto rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
@@ -136,7 +167,7 @@ export default function Companies() {
                   {c.last_polled_at ? `${timeAgo(c.last_polled_at)} · ${c.last_status}` : 'not yet'}
                 </td>
                 <td className="px-4 py-2">
-                  <input type="checkbox" className="accent-emerald-600" checked={c.enabled} onChange={(e) => toggle.mutate({ id: c.id, enabled: e.target.checked })} />
+                  <input type="checkbox" className="accent-brand-600" checked={c.enabled} onChange={(e) => toggle.mutate({ id: c.id, enabled: e.target.checked })} />
                 </td>
               </tr>
             ))}

@@ -80,3 +80,22 @@ async def test_ashby_skips_unlisted():
         jobs = await ADAPTERS["ashby"].fetch(client, "acme")
     assert [j.external_id for j in jobs] == ["a1"]
     assert jobs[0].location == "San Francisco | Seattle"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_greenhouse_later_polls_fetch_details_only_for_new_jobs():
+    listed = {"jobs": [
+        {"id": 1, "title": "Data Analyst", "absolute_url": "https://x/1", "location": {"name": "NYC"}},
+        {"id": 2, "title": "Data Engineer", "absolute_url": "https://x/2", "location": {"name": "Remote"}},
+    ]}
+    respx.get("https://boards-api.greenhouse.io/v1/boards/acme/jobs").mock(return_value=httpx.Response(200, json=listed))
+    new = respx.get("https://boards-api.greenhouse.io/v1/boards/acme/jobs/2").mock(return_value=httpx.Response(
+        200, json={"content": "&lt;p&gt;Pipelines.&lt;/p&gt;", "departments": [{"name": "Data"}]}))
+    known = respx.get("https://boards-api.greenhouse.io/v1/boards/acme/jobs/1")
+    async with httpx.AsyncClient() as client:
+        old, fresh = await ADAPTERS["greenhouse"].fetch(client, "acme", known_ids={"1"})
+    assert new.called and not known.called
+    assert respx.calls[0].request.url.params.get("content") is None
+    assert fresh.description == "Pipelines." and fresh.department == "Data" and fresh.remote
+    assert old.title == "Data Analyst" and old.description == ""

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { APP_STATUSES, type Application, type AppStatus, STATUS_STYLES, api, formatDateTime } from '../api'
+import { PageHeader } from './ui'
 
 function NotesCell({ app }: { app: Application }) {
   const queryClient = useQueryClient()
@@ -69,6 +70,9 @@ export default function Tracker() {
 
   return (
     <div className="space-y-4">
+      <PageHeader icon="📋" title="Your applications">
+        Every job you've saved or applied to, with its stage, notes and contact. It stays here even after the posting closes.
+      </PageHeader>
       <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={() => setStatusFilter('all')}
@@ -97,7 +101,7 @@ export default function Tracker() {
             e.preventDefault()
             add.mutate()
           }}
-          className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-200 bg-white p-3"
+          className="flex flex-wrap items-end gap-2 rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-3"
         >
           {(['company', 'title', 'url'] as const).map((field) => (
             <label key={field} className="text-sm">
@@ -110,7 +114,7 @@ export default function Tracker() {
               />
             </label>
           ))}
-          <button disabled={add.isPending} className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">
+          <button disabled={add.isPending} className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">
             Add as applied
           </button>
           {add.isError && <span className="text-sm text-red-600">{(add.error as Error).message}</span>}
@@ -125,11 +129,11 @@ export default function Tracker() {
       )}
 
       {shown.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+        <div className="overflow-x-auto rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
-                <th className="px-3 py-2">Job</th>
+                <th className="min-w-64 px-3 py-2">Job</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Applied</th>
                 <th className="px-3 py-2">Contact</th>

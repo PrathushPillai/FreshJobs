@@ -26,6 +26,7 @@ MAX_PAGES = 5
 class AdzunaAdapter(Adapter):
     ats = "adzuna"
     complete_feed = False
+    aggregator = True
     min_interval_minutes = 30
 
     def is_configured(self) -> bool:

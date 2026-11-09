@@ -19,10 +19,26 @@ export interface Job {
   department: string
   posted_at: string | null
   first_seen_at: string
+  listed_at: string | null
+  listed_until: string | null
+  checked_at: string | null
   closed_at: string | null
   is_repost: boolean
   repost_of_id: number | null
+  repost_kind: RepeatKind | null
   no_sponsor: boolean
+  /** What the description says about F-1 students on OPT/CPT/STEM OPT. */
+  student_visa: 'welcome' | 'excluded' | null
+  /** The description says the employer uses E-Verify (needed to hire on STEM OPT). */
+  everify_text: boolean
+  /** The posting says it sponsors visas ("We do sponsor visas!"). */
+  sponsors_text: boolean
+  /** The employer in USCIS's E-Verify list: enrolled, every account ended, or not found. */
+  everify: 'yes' | 'ended' | null
+  /** The employer's website, for its logo; null means show initials. */
+  logo_domain: string | null
+  /** How well the uploaded resume fits this job; null without a resume. */
+  match: MatchBrief | null
   seniority: string
   min_years: number | null
   exp_level: ExpLevel
@@ -31,8 +47,52 @@ export interface Job {
   application: { id: number; status: AppStatus } | null
 }
 
+/** One occupation (SOC code) an employer filed H-1B LCAs for, with the offered yearly wages. */
+export interface H1BRole {
+  soc_code: string
+  soc_title: string
+  filings: number
+  median_wage: number | null
+  low_wage: number | null
+  high_wage: number | null
+  top_titles: string[]
+  top_cities: string[]
+}
+
+export interface H1BHistory {
+  total: number
+  /** The occupation that fits this job: by similar LCA titles ("title") or the title's usual occupation. */
+  match: (H1BRole & { matched_by: 'title' | 'occupation' }) | null
+  roles: H1BRole[]
+}
+
+/** "$148k" */
+export function money(n: number | null): string {
+  if (n === null) return '-'
+  return n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${Math.round(n / 1000)}k`
+}
+
+/** Why a job is hidden as a repeat: same job re-posted, the same job on another site, or an old job re-listed. */
+export type RepeatKind = 'repost' | 'duplicate' | 'resurfaced'
+export const REPEAT_KINDS: RepeatKind[] = ['repost', 'duplicate', 'resurfaced']
+export const REPEAT_LABELS: Record<RepeatKind, { label: string; hint: string }> = {
+  repost: { label: 'Repost', hint: 'The same job was posted before by this company' },
+  duplicate: { label: 'Duplicate', hint: 'The same job is also listed, still open, on another site we track' },
+  resurfaced: { label: 'Resurfaced', hint: 'Newly listed, but the company dates it more than a week ago: an old job re-listed' },
+}
+
 export interface JobDetail extends Job {
   description: string
+  repost_of: { id: number; title: string; company: string; url: string; first_seen_at: string; closed_at: string | null } | null
+  h1b_roles: H1BHistory | null
+  match: MatchDetail | null
+  /** LinkedIn post search: "hiring" + this role + this company, past month (a link only). */
+  hiring_posts_url: string
+  uscis: {
+    years: { fiscal_year: number; new_approvals: number; new_denials: number; approvals: number; denials: number }[]
+    names: string[]
+  } | null
+  everify_info: { status: 'yes' | 'ended'; since: string | null; ended: string | null; name: string; workforce: string; accounts: number } | null
   events: { kind: string; at: string; detail: string }[]
   sponsor: { filings: number; employers: string[]; top_titles: string[]; source: string } | null
 }
@@ -46,6 +106,51 @@ export interface Company {
   last_polled_at: string | null
   last_status: string | null
   open_jobs: number
+}
+
+/** A job's resume match as cards show it (app/matching.py). */
+export interface MatchBrief {
+  score: number
+  matched: string[]
+  missing: string[]
+  skills_asked: number
+  notes: string[]
+}
+
+/** The full match, for the job panel: every part out of 100 and every matched and missing skill. */
+export interface MatchDetail extends MatchBrief {
+  parts: { skills: number; fit: number; role: number; experience: number; education: number }
+}
+
+export interface Profile {
+  has_resume: boolean
+  filename?: string
+  uploaded_at?: string
+  skills?: string[]
+  years?: number | null
+  degree?: '' | 'bachelors' | 'masters' | 'phd'
+  target_roles?: string[]
+  suggested_roles?: string[]
+  needs_sponsorship?: boolean
+  visa_status?: string
+  opt_end?: string | null
+  locations?: string[]
+  resume_preview?: string
+  your_roles: string[]
+  scoring: { running: boolean; scored: number; total: number }
+  scored?: number
+  version?: number
+  /** Set when the file's words came out run together (some PDFs): what to upload instead. */
+  text_warning?: string | null
+  /** Every skill the matcher knows, for the skill picker. */
+  vocabulary: string[]
+}
+
+export type ProfileEdit = Partial<Pick<Profile, 'skills' | 'years' | 'degree' | 'target_roles' | 'needs_sponsorship' | 'visa_status' | 'opt_end' | 'locations'>>
+
+/** Match colour by score: strong, good, fair, weak. */
+export function matchTone(score: number): 'strong' | 'good' | 'fair' | 'weak' {
+  return score >= 75 ? 'strong' : score >= 60 ? 'good' : score >= 45 ? 'fair' : 'weak'
 }
 
 export interface Prefs {
@@ -62,6 +167,8 @@ export interface Status {
   poll_minutes: number
   last_poll: { started_at: string; finished_at: string; new_jobs: number; matches: number; errors: number; discovered?: string[] } | null
   email_configured: boolean
+  /** "test" means a local test mail server: alerts don't reach a real inbox. */
+  email_mode?: 'off' | 'test' | 'on'
   hunter_configured: boolean
   adzuna_configured: boolean
   companies: number
@@ -113,7 +220,9 @@ export interface RecruiterInfo {
 export interface JobQuery {
   q?: string
   related?: boolean
-  sort?: 'newest' | 'posted' | 'company' | 'sponsor'
+  also?: string[]
+  skip?: string[]
+  sort?: 'newest' | 'posted' | 'company' | 'sponsor' | 'match'
   countries?: string[]
   states?: string[]
   cities?: string[]
@@ -121,20 +230,45 @@ export interface JobQuery {
   max_years?: number
   remote_only?: boolean
   sponsors_only?: boolean
+  everify_only?: boolean
+  /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
+  fresh_counts?: boolean
   hide_no_sponsor?: boolean
   show_reposts?: boolean
+  repeat_kinds?: RepeatKind[]
   alert_roles_only?: boolean
   tracked?: 'any' | 'tracked' | 'untracked'
   since_hours?: number
+  posted_within_hours?: number
   status?: 'open' | 'closed' | 'all'
   limit?: number
   offset?: number
 }
 
+/** The backend isn't answering yet (still starting, or stopped): the dev server's proxy replies 500 with
+ * an empty body, or the request fails outright. The page shows "starting up" and retries. */
+export class BackendDown extends Error {
+  constructor() {
+    super('FreshJobs is starting up. This can take a few minutes after a restart; the page loads by itself.')
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init })
+  let res: Response
+  try {
+    res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init })
+  } catch {
+    throw new BackendDown()
+  }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
+    const text = await res.text().catch(() => '')
+    if (res.status >= 500 && !text.trim()) throw new BackendDown()
+    let body: { detail?: unknown } = {}
+    try {
+      body = JSON.parse(text)
+    } catch {
+      /* not JSON */
+    }
     throw new Error(typeof body.detail === 'string' ? body.detail : `${res.status} ${res.statusText}`)
   }
   return res.status === 204 ? (undefined as T) : res.json()
@@ -151,8 +285,14 @@ function toParams(query: object): URLSearchParams {
 }
 
 export const api = {
-  jobs: (query: JobQuery) => request<{ total: number; related_terms: string[]; items: Job[] }>(`/api/jobs?${toParams(query)}`),
+  /** Scores for jobs a list showed without one (scored on the server now). */
+  matches: (ids: number[]) => request<Record<string, MatchBrief>>(`/api/matches?${toParams({ ids })}`),
+  jobs: (query: JobQuery) => request<{ total: number; total_capped: boolean; related_terms: string[]; items: Job[]; fresh?: { '1': number; '6': number; '24': number } | null }>(`/api/jobs?${toParams(query)}`),
   job: (id: number) => request<JobDetail>(`/api/jobs/${id}`),
+  verify: (id: number) =>
+    request<{ open: boolean | null; detail: string; checked_at: string; closed_at: string | null }>(`/api/jobs/${id}/verify`, { method: 'POST' }),
+  /** Fetch a job's description from its source when it was saved without one. */
+  describe: (id: number) => request<{ description: string | null; fetched: boolean }>(`/api/jobs/${id}/describe`, { method: 'POST' }),
   recruiters: (id: number, lookup = false, refresh = false) =>
     request<RecruiterInfo>(`/api/jobs/${id}/recruiters?${toParams({ lookup, refresh })}`),
   locationFacets: (country?: string, state?: string) =>
@@ -163,7 +303,7 @@ export const api = {
   updateApplication: (id: number, body: Partial<Pick<Application, 'status' | 'notes' | 'contact' | 'applied_at'>>) =>
     request<Application>(`/api/applications/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteApplication: (id: number) => request<void>(`/api/applications/${id}`, { method: 'DELETE' }),
-  companies: () => request<Company[]>('/api/companies'),
+  companies: (q = '', limit = 200) => request<Company[]>(`/api/companies?${toParams({ q, limit })}`),
   addCompany: (body: { name: string; ats: string; slug: string }) =>
     request<Company>('/api/companies', { method: 'POST', body: JSON.stringify(body) }),
   addCompanyFromUrl: (url: string) =>
@@ -171,9 +311,16 @@ export const api = {
   setCompanyEnabled: (id: number, enabled: boolean) =>
     request<Company>(`/api/companies/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
   prefs: () => request<Prefs>('/api/prefs'),
+  roleSuggestions: (roles: string[]) => request<{ role: string; open_jobs: number }[]>(`/api/roles/suggestions?${toParams({ roles })}`),
+  profile: () => request<Profile>('/api/profile'),
+  uploadResume: (filename: string, data_base64: string) =>
+    request<Profile>('/api/profile/resume', { method: 'POST', body: JSON.stringify({ filename, data_base64 }) }),
+  updateProfile: (edit: ProfileEdit) => request<Profile>('/api/profile', { method: 'PUT', body: JSON.stringify(edit) }),
+  deleteResume: () => request<Profile>('/api/profile/resume', { method: 'DELETE' }),
   savePrefs: (prefs: Prefs) => request<Prefs>('/api/prefs', { method: 'PUT', body: JSON.stringify(prefs) }),
   status: () => request<Status>('/api/status'),
   poll: () => request<{ started: boolean }>('/api/poll', { method: 'POST' }),
+  testEmail: () => request<{ sent: boolean; detail: string; mode: string }>('/api/alerts/test', { method: 'POST' }),
 }
 
 export function timeAgo(iso: string): string {
@@ -184,6 +331,17 @@ export function timeAgo(iso: string): string {
   if (hours < 48) return `${hours} h ago`
   return `${Math.round(hours / 24)} d ago`
 }
+
+/** When a job went live. A window ("in the last 6 h", "20 min–6 h ago") when we found it after a gap in
+ * checking (the server was off) and the company gives no exact time, else a single time. */
+export function postedText(listed: string, until: string | null): string {
+  if (!until) return timeAgo(listed)
+  const span = (iso: string) => timeAgo(iso).replace(/ ago$/, '')
+  const untilMinutes = (Date.now() - new Date(until).getTime()) / 60_000
+  return untilMinutes < 5 ? `in the last ${span(listed)}` : `${span(until)}–${span(listed)} ago`
+}
+
+export const WINDOW_HINT = 'The company gives no exact time and we found this after a gap in checking, so it went live somewhere in this window.'
 
 export function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
@@ -215,7 +373,17 @@ export const SOURCE_LABELS: Record<string, string> = {
   icims: 'iCIMS',
   eightfold: 'Eightfold',
   successfactors: 'SuccessFactors',
+  rippling: 'Rippling',
+  gem: 'Gem',
+  polymer: 'Polymer',
+  jazzhr: 'JazzHR',
+  bamboohr: 'BambooHR',
+  recruitee: 'Recruitee',
+  breezy: 'Breezy HR',
+  pinpoint: 'Pinpoint',
+  simplify: 'SimplifyJobs',
   themuse: 'The Muse',
+  workable_search: 'Workable job search',
   remotive: 'Remotive',
   remoteok: 'RemoteOK',
   adzuna: 'Adzuna',

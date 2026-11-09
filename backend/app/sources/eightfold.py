@@ -129,7 +129,7 @@ class EightfoldAdapter(Adapter):
         return (await http_util.get(client, f"https://{host}/api/apply/v2/jobs/{pid}", params={"domain": domain})).json()
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         host, domain, location = self._resolve(slug)
         positions = await self._list(client, host, domain, location, full, known_ids)

@@ -7,9 +7,13 @@ included) in one request, so no per-job calls are needed. Workable rate-limits h
 roughly 100 quick requests from one IP), hence the long poll interval.
 """
 
+import asyncio
+import time
+
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 
@@ -20,11 +24,33 @@ def _place(loc: dict) -> str:
 
 class WorkableAdapter(Adapter):
     ats = "workable"
-    min_interval_minutes = 30
+    # New jobs come in within minutes through Workable's own job search (workable_search.py); polling
+    # each board, for closings and full listings, every 3 hours keeps under Workable's rate limit.
+    min_interval_minutes = 180
+    max_concurrency = 2  # thousands of discovered Workable boards at 10 at once got HTTP 429 for most
+    # At 2 at a time, ~4,400 boards take hours: in their own lane, so they never hold up the fast boards.
+    lane = "bulk"
+
+    # Requests are spaced out instead of sent two at a time as fast as possible: bursts got HTTP 429 for 3,254
+    # of the 4,424 boards. One every 2 s is a full pass in about 2.5 h, inside the 3-hour interval above.
+    REQUEST_SPACING = 2.0
+    _spacing_lock: asyncio.Lock | None = None
+    _last_request = 0.0
+
+    async def _wait_turn(self) -> None:
+        cls = type(self)
+        if cls._spacing_lock is None:
+            cls._spacing_lock = asyncio.Lock()
+        async with cls._spacing_lock:
+            wait = cls._last_request + self.REQUEST_SPACING - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            cls._last_request = time.monotonic()
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
-        resp = await client.get(f"https://apply.workable.com/api/v1/widget/accounts/{slug}", params={"details": "true"})
-        resp.raise_for_status()
+        await self._wait_turn()
+        # Retries 429s with backoff (Retry-After honoured).
+        resp = await http_util.get(client, f"https://apply.workable.com/api/v1/widget/accounts/{slug}", params={"details": "true"})
         jobs = []
         for j in resp.json().get("jobs") or []:
             locs = j.get("locations") or []

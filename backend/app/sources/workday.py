@@ -12,7 +12,9 @@ API quirks (verified live, Nov 2026):
   jobs (up to ~100, of any age) above the newest-first list. A full scan learns where that block
   ends, and later partial scans start there.
 - The list only has title, path, a location summary and "Posted N Days Ago". The description,
-  exact start date and locations need one GET per job, made only for jobs not already known.
+  exact start date and locations need one GET per job, made only for jobs not already known
+  (and, on a board's first scan, only for jobs posted in the last BASELINE_DETAIL_DAYS days; the
+  poller fetches the rest later, a batch per poll, see poll_once's enrichment).
 """
 
 import asyncio
@@ -30,6 +32,9 @@ PAGE_SIZE = 20  # the API's maximum
 RESULT_CAP = 2000
 MAX_PARTIAL_PAGES = 15
 DETAIL_CONCURRENCY = 4
+# A board's first scan fetches details only for jobs posted in the last few days:
+# a big tenant has thousands of old jobs, and a detail call for each would hold the slow lane for hours.
+BASELINE_DETAIL_DAYS = 7
 
 
 def parse_slug(slug: str) -> tuple[str, str, str]:
@@ -154,7 +159,8 @@ class WorkdayAdapter(Adapter):
         return postings
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(),
+        first_scan: bool = False,
     ) -> list[NormalizedJob]:
         tenant, wd, site = parse_slug(slug)
         host = f"https://{tenant}.{wd}.myworkdayjobs.com"
@@ -174,7 +180,8 @@ class WorkdayAdapter(Adapter):
             path = p["externalPath"]
             ext_id = job_id(path)
             url = f"{host}/{site}{path}"
-            if ext_id in known_ids:
+            age = days_ago(p.get("postedOn"))
+            if ext_id in known_ids or (first_scan and (age is None or age > BASELINE_DETAIL_DAYS)):
                 summary = p.get("locationsText") or ""
                 return NormalizedJob(
                     external_id=ext_id,

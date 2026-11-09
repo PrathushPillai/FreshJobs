@@ -30,6 +30,7 @@ def fix_mojibake(text: str) -> str:
 class RemoteOKAdapter(Adapter):
     ats = "remoteok"
     complete_feed = False
+    aggregator = True
     min_interval_minutes = 60
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:

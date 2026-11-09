@@ -50,7 +50,7 @@ class SmartRecruitersAdapter(Adapter):
     lane = "slow"
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         postings: list[dict] = []
         offset = 0

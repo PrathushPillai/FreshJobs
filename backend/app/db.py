@@ -4,7 +4,13 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from app.config import settings
 
 is_sqlite = settings.database_url.startswith("sqlite")
-engine = create_engine(settings.database_url, connect_args={"check_same_thread": False, "timeout": 120} if is_sqlite else {})
+# 40 connections: three polling lanes, background refreshes and the API's worker threads all hold one at
+# once. With the default 15, slow requests used them all up and the rest of the site waited for one.
+engine = create_engine(
+    settings.database_url,
+    connect_args={"check_same_thread": False, "timeout": 120} if is_sqlite else {},
+    **({"pool_size": 20, "max_overflow": 20, "pool_timeout": 60} if is_sqlite and ":memory:" not in settings.database_url and settings.database_url != "sqlite://" else {}),
+)
 
 if is_sqlite:
 
@@ -14,6 +20,12 @@ if is_sqlite:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
+        # The database is ~9 GB and searches were slow mostly on their first, cold read (6-40 s, then
+        # 0.4-2 s once cached). SQLite's default cache is 2 MB per connection: give each 32 MB, and read
+        # through a memory map so pages already in Windows' file cache are used without copying.
+        cur.execute("PRAGMA cache_size=-32768")  # 32 MB each; the memory map below is shared
+        cur.execute("PRAGMA mmap_size=4294967296")
+        cur.execute("PRAGMA temp_store=MEMORY")
         cur.close()
 
 
@@ -29,6 +41,10 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS ix_jobs_feed"))  # superseded by ix_jobs_feed_v2
+    if is_sqlite:
+        _ensure_title_search()
 
 
 def _add_missing_columns() -> None:
@@ -54,6 +70,37 @@ def _add_missing_columns() -> None:
             for index in table.indexes:
                 if index.name not in {i["name"] for i in insp.get_indexes(table.name)}:
                     index.create(conn, checkfirst=True)
+        for name in _OBSOLETE_INDEXES:  # replaced by a _v2; each copy costs write time on every insert
+            conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+
+
+# Indexes replaced by new versions in models.py: dropped at startup once the new one exists.
+_OBSOLETE_INDEXES = ["ix_jobs_by_found", "ix_jobs_by_listed"]
+
+
+# Full-text index over job titles and employer names, kept in sync with `jobs` by triggers.
+# Title search MATCHes it instead of LIKE-scanning every row (ms instead of seconds; see main._title_search).
+_FTS_DDL = [
+    "CREATE VIRTUAL TABLE jobs_fts USING fts5(title, company_name, content='jobs', content_rowid='id')",
+    """CREATE TRIGGER jobs_fts_ai AFTER INSERT ON jobs BEGIN
+         INSERT INTO jobs_fts(rowid, title, company_name) VALUES (new.id, new.title, new.company_name); END""",
+    """CREATE TRIGGER jobs_fts_ad AFTER DELETE ON jobs BEGIN
+         INSERT INTO jobs_fts(jobs_fts, rowid, title, company_name) VALUES ('delete', old.id, old.title, old.company_name); END""",
+    """CREATE TRIGGER jobs_fts_au AFTER UPDATE OF title, company_name ON jobs BEGIN
+         INSERT INTO jobs_fts(jobs_fts, rowid, title, company_name) VALUES ('delete', old.id, old.title, old.company_name);
+         INSERT INTO jobs_fts(rowid, title, company_name) VALUES (new.id, new.title, new.company_name); END""",
+]
+
+
+def _ensure_title_search() -> None:
+    with engine.begin() as conn:
+        # The triggers go when `jobs` is dropped (tests do), leaving a stale index: then start over.
+        if conn.execute(text("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'jobs_fts_ai'")).first():
+            return
+        conn.execute(text("DROP TABLE IF EXISTS jobs_fts"))
+        for ddl in _FTS_DDL:
+            conn.execute(text(ddl))
+        conn.execute(text("INSERT INTO jobs_fts(jobs_fts) VALUES ('rebuild')"))  # index existing jobs
 
 
 def get_session():

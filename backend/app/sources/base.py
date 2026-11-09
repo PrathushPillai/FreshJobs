@@ -32,6 +32,9 @@ class Adapter(ABC):
     # True if a full fetch lists every open job, so a job missing from it can be closed.
     # Aggregators only return recent jobs, so they set this to False.
     complete_feed: bool = True
+    # True for sources listing many employers' jobs (set company_name on every job). Their employers and
+    # job links are used to find company boards we don't track yet.
+    aggregator: bool = False
     # Minimum minutes between polls of one source (rate limits / provider etiquette). 0 = every poll.
     min_interval_minutes: int = 0
     # Polls between full scans. Adapters that can cheaply fetch just the newest jobs (e.g. Workday)
@@ -41,6 +44,8 @@ class Adapter(ABC):
     # "slow" sources (one request per job, minutes per board) poll in their own lane so they never
     # delay the fast boards. See poller.poll_once(lane=...).
     lane: str = "fast"
+    # Fetches of this ATS at once (None = settings.poll_concurrency). Low for providers that rate-limit per IP.
+    max_concurrency: int | None = None
 
     def last_fetch_complete(self, slug: str) -> bool:
         """False if the last full fetch of this slug was truncated (e.g. a result cap), so nothing may be closed."""
@@ -52,11 +57,13 @@ class Adapter(ABC):
 
     @abstractmethod
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(),
+        first_scan: bool = False,
     ) -> list[NormalizedJob]:
         """Return the source's current jobs.
 
         full: when False, the adapter may return only the newest jobs (the poller won't close anything).
+        first_scan: the source has never been polled (its jobs will all be baseline).
         known_ids: external IDs already in the database. Adapters that need an extra request per job
         for its description should only make it for IDs not in this set.
         """

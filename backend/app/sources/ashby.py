@@ -6,6 +6,7 @@ from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 class AshbyAdapter(Adapter):
     ats = "ashby"
+    max_concurrency = 25  # public posting API, one request per board
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
         resp = await client.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")

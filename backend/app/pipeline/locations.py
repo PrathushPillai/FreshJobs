@@ -198,6 +198,11 @@ def _parse_part(part: str) -> list[Place]:
             country = COUNTRY_CODES[raw]
         elif low in _REGIONS:
             continue
+        elif (cs := re.fullmatch(r"([A-Z]{2,3})-([A-Z]{2,3})", raw)) and cs.group(1) in COUNTRY_CODES:
+            # "Denver, USA-CO, USA, 12421" (SuccessFactors): country code and state, not a city called USA-CO
+            country = COUNTRY_CODES[cs.group(1)]
+            if country == "United States" and cs.group(2) in US_STATES or country == "Canada" and cs.group(2) in CA_PROVINCES:
+                state = cs.group(2)
         else:
             # "Fort Worth TX", "San Mateo, CA United States", "CA United States"
             m = re.match(r"^(?:(.*?)\s+)?([A-Z]{2})(?:\s+(?:united states|usa|us))?$", raw, re.I)

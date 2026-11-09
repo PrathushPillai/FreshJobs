@@ -1,4 +1,7 @@
 import re
+from functools import lru_cache
+
+from app.pipeline.search import query_variants
 
 DEFAULT_INCLUDE = [
     "software engineer", "software developer", "swe", "backend", "back end", "frontend", "front end",
@@ -58,8 +61,32 @@ def _contains(title: str, keyword: str) -> bool:
     return re.search(r"(?<![a-z])" + re.escape(keyword.lower()) + r"(?![a-z])", title) is not None
 
 
+def _norm(text: str) -> str:
+    """Lowercase, with hyphens and slashes as spaces: "Full-Stack" matches "full stack"."""
+    return re.sub(r"\s+", " ", re.sub(r"[-/]", " ", text.lower())).strip()
+
+
+@lru_cache(maxsize=16)
+def _pattern(keywords: tuple[str, ...], variants: bool) -> re.Pattern | None:
+    """One regex for a keyword list: whole words, last word singular or plural, optionally in every
+    spelling of the title (search.query_variants: "frontend" = "front end", "SDE" = "software development
+    engineer", developer = engineer)."""
+    terms = {_norm(v) for k in keywords for v in (query_variants(k) if variants else [k]) if _norm(v)}
+    if not terms:
+        return None
+    alternatives = [re.escape(t) + "s?" for t in sorted(terms, key=len, reverse=True)]
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(alternatives) + r")(?![a-z0-9])")
+
+
 def role_matches(title: str, include: list[str], exclude: list[str]) -> bool:
-    t = title.lower()
-    if any(_contains(t, k) for k in exclude):
+    """Whether a title is one of the user's roles ("For you" and alerts).
+
+    Exactly the roles the user picked, in any spelling of them: related roles are only suggested
+    (GET /api/roles/suggestions), never added behind the user's back. Exclude keywords are literal.
+    """
+    t = _norm(title)
+    ex = _pattern(tuple(exclude), False)
+    if ex is not None and ex.search(t):
         return False
-    return any(_contains(t, k) for k in include)
+    inc = _pattern(tuple(include), True)
+    return inc is not None and inc.search(t) is not None

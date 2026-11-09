@@ -5,17 +5,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 FreshJobs is a personal job feed for an international student looking for work in the US. It polls every few minutes, so new postings show up long before LinkedIn picks them up. Its sources:
-- companies' own ATS boards: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle HCM, iCIMS, Eightfold and SuccessFactors.
+- Workable's own job search (`sources/workable_search.py`, every Workable employer's US jobs newest first, so the per-board Workable adapter only runs every 3 h).
+- companies' own ATS boards: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Workable, Oracle HCM, iCIMS, Eightfold, SuccessFactors, Rippling, BambooHR, Recruitee, Breezy, Pinpoint, and the startup ATSs Gem (`api.gem.com/job_board/v0`) and Polymer (`api.polymer.co/v1/hire`).
+- JazzHR (`sources/jazzhr.py`): one source for every JazzHR employer (~110k jobs at thousands of small US companies), from the sitemaps at `app.jazz.co/feeds/google/xml/{n}` that every `*.applytojob.com` robots.txt points to. Titles and employers come from the URLs; each new job's page is read for its JSON-LD (400 per poll, the rest via enrichment).
 - big-tech career sites: Amazon, Microsoft, Google and Apple.
-- job APIs: The Muse, Remotive, RemoteOK and Adzuna.
+- job APIs: The Muse, Remotive, RemoteOK and Adzuna, plus the SimplifyJobs GitHub lists (new grad, internships).
+- community GitHub job lists (`pipeline/startup_lists.py`, every `list_sync_hours`): zshah101's MIT-licensed board dataset (~5,300 boards, imported as sources) and speedyapply's AI/SWE new-grad READMEs, whose direct ATS apply links go through harvesting. zapply (terms forbid feeding other job feeds), Jobright and vanshb03 (redirect links hide the board, or robots.txt blocks them) are deliberately left out.
+- startups: every hiring Y Combinator company's "Work at a Startup" page (synced daily from yc-oss, `pipeline/startups.py`; postings carry a visa policy), and Hacker News "Who is hiring?" threads.
 - Google for Jobs (via JSearch), for postings that exist only on LinkedIn, Indeed or Glassdoor.
+- companies' own careers pages with no ATS behind them (`sources/website.py`: JSON-LD JobPosting, then per-job links, then inline role sections).
+- The **LinkedIn & more** tab (`Elsewhere.tsx`) only builds pre-filtered search links (LinkedIn jobs past hour or Easy Apply, LinkedIn hiring posts, Indeed, Glassdoor, Google Jobs, Wellfound, Hacker News, X), because LinkedIn can't be collected. Checked by opening each link on 2026-11-09:
+  - Google Jobs (`udm=8`) no longer honours the old `htichips=date_posted:today` chip, so the link puts "since yesterday" in the query. That gave results 5–17 hours old.
+  - Wellfound ignores `?query=`, so the link is its role page (`/role/data-analyst`).
+  - Hacker News uses hnhiring.com, which searches only the current "Who is hiring?" thread. Algolia's comment search matched every comment.
+  - Indeed shows a Cloudflare check to automated browsers, so it couldn't be verified (never bypass it).
 - **Search and filters:** any role can be searched, with related-role expansion, filters for location (country, state, city) and experience, and sorting by newest found or newest posted.
-- **Hidden by default:** reposts, cross-source duplicates, old jobs re-listed as new ("resurfaced"), expired jobs, and jobs that rule out visa sponsorship.
+- **Hidden by default:** reposts, cross-source duplicates, old jobs re-listed as new ("resurfaced"), and expired jobs.
+- **Shown but flagged:** jobs that rule out sponsorship or OPT/CPT (`no_sponsor`). The Feed's `hide_no_sponsor` defaults to false, because the user wants the chance to persuade those employers. A one-time localStorage migration (`freshjobs.migrated.showNoSponsor`) switches it off in old saved filters. The API parameter still defaults to true, and so do email alerts (a Settings pref).
 - **Other features:** an application tracker, a recruiter finder (search links plus Hunter.io lookup), and email alerts.
 - **H-1B sponsor data:** every job shows its employer's certified H-1B filings, imported from the DOL's LCA disclosure file (`app/h1b.py`).
-- **Not built yet:** a Claude chatbot with tools over the jobs DB, and a cloud deploy.
+- **Resume match:** upload a resume in **My profile** and every job gets a 0–100 match score with its reasons (see Architecture).
+- **Not built yet:** a Claude chatbot with tools over the jobs DB, logins (the profile is a single row, id 1), and a cloud deploy.
 
-Scraping LinkedIn, Indeed, Glassdoor or Meta's careers site is deliberately out of scope (it's against their terms, and Meta's robots.txt forbids it); their postings come in through the Google Jobs API instead. Never bypass bot protection: dol.gov blocks scripted downloads, so the user downloads the LCA file in a browser.
+Scraping LinkedIn, Indeed, Glassdoor or Meta's careers site is deliberately out of scope, including through third-party scrapers such as Apify actors (they work by getting around LinkedIn's bot protection) (it's against their terms, and Meta's robots.txt forbids it); their postings come in through the Google Jobs API instead. Never bypass bot protection: dol.gov blocks scripted downloads, so the user downloads the LCA file in a browser.
 
 ## Commands
 
@@ -26,11 +38,23 @@ Backend (run from `backend/`):
 .venv/Scripts/python.exe -m uvicorn app.main:app --port 8000      # API + background pollers
 .venv/Scripts/python.exe -m app.pipeline.poller --once            # one poll of every source, no web server
 .venv/Scripts/python.exe -m app.pipeline.discovery --file data/discover_seed.txt   # find boards for company names
-.venv/Scripts/python.exe -m app.h1b import data/h1b/<LCA_Disclosure_Data_*.xlsx>   # ~7 min; then counts refresh
+.venv/Scripts/python.exe -m app.h1b import data/h1b/<FY2025_Q4.xlsx> data/h1b/<FY2026_Q3.xlsx>   # latest file per fiscal year; ~15 min
+.venv/Scripts/python.exe -m app.uscis import data/uscis_h1b          # USCIS H-1B approvals/denials per employer and year
+.venv/Scripts/python.exe -m app.everify import data/everify          # USCIS E-Verify employer list; then jobs refresh
+.venv/Scripts/python.exe -m app.pipeline.visa_signals                # fill OPT/CPT + E-Verify text signals on older jobs
 .venv/Scripts/python.exe -m app.h1b discover --top 3000          # find boards for the biggest sponsors
+.venv/Scripts/python.exe -m app.pipeline.startups                # add hiring YC startups now (also runs daily)
+.venv/Scripts/python.exe -m app.pipeline.bulk_discovery hn|websites|vc|commoncrawl   # mass board discovery (see module doc)
+.venv/Scripts/python.exe -m app.pipeline.bulk_discovery fix-workday   # repair Workday sources named after a file (robots.txt)
+.venv/Scripts/python.exe -m app.pipeline.bulk_discovery ai-portfolios # boards behind AI investors' portfolio company websites
+.venv/Scripts/python.exe -m app.pipeline.bulk_discovery niche --sector robotics|health|all [--dry-run]   # robotics and healthcare
+.venv/Scripts/python.exe -m app.pipeline.startup_lists          # import the GitHub job lists now (also every 12 h)
 .venv/Scripts/python.exe -m pytest                                # all tests
 .venv/Scripts/python.exe -m pytest tests/test_api.py::test_tracker_flow   # single test
+.venv/Scripts/python.exe scripts/check_portal.py                  # regression check on the live portal (read-only)
 ```
+
+**Before calling any change done:** run `pytest`, `npm run build` and `npx eslint src`, restart the backend if backend code changed, then run `scripts/check_portal.py` and look at the changed screens in the browser. `check_portal.py` sends only GET requests to the running backend and frontend. Its 34 checks cover every API route the UI reads, every sort (checks the order), every filter (checks each returned job passes it), search ranking, paging, freshness counts, the response cache, the job detail, the pickers, the sources list and the frontend proxy. pytest covers logic on small made-up data; this covers the real database. A check over 8 s is reported SLOW, not failed. On 2026-11-09 the same requests took 0.5–2.4 s on their own but 10–20 s while the poller, the resume scoring's first pass and a discovery run shared the laptop (3.9 GB of RAM free for an 11.6 GB database).
 
 Frontend (run from `frontend/`; Vite proxies `/api` to `API_URL`, default `http://localhost:8000`):
 ```bash
@@ -39,14 +63,15 @@ npm run build    # tsc -b + vite build (this is the type check)
 npx eslint src
 ```
 
-`.claude/launch.json` defines `backend` and `frontend` preview servers. `docker compose up --build` runs both.
+`start-freshjobs.bat` (repo root) starts whichever of the two isn't running, each in its own window, and opens the feed; the backend window (`scripts/run-backend.ps1`) keeps the PC awake while open. `.claude/launch.json` defines `backend` and `frontend` preview servers. `docker compose up --build` runs both.
 
 ## Architecture
 
 Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (`app/main.py`) → React.
 
 - **Adapters** (`app/sources/`) implement `Adapter.fetch(client, slug, *, full, known_ids) -> list[NormalizedJob]` and are registered in `ADAPTERS` in `app/sources/__init__.py`. Class attributes control how the poller treats each one:
-  - `complete_feed`: False for aggregators, which only list recent jobs.
+  - `complete_feed`: False for aggregators that only list recent jobs (Simplify is an aggregator with a complete feed).
+  - `aggregator`: True for multi-employer sources. Their employer names feed discovery, and their job links feed harvesting.
   - `min_interval_minutes`: provider rate limits.
   - `full_scan_every`: for sources that can do a cheap partial scan of the newest jobs.
   - `lane`: `"slow"` for one-request-per-job sources (Workday, SmartRecruiters).
@@ -54,55 +79,232 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
   - `is_configured()`: Adzuna returns False without keys.
   - Aggregators set `NormalizedJob.company_name`. Adapters fetch per-job detail only for IDs not in `known_ids`.
   - A `companies` row is a *source*: a single employer's board, or an aggregator query (its `slug` holds the query string; see `data/companies.yaml`).
-- **Two polling lanes** (`app/main.py`): APScheduler runs `run_poll("fast")` and `run_poll("slow")` in threads, each with its own lock, so a long Workday scan never delays the fast boards. Only the fast lane, and startup, sync `data/companies.yaml` into the DB (add-only), which avoids double inserts. `POST /api/poll` ("Check now") runs the fast lane. Each lane uses one fetch semaphore per ATS and processes each source as soon as its fetch finishes (`asyncio.as_completed`), committing per source.
+- **Three polling lanes** (`main.LANES`): APScheduler runs `run_poll("fast")`, `run_poll("slow")` and `run_poll("bulk")` in threads, each with its own lock, so a long Workday scan never delays the fast boards. `slow` is one-request-per-job sources (Workday, SmartRecruiters, big tech); `bulk` is Workable's ~4,400 boards, which Workable's rate limit allows only 2 at a time (hours per pass: in the fast lane they once kept every other board from being rechecked for 3.5 h). Only the fast lane, and startup, sync `data/companies.yaml` into the DB (add-only), which avoids double inserts. `POST /api/poll` ("Check now") runs the fast lane.
+  - Each lane uses one fetch semaphore per ATS (`Adapter.max_concurrency`, else `poll_concurrency`; 25 for Greenhouse, Lever and Ashby) and saves each source as soon as its fetch finishes (`asyncio.as_completed`), committing per source. Saving runs in a worker thread (`_save` via `asyncio.to_thread`, one at a time), because on the event loop it froze every download in flight.
+  - Due sources are fetched longest-waiting first, and a poll stops at `poll_deadline_minutes` (fast 8, bulk 30, slow none): fetches not finished are cancelled and stay due, so the next poll starts on time and takes them first. The summary's `cut_short` counts them, and `timings` has the seconds per phase (prepare, fetch_and_save with of_which_saving, harvest, verify, discover); `GET /api/status` shows the last poll's.
 - **`process_company()`** (`pipeline/poller.py`) is the core reconcile step, and what the tests exercise directly.
   - **Baseline:** on a source's first poll (`poll_count == 0`), every job is marked `baseline=True, alerted=True`. Those jobs never alert, and their `first_seen_at` falls back to `posted_at`.
-  - **Freshness:** for later polls, `first_seen_at` is our detection time. The "newest found" sort and the "found within" filter use it. `posted_at` is the source's own date, shown separately and used by the "newest posted" sort.
+  - **Freshness:** for later polls, `first_seen_at` is our detection time. The "newest found" sort and the "found within" filter use it. `posted_at` is the source's own date.
+  - `listed_at` (`normalize.listed_at`) is the best estimate of when a job went live, used by "Date posted" and "Most recently posted". It's the source's exact time when there is one. For date-only sources (Workday, BambooHR), it's our detection time if we caught the job within 2 days of that date. A baseline job with no date gets NULL: unknown, sorted last, and never "posted just now" (some Workday tenants omit `postedOn` from their list). Old rows are filled by SQL in `backfill()`.
+  - After a gap in checking (server off, or a rarely polled source), `process_company` sets `listed_earliest` to the source's previous successful check (`Company.last_ok_at`) when it's more than `listed_exact_gap_minutes` old. `normalize.listed_window` then makes `listed_at` that window's start and `listed_until` its end, and the UI shows "posted 20 min–6 h ago" instead of "just now".
+  - **Descriptions:**
+    - A job counts as described only with at least `MIN_DESCRIPTION_CHARS` (100) characters. A blank line (Lever) or a stub ("Category: … Terms: …" from SimplifyJobs) counts as missing.
+    - Lever text comes from `lever_description()`: opening, description, every `lists` section and the additional part. Some postings leave `descriptionPlain` empty and put everything in the lists; 1,310 were saved blank.
+    - JazzHR adds a day's jobs to its sitemaps at once (1,600–2,200), so `DETAILS_PER_POLL` is 2,500. At 400, most new jobs were saved without a description.
+    - **On demand:** opening a job with no description calls `POST /api/jobs/{id}/describe` (`pipeline/describe.py`), which saves the result and re-runs `apply_flags`. It asks the Workday CXS API, Lever's posting API or Greenhouse's job API, and otherwise reads the page's JSON-LD JobPosting. This covers the ~340k older Workday jobs that are deliberately listed without details (`BASELINE_DETAIL_DAYS`).
+    - On 2026-11-06, 43% of open Workday jobs and 99% of JazzHR jobs had none. A batched UPDATE marked 12,070 existing blank or stub descriptions as missing.
+  - **Enrichment:** `poll_once` leaves up to `enrich_per_poll` description-less open jobs (newest first, and jobs found after tracking began before older ones: in database order, new jobs waited behind tens of thousands of old ones) (`Job.described` false; a boolean kept by `apply_flags` and indexed with `company_id`, because testing `description = ''` read every description and took 3 minutes per poll) per source out of `known_ids`, so the adapter re-fetches their details. `process_company` then fills in the description, date and location, and re-runs `apply_flags` (no_sponsor, experience). Adapters get `first_scan=` explicitly, so an empty `known_ids` isn't mistaken for a first scan.
   - **Expiry:**
     - Complete feeds: a job missing for `missed_polls_to_close` (2) full scans in a row is closed.
     - Aggregators: a job is closed after `stale_days` unseen.
     - Partial scans, capped scans and failed fetches close nothing.
+    - **Liveness** (`pipeline/liveness.py`): each fast poll opens the apply pages of up to `verify_per_poll` open jobs that can't close on their own (aggregator jobs, and jobs whose source hasn't fetched successfully in 24 h), each at most once a day, and closes the ones that are gone (404/410, Greenhouse's `?error=true`, "no longer accepting applications"). Workday pages are asked through the CXS API. Opening a job in the UI checks it too (`POST /api/jobs/{id}/verify`). LinkedIn, Indeed and Glassdoor URLs are never fetched.
+      - The "closed" phrases are matched against the page's **visible text** (`liveness.visible_text`: scripts, styles and tags stripped). Many sites embed every message they might show as data. Apple's pages carry "Sorry, this role does not exist or is no longer available" on open jobs, so matching the raw HTML closed every Apple job anyone opened. On 2026-11-06, 156 jobs closed by the old rule were rechecked: 125 were reopened (`reopened` event) and 31 stayed closed.
   - **Repeats** are flagged `is_repost`, hidden by default, and never alert. Matching is by normalized employer (`company_key`), not by source, so a company-board job and its Adzuna copy match (`pipeline/dedupe.py`). Each kind gets its own `JobEvent` kind:
-    - `repost`: same fingerprint or near-identical description.
+    - `repost`: same fingerprint, or the same title with a near-identical description. A same-title job still open on the same board in another place is a separate opening (a chain hiring in several cities), not a repost; `find_original` skips those.
     - `duplicate`: the same job, still open, from another source.
     - `resurfaced`: newly listed, but `posted_at` is older than `resurfaced_days`.
+  - The API returns `repost_kind` (from that `JobEvent`, one batched query per page via `_repeat_kinds`), and the detail endpoint returns `repost_of` (the original's title, company, URL and dates).
+  - `show_reposts=true&repeat_kinds=...` adds the chosen kinds to the normal jobs. As one condition ("not a repeat, or a repeat of a chosen kind") it couldn't walk a sort index, because there's no equality on `is_repost`, so it sorted every open job (8 s). So `list_jobs` builds two parts (`build(repeats_part="normal"|"chosen")`). Each walks its sort index with `is_repost` fixed and stops after `offset + limit`, and `repeats_page()` merges them in the page's sort order. That covers the newest, posted, company and sponsor sorts. The match sort and searches (tiers) still use the single OR. `ix_job_events_kind_job` (kind, job_id) makes "jobs with a repost event" a range read instead of a scan of 1.9M events.
+  - The Feed shows an amber Repost, Duplicate or Resurfaced badge (Resurfaced carries the original date). The detail panel explains it and links to the original. The More pill has one "Show repeated jobs" switch plus a checkbox per kind.
 - **Derived fields** are set by `apply_flags()` at insert:
   - `company_key` and `fingerprint`
   - `seniority` (from the title)
-  - `min_years` and `exp_level` (`pipeline/normalize.py`, the higher of title level and years asked)
-  - `role_match` (alert keywords from UserPrefs) and `us_eligible`
-  - `no_sponsor` (`pipeline/sponsorship.py`)
-  - `JobLocation` rows from `pipeline/locations.py`, a hand-built gazetteer that understands `US-CA-Menlo Park`, `Fort Worth TX`, `NYC, Chicago` and similar formats.
+  - `min_years` and `exp_level` (`pipeline/normalize.py`, the higher of title level and years asked). `experience_years` takes the largest general mention ("5+ years overall, 2+ with Spark").
+    - **Degree alternatives** count as one bar: the Bachelor's line (BS/BA/undergraduate count), else the smallest. This covers "high school + 6; OR Bachelor's + 2" and "12 years with a Bachelor's, or 8 with a Master's, or 5 with a PhD". Clauses starting with "OR" (Boeing's no-degree paths) are alternatives too. "Or equivalent" isn't a split point.
+    - Years "in lieu of a degree" are skipped.
+    - "N+ years" or a range counts without the word "experience" ("8+ years building…", "3+ years fluency in C") in a clause about work, not company history.
+    - Hand-checked: 43 of 53 right before, 50 of 53 after. The misses are multi-level Boeing posts, which are ambiguous.
+  - `role_match` and `us_eligible`. `role_match` ("For you" and alerts) is `filters.role_matches`: exactly the include keywords in UserPrefs, in every spelling (`search.query_variants`: frontend = front end, SDE = software development engineer, developer = engineer; plurals; hyphens count as spaces), and the exclude keywords taken literally. Related roles are never added behind the user's back: `GET /api/roles/suggestions` offers them with open US job counts, and the user adds them from the "Your roles" bar (`RolesBar.tsx`), which saves the prefs. `poller.refresh_role_match()` recomputes it from titles only (seconds for 1M jobs, writing only changed rows) at startup and when the keywords change.
+    - Adding or removing a role (`PUT /api/prefs` with the same exclude list) runs `refresh_role_match_for(changed_terms)` before returning. It rechecks only the jobs whose title FTS-matches the added or removed roles, which takes 2–4 s instead of about a minute, so the Feed reloads at once. `RolesBar` also updates the chips optimistically. A changed exclude list still runs the full refresh in a background thread.
+  - `no_sponsor` (`pipeline/sponsorship.py`). It's also set when `student_visa` is "excluded", since a job that rules out OPT/CPT rules out F-1 students.
+    - **Measured on hand-read postings (2026-11-09).** 100 For you jobs were sampled across flagged, unflagged-but-mentions-visas and silent jobs. The old rules were right on 84 of 96 clear cases but caught only 33 of the 45 jobs that rule an F-1/H-1B candidate out. Weighted to the feed, about 1 in 4 such jobs had no badge.
+    - The rewrite gets 96/96 and 45/45 on that set. On a second, unseen sample, 30/30 newly flagged jobs were real exclusions, and misses among unflagged jobs that mention visas fell from ~27% to ~11%. Applied to For you, it flagged 1,068 more jobs and un-flagged none.
+    - Patterns it added: "not eligible for <company> immigration sponsorship", "sponsorship not available", "will not consider candidates who require sponsorship", "does not intend to hire … who will need … sponsorship", "may not be able to employ … or support future H-1B", "not open for work sponsorship", "will not … commence an immigration case"; export control and US person ("citizen or national, (ii) lawful permanent resident", "citizen, national, permanent resident, refugee", "export-controlled … require U.S. persons", "U.S. Person status required"); clearance eligibility ("eligible to obtain and maintain an active U.S. Secret clearance"); and "requires U.S. citizenship". "Authorized to work on a permanent basis" counts unless the posting also says it sponsors (mixed: left to the reader).
+    - Every match runs on text with "U.S." turned into "US", because the dots cut spans like `[^.]{0,160}` short.
+    - Each phrase comes from a real posting and is locked in `tests/test_sponsorship_rules.py`, along with look-alikes that must not match (EEO "citizenship status", export-licence notes, "company sponsored benefits").
+  - `sponsors_text` (`sponsorship.says_sponsors`): the posting says it sponsors ("We do sponsor visas!", "Visa sponsorship is available", "eligible for Immigration Sponsorship?: Yes", "Visa transfers are supported") and nowhere rules it out. Shown as a green "Says it sponsors" badge, and in the job panel's OPT/CPT tile. 313 For you jobs on 2026-11-09; 15 of 15 sampled were real.
+  - `python -m app.pipeline.visa_signals [--for-you]` re-reads saved open jobs with the current rules (For you first) and writes only the rows that change. `visa_signals.derive` must equal `apply_flags`, which a test checks. Run it after changing any of these rules. On 2026-11-09 only the For you jobs were re-read: 51,729 read in about 17 min, 1,203 newly flagged, none unflagged, 479 "says it sponsors", 4,556 years changed. The other ~1.6M open jobs still carry the old answers until a full run (about 9 h on the laptop; planned for the cloud server).
+  - `student_visa` and `everify_text` (`sponsorship.student_visa_signal`, `mentions_everify`):
+    - Most OPT/CPT mentions are lists of visas an employer *won't* support ("not eligible for sponsorship (e.g., H-1B, F-1 OPT)"). So each sentence that mentions them is judged by its own yes/no words, or by the previous sentence when it is just a list ("This includes: H-1B, F-1 OPT ..."). A "no" anywhere wins.
+    - Abbreviations ("e.g.", "etc.", "U.S.") are de-dotted before splitting sentences.
+    - Bare `OPT` (upper case only), `CPT` and `F-1` count only next to visa or student words. Otherwise "CPT codes", "F1 score", "F1-F5" pay grades, ophthalmology "OPT" and "system optimization" all matched.
+    - In a sample of 40k jobs: about 0.9% "excluded" (173 of them not caught by `no_sponsor`), about 5 "welcome", and 2% mention E-Verify.
+    - Older jobs are filled by `python -m app.pipeline.visa_signals`, which runs once and is safe while the backend polls.
+  - `JobLocation` rows from `pipeline/locations.py`, a hand-built gazetteer that understands `US-CA-Menlo Park`, `Fort Worth TX`, `NYC, Chicago`, SuccessFactors' `Denver, USA-CO, USA, 12421` and similar formats. Until 2026-11-09 a bare `USA-CO` between commas became a city called "USA-CO". 980 jobs were re-parsed; about 55 odd ones remain ("USA -TX", "GA-US").
   - `backfill()` recomputes everything for rows where `exp_level IS NULL`, and runs at startup. To re-derive all jobs after changing a parser, set `exp_level = NULL` and restart.
-- **Search** (`GET /api/jobs`): `q` is expanded through the role families in `pipeline/search.py`, and titles are ILIKE-matched against every term (terms of 4 characters or fewer must match whole words). Location filters use an EXISTS on `job_locations`. Remote jobs with no parsed place still match a country-only filter.
+- **Search** (`GET /api/jobs`): `q` matches titles in all its spellings (`query_variants`), each word as itself or its plural (never a prefix: "react" found "Reactor"). Related roles from the role families in `pipeline/search.py` come back as `related_terms` (one per role, `distinct_roles`). The Feed searches them by default (`related=true`), minus any the user switched off (`skip=`, the ticked chips under the count), and its **Exact title** switch in the search bar (`filters.related = false`, persisted) searches only what was typed (plus `also=`, kept for the API). The count line shows how many results have the exact title (a second `related=false` query). Data roles are three families (data analytics, data science, data engineering), so "data engineer" brings data-platform/analytics-platform roles and not marketing analysts; family matching ignores word order ("analyst data"). The "For you" feed still never adds related roles on its own (`RolesBar`).
+  - On SQLite, titles are matched through the FTS5 table `jobs_fts` (external content, kept in sync by triggers created in `db._ensure_title_search`, which rebuilds it if the triggers are missing). Elsewhere it falls back to ILIKE scans.
+  - Results are ranked in tiers before the chosen sort: exact phrase (any spelling), then every typed word in any order (or the company name), then the picked related roles.
+    - The page is filled **tier by tier** (`tiers` in `list_jobs`): each tier is its own query in the chosen sort, stopping once the page is full, and `offset` is skipped across tiers with capped counts. Ranking every match with one `CASE` before taking a page sorted tens of thousands of rows ("software engineer" 7–14 s).
+    - Each tier picks its own plan. A tier whose full-text match is small (≤ `FTS_FIRST_MAX`) starts from those matches, via `build(fts_first=True, with_search=False)`, so the broad combined match doesn't become the starting set. A rare exact phrase ("backend engineer python") used to walk every open job looking for 50 of them (4–5 s); it's now 0.2–0.8 s.
+    - `_fts()` returns a real `Job.id.in_(...)` expression, so tiers can negate it.
+    - A query with no word characters ("*&^%") returns nothing at once. It used to fall back to LIKE scans of every title (17 s).
+  - The list counts and sorts on IDs only, then loads the page's rows. Selecting full rows (descriptions make `jobs` gigabytes) made a search take 6–10 s.
+  - A search's title and company matches are one FTS5 query (`_title_search`'s combined match). If it matches at most `FTS_FIRST_MAX` (20k) rows, the status filters are written as `+jobs.col` so SQLite starts from the matches and checks them in `ix_jobs_id_feed` (keyed by id, covering the filter columns; reading the job row means reading past its description); broader searches walk the feed index as below. Neither plan wins everywhere: "react" took 1.5 s walking the index and 0.03 s from its matches, "software engineer" 0.04 s and 6.5 s.
+  - The two main sorts walk `ix_jobs_by_found_v2` / `ix_jobs_by_listed_v2` (equality on closed_at and is_repost, then the sort column) and stop after a page. Without them, every request sorted ~800k rows (2 min).
+    - `no_sponsor` sits *after* the sort column, because no-sponsorship jobs are shown by default. In the old indexes it came before, so the ordered walk only worked while they were hidden ("All jobs" took 2.7 s instead of 0.02 s).
+    - `db._OBSOLETE_INDEXES` drops the old versions at startup.
+  - The count stops at `COUNT_CAP` (2,000; `total_capped` shows "2,000+"). Counting to 10,000 read up to 10,000 matching jobs: "software engineer" took 42 s from a cold cache. The freshness strip's 1/6/24 h counts are capped the same way.
+  - "Company A–Z" and "Most H-1B filings" have their own sort indexes (`ix_jobs_by_company`, `ix_jobs_by_sponsor`); without them they took 21 s and 4 s. The sponsor sort is a plain `h1b_filings DESC`, where SQLite sorts NULL last, so the index can serve it; `coalesce()` couldn't use one.
+  - `tracked=tracked` is an `IN` on the tracker's few job ids, not an EXISTS on every open job (5.6 s). The repeat-kind filter is an `IN` on matching `job_events`.
+  - `posted_within_hours` filters on `listed_at` (set whenever the source gives a date), and `since_hours` on `first_seen_at`.
+  - Location filters: a country-only filter uses an EXISTS per job (`ix_job_locations_job_place`); a state or city uses `Job.id IN (...)` (`ix_job_locations_place_job`), since those match few jobs. Remote jobs with no parsed place still match a country-only filter.
+  - The picker lists (`GET /api/facets/locations`) come from an in-memory snapshot of open-job counts per (country, state, city) (`main._place_counts`, one grouped pass over the covering indexes, ~3.5 s), refreshed at startup and after each fast poll. A COUNT(DISTINCT) per request took 65 s and left the State and City pickers empty. Tests reset `main._facets` in the `session` fixture.
 - **H-1B** (`app/h1b.py`):
   - `aggregate()` counts certified H-1B LCAs per employer (VISA_CLASS == "H-1B", CASE_STATUS starting with "Certified") into `h1b_sponsors`.
   - `SponsorIndex` matches a job's employer to DOL legal names by token prefix, after dropping legal words (`_DROP`). A one-word name matches only generic suffixes (`_GENERIC`), so "Amazon" sums "Amazon.com Services" and "Amazon Web Services" but not "Virtual Staffing" for "Virtual".
   - `apply_flags()` sets `Job.h1b_filings` from a process-wide cached index (reset by `import_file`). After changing the matching, run `refresh_job_counts()` and restart the backend.
+  - **History by occupation:** the same pass also fills `h1b_roles`, one row per (employer, SOC code), with filings, the 25th/50th/75th percentile offered wage, the employer's own titles and the top worksite cities.
+    - `annual_wage` annualizes `WAGE_RATE_OF_PAY_FROM` by `WAGE_UNIT_OF_PAY` and drops values outside $15k–$2M.
+    - `role_history()` (job detail, `h1b_roles`) picks the occupation that fits a job. It first compares the job's title with the employer's own LCA titles (token Jaccard ≥ 0.5, ignoring seniority words). If none is close, it uses the title's usual SOC codes (`_TITLE_SOC`).
+    - DOL files are cumulative within a fiscal year, so `import` takes the latest file of each year (FY2025 Q4 + FY2026 Q3 now) and replaces the old data with their combined counts.
+- **USCIS H-1B approvals** (`app/uscis.py`, table `uscis_h1b`): one row per (employer, fiscal year), from the H-1B Employer Data Hub's Crosstab export.
+  - The export is UTF-16 and tab-separated, with one row per employer location (summed on import). Archived years are UTF-8 CSVs; `_open` handles both.
+  - "New Employment" approvals are workers new to H-1B, the new-grad case. The other kinds are continuations, transfers and amendments.
+  - `lookup()` matches names the same way as `h1b.names_match`, and the job detail shows it as `uscis`. FY2024–FY2026 are in `data/uscis_h1b/`.
+- **E-Verify** (`app/everify.py`, table `everify_accounts`): STEM OPT employers must use E-Verify.
+  - USCIS has no bulk file any more. The [E-Verify Employer Search](https://www.e-verify.gov/e-verify-employer-search) is a Tableau dashboard, and its export of all years is "too large". So the user exported it one Industry at a time (20 files: Crosstab, Date Enrolled "Last 30 years", Open and Terminated) into `data/everify/`. The files are UTF-16 and tab-separated, with 1.19M rows.
+  - Employer and DBA names are both kept. An employer is `everify = "yes"` if any matching account is open, and "ended" if all are terminated (JPMorgan's and Stripe's accounts are all ended).
+  - `apply_flags` sets `Job.everify` through a per-process cache of employer → status. `refresh_jobs()` does all existing jobs.
+  - The UI says "not found", never "not enrolled": employers enroll under legal names that may not match. The Visa pill's `everify_only` filter is `everify = 'yes' OR everify_text`.
+- **Sources list** (`GET /api/companies?q=&limit=200`):
+  - It returns the busiest sources first; `q` matches name, slug or ATS. All 25k at once was a 4.7 MB response and a table too long for the browser to draw quickly.
+  - The open-jobs count per source is forced onto `INDEXED BY ix_jobs_company_described`. Left alone, SQLite read every job row (97 s) and the Sources page never loaded.
+  - The counts are computed at startup and refreshed in the background when 5 minutes old (`_open_jobs_per_company`).
+- **Company logos** (`app/logos.py`, `JobOut.logo_domain`):
+  - The UI shows the employer's site icon from Google's favicon service and keeps the initials when it gets Google's 16 px default globe (`CompanyAvatar` in `ui.tsx`).
+  - A domain is returned only when it's clearly the employer's, because a wrong logo is worse than none:
+    - the apply link is on the employer's own site (not a job board in `_BOARD_HOSTS`);
+    - the board's name for the employer matches its whole name or first 2+ words (`_slug_matches`). For example "dollartree" for "Dollar Tree Stores", or "PilotCompany" → pilotcompany.com, but not "acme" for "Acme Robotics";
+    - it's listed in `KNOWN_DOMAINS`.
+  - For Oracle HCM it reads the career-site name (`host|StaplesInc`), and for Workday the tenant.
+  - About half the jobs on a page get a logo; jobs from multi-company job boards keep their initials.
 - **Careers-URL detection** (`pipeline/detect.py`): `detect_board(url)` maps an ATS URL to (ats, slug), and `detect_from_page()` fetches a company's own careers page and finds the embedded board. It's exposed as `POST /api/companies/from-url` (Sources page). It can't see boards rendered client-side without links (e.g. stripe.com/jobs).
+- **Harvesting** (`pipeline/harvest.py`): every poll, aggregator job URLs go through `detect_board`, and up to `harvest_per_poll` untracked boards are added as companies (the most-linked first). This is the main source of coverage growth, with no network cost. Big-company singletons (amazon/microsoft/google/apple) are skipped, and boards are compared case-insensitively.
+- **Bulk discovery** (`pipeline/bulk_discovery.py`, CLI): Workday sites of the top H-1B sponsors found by name (the CXS API answers 422 for an unknown tenant, 404 for a real tenant with the wrong site name, so the host is found first and then common or name-derived site names are tried; results cached in `probe_cache` as `wd:<key>`), boards linked from 12 months of HN hiring threads, boards behind hiring YC startups' websites, a16z portfolio names (sitemap) probed by name, and Common Crawl's URL index (often down with 504s, so it retries). Getro-hosted VC boards ask scrapers to use their paid API, and Consider-hosted ones need a CSRF token, so both are deliberately skipped. `vc` reads portfolio names from the a16z, General Catalyst, Lux and Founders Fund sitemaps and Pear VC's WordPress API (`wp-json/wp/v2/companies`); `commoncrawl --patterns ...` searches only the given URL patterns. `niche --sector robotics|health|all` (`from_niche`) targets robotics and healthcare companies people rarely browse, from two inputs:
+  - **List pages** (`NICHE_PAGES`), whose company websites go through `_boards_behind`. Robotics: the ROS companies list (~800 sites), awesome-robotics-ai-companies, awesome-mobile-robotics, five TechCrunch "robotics companies are hiring" roundups, and Playground Global's portfolio. Health: Optum Ventures and Kaiser Permanente Ventures. robots.txt is checked on every run (`_robots_allow`).
+  - **H-1B sponsors** (`niche_sponsors`): DOL employers whose name has sector words (`NICHE_WORDS`) and who filed H-1Bs for computer and data jobs (SOC 15-). These are companies that both use IT and sponsor, which the top-sponsor probes (by total filings) often miss: 1,470 health and 120 robotics on 2026-11-09. They're probed on Greenhouse, Lever and Ashby (`discover`) and Workday (`_workday_for`, which skips names already tracked or probed).
+  - Left out: pages that refuse automated readers (HTTP 403: The Robot Report, Seedtable, Fundup, StartupSavant, Flare Capital, F-Prime, .406 Ventures, Echo Health), pages drawn by JavaScript (Eclipse, Root, DCVC, Rock Health, Define), and Getro/Consider boards.
+  - `--dry-run` reads the lists and finds the boards behind the websites but saves nothing and probes no names. On 2026-11-09 it found 39 new robotics boards (from 1,195 sites) and 11 health boards (from 127 sites).
+  - `company_sites` skips universities, government, documentation and social sites (`.edu`, `.gov`, `.ac.xx`, `docs.`, arxiv, ros.org...).
+  `ai-portfolios` reads AI investors' own portfolio pages (AI Grant, Air Street, Kleiner Perkins, Khosla, Gradient, Felicis, Madrona, Conviction) plus a curated AI-startup list, and finds the board behind each linked website (`_boards_behind`, shared with `websites`). Those investors' Getro/Consider job boards stay off limits. Researched and ruled out (robots.txt or terms): Dover's API, Personio, Freshteam's widget, Trakstar's list, Welcome to the Jungle, Wellfound; First Round and South Park Commons block crawlers.
+- **Feed speed** (measured 2026-11-06 on about 1.6M jobs):
+  - Searches were slow mostly on their *first* read from disk: 6–42 s cold, 0.4–2.4 s warm. The 9 GB database doesn't fit in memory, and polls and imports keep evicting pages. Keep that in mind when timing anything.
+  - `db._sqlite_pragmas` gives each connection a 32 MB page cache and a 4 GB `mmap_size`, so reads come straight from Windows' file cache. The default was 2 MB per connection.
+  - A middleware caches `GET /api/jobs` responses by query string for `JOBS_CACHE_SECONDS` (60). It covers the Feed's 60-second refresh, going back to an earlier filter, and so on. Any non-GET `/api/` request clears it (tracking, prefs, verify), and so does every poll (`run_poll`). Responses carry `X-Cache: hit|miss`.
+  - `fresh_counts=true` returns the freshness strip's 1/6/24 h counts from one newest-first scan (`JobPage.fresh`). It used to take three requests.
+  - Lists load jobs with `defer(Job.description)`.
+  - `/api/status` recomputes its counts at most once a minute (`_counts`). The header asks every 10 s while a poll runs, which is most of the time.
+  - Role suggestions are served stale while they recount in the background. They're warmed at startup and after each fast poll (`_warm_suggestions`); a cold recount took 19 s.
+  - The Feed's exact-title count runs in parallel with the results instead of after them.
+- **Keep blocking work off the event loop.**
+  - `verify_job` and `job_recruiters` are async (they call the network), so their database work goes through `asyncio.to_thread` with their own sessions. When `verify_job`'s commit ran on the loop, it waited for the write lock (up to the 120 s busy timeout while a poll saved) and froze the whole site. Opening any job triggers it.
+  - The SQLite engine has `pool_size=20, max_overflow=20`. With the default 15, the polling lanes, background refreshes and slow requests used every connection, and `/api/status` hung waiting for one.
+- **Dead and rate-limited sources:**
+  - `Company.fail_streak` counts failed polls in a row. A board that has **never** worked (`last_ok_at` NULL) and answers 404/410 `DEAD_BOARD_FAILS` (3) times in a row is switched off (`enabled = False`, with a "switched off: this board never worked" status). On 2026-11-06, 2,078 such dead links from discovery and lists (Greenhouse 1,195, Ashby 625, …) were being retried every 3 hours. A board that worked before is never switched off this way, since a 404 may be temporary.
+  - The per-board Workable adapter spaces its requests `REQUEST_SPACING` (2 s) apart (`_wait_turn`, a class-level lock). Two at a time without spacing got HTTP 429 for 3,254 of 4,424 boards per pass. `workable_search` (new jobs) uses another endpoint and was healthy.
+- **Load** (2026-11-06, live backend with polls running): 15 simulated users at once made 120 requests with no errors. Feed lists took about 0.8 s median, searches about 2.6 s median (worst about 5 s), and job details about 0.3 s median (worst 7.6 s). Python's GIL and the shared SQLite file limit concurrency; serving many users would need the cloud move.
+- **Polling cost:** boards whose last poll had 0 open jobs or failed are polled every `idle_poll_minutes` (180). A still-listed job is only written when something changed: `last_seen_at` is refreshed at most every `LAST_SEEN_RESOLUTION` (6 h), and existing jobs load with `description` deferred. Rewriting every job's `last_seen_at` each poll rewrote ~900k rows with their descriptions per pass and kept the write lock busy for 40 s at a time. Greenhouse fetches the plain list (12× smaller) and gets details only for new IDs. Only the first scan uses `content=true`.
 - **Discovery** (`pipeline/discovery.py`): new employer names from aggregator jobs (up to `discovery_per_poll` per poll) are probed for Greenhouse, Lever and Ashby boards. Greenhouse matches are verified against the board's company name. Every probe is cached in `probe_cache`, and companies found exist only in the DB, not in the YAML.
 - **Alerts:** `is_alert_worthy()` (role keywords, US, not a repost or baseline, plus the prefs for sponsorship and seniority). At most one email per poll per lane.
+  - `notify.email.email_mode()` is "off", "test" or "on". "test" means `SMTP_HOST` or `ALERT_TO` is a local address, so nothing reaches a real inbox. `/api/status` returns it as `email_mode`, and Settings says so instead of "connected".
+  - `POST /api/alerts/test` sends a test email and returns the SMTP error if it fails. Settings has a "Send test email" button for it.
+  - As of 2026-11-06 the user's `.env` still points at the local test sink from setup (`localhost:1025`, which isn't running), so alerts have never been delivered. The user has to add their Gmail SMTP settings (an app password) themselves.
+- **Resume match** (`app/matching.py`, `pipeline/scoring.py`, `Profile.tsx`). Everything runs locally; no API key.
+  - **Reading the resume:** `POST /api/profile/resume` takes `{filename, data_base64}` (PDF via pypdf, .docx via its XML, or text; max 5 MB; under 200 characters of text is a 400). It extracts:
+    - skills (`SKILLS`, ~130 canonical skills with regexes; Swift, R and Go are case-sensitive, so "swift" and "go" don't count);
+    - years of experience (the union of date ranges with education lines skipped, or a stated "N years");
+    - the highest degree;
+    - target roles (`resume_roles`): the job titles the resume itself writes (up to three words before a title noun such as engineer, developer, analyst or nurse), only at a line start or after a separator, so "worked with the product manager" isn't a role. Seniority words and "intern" are dropped, and the most mentioned titles come first. Taking titles from the search role families missed "Frontend Developer" and "Registered Nurse", whose families hold single words.
+  - **Run-together PDFs:** some PDFs read back with words joined ("DataEngineerwithhands-on..."). The user's real resume came out 2.6% spaces, against ~15% for normal text, so no roles or years were found and the fit embedding was unreliable. The portal fixes this itself; users are never asked to re-upload.
+    - `_pdf_text` tries pypdf's plain reading, then its layout reading, and keeps the better-spaced one.
+    - `respace()` then puts the spaces back when spacing is under `WELL_SPACED` (8%). It splits each run of letters into the likeliest words: dynamic programming over Zipf costs from `data/wordfreq.txt`, 33,856 words ranked by frequency in 40,000 job descriptions, so it knows "snowflake", "dbt" and "databricks". Skill names and title words count as common. An unknown stretch (a name) can stay whole. Words that are two commoner words glued together were left out of the list. Normal text is returned untouched. On the real resume it went from 2.6% to 12.5% spaces in 0.03 s, found the roles data engineer and data analyst, read 3.3 years from the dates, and found two more skills.
+    - Every upload goes through it. Resumes saved earlier are repaired once by `scoring.repair_resume()`, at the start of the scoring process: it replaces a field only if it still equals what the old text gave (fields the user edited are kept), re-embeds and bumps the version so jobs are rescored.
+    - `text_warning` appears only when respace can't fix the text (no known words, e.g. a scanned image). It asks for no re-upload, just points at the editable fields.
+    - The upload is kept in `user_profiles.resume_file` (local only; cleared on delete), so a better reader can re-read it later. Uploads from before 2026-11-09 kept only the text.
+  - **Editing the profile:** the user can correct all of it (`PUT /api/profile`, which bumps `version` and rescores). `DELETE /api/profile/resume` clears it and its scores. The table `user_profiles` (one row, id 1) also holds visa status, needs_sponsorship, OPT end date, preferred places and the resume embedding.
+  - **Score** (`matching.score`):
+    - Weights: skills 35%, fit 30%, role 15%, experience 15%, education 5%.
+    - Adjustments: ×0.55 if the job rules out sponsorship and the user needs it, +4 if it welcomes OPT/CPT, ×0.85 outside the preferred places.
+    - A job with under 100 characters of description is capped at `UNDESCRIBED_CAP` (70) with the note "scored from the title only": with no skills, years or degree to check, title fit alone gave 90.
+    - Generic skills (Excel, Git, communication...) weigh 0.3. When a job names few skills, the skills part leans on fit (confidence = min(1, skill weight/3)), so a job with one generic skill can't score high by luck.
+  - **Fit** is the cosine between the resume and job embeddings from fastembed's `BAAI/bge-small-en-v1.5` (384 dims, ONNX on `embed_threads`=2 CPU threads). It's mapped from `FIT_LOW`..`FIT_HIGH` (0.57..0.76) to 0..100.
+    - Measured on real jobs: unrelated roles 0.55–0.59, neighbouring roles ~0.66, the same role 0.70–0.75.
+    - Accuracy check (2026-11-07): four made-up resumes (data engineer, frontend, ML engineer, nurse) against the 25 newest open US jobs in nine role groups. Each resume's own group had the highest median: frontend 64, nurse 59, ML 55, data engineer 57 on Data Analyst and 42 on Data Engineer jobs (12 of those 25 rule out sponsorship, and many ask more years). Unrelated groups scored 19 to 33. Top matches had the right titles (Frontend Developer 91, Machine Learning Engineer 93, RN 91). 3,874 random jobs from all 32 source types scored with no errors, at about 17 ms each plus the embedding.
+  - **Model files** go to `models_dir` (65 MB). The default is the database's folder + `/models`, i.e. `C:\Users\prath\FreshJobs\models`. Never AppData (MSIX redirect, see Config).
+  - **Storage:**
+    - A job's embedding is computed once (`job_vectors`), from its title plus the first 1,000 characters of its description. With 2,000 it ran at ~1.6 jobs/s under load.
+    - Scores are stored per profile version (`job_matches`, index `(profile_version, score)`).
+  - **Refresh:**
+    - `scoring.refresh_in_background()` runs at startup, after each fast poll and after a profile change. It starts `python -m app.pipeline.scoring` as a separate below-normal-priority process (no window), unless one holds `scoring.lock` (in the models folder). Inside the busy backend, embedding ran at ~1 job/s, because the pollers compete for the GIL and CPU; on its own it runs at ~6 jobs/s.
+    - `refresh()` scores open, non-repost, US-eligible "For you" jobs that lack a current score, newest first, committing every 64. It stops if the profile changes, and the process repeats it until nothing is left, so jobs found and profile edits made meanwhile are picked up.
+    - Progress is written to `scoring.json`; `GET /api/profile` reports it (`scoring`, via `status()`). The process outlives a backend restart, and the lock stops a second one from starting.
+    - The first pass over the ~26k For-you jobs takes over an hour on this laptop. Later passes only embed new jobs.
+    - **Lists never wait for scoring.** `/api/jobs` returns saved scores only (`stored_scores`). The Feed then asks `GET /api/matches?ids=…` (`ensure_scores`, at most 100) for the jobs on the page without one, and their rings fill in a moment later. Before 2026-11-09 the list scored its page itself: embedding up to 50 descriptions made "All jobs, most recently found" take 5–7 s, against 0.3 s for the same list sorted by date (every SQL statement in it took under 0.1 s). The job detail still scores its one job (`ensure_scores`).
+  - **API:**
+    - Every job in a list carries `match` (score, a few matched and missing skills, notes); the detail carries the full breakdown.
+    - `sort=match` ("Best match") walks the score index and checks each job's filters, then lists unscored jobs newest first. Sorting every match by a joined score took 12 s; this takes 0.7 s.
+  - **UI:**
+    - Once a resume exists, the Feed switches to Best match once (localStorage `freshjobs.migrated.matchSort`).
+    - For you shows a "🔥 Your top matches posted today" strip (score ≥ 50), and an upload banner when there's no resume.
+    - Cards show a `MatchLine` (ring, ✓ matched, ✗ missing). The job panel has "Why it matches you" with each weighted part.
 - **Recruiters** (`app/recruiters.py`): LinkedIn and Google search links, plus an on-demand Hunter.io domain search (HR department first), cached 30 days in `recruiter_cache`.
+  - **Hiring posts:** `hiring_posts_url(company, title)` is a LinkedIn post search for `hiring "<role>" "<company>"` from the past month, newest first, where the role is `core_title` (the first piece of the title that names a role, so "Urgent Need : Data Analyst : Alpharetta, GA" gives "Data Analyst") and the company is `short_company` (", Inc.", LLC and similar dropped: an exact-phrase search for "Navtech, Inc." misses posts that say Navtech). All recruiter-finder links use both. The job detail returns it as `hiring_posts_url`, and the job panel shows it as "🔎 Hiring posts on LinkedIn" next to Apply. It's only a link: whether such a post exists can't be checked without collecting LinkedIn data, which is out of scope.
 - **Tracker:** the `applications` table copies the job's basics (it survives the job closing) or holds a manual entry. The `/api/applications` routes provide CRUD. Moving a status past `saved` stamps `applied_at`.
-- **Config** (`app/config.py`): pydantic-settings reads the **repo-root** `.env`, not `backend/.env`. API keys: `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`, `HUNTER_API_KEY`, and SMTP settings.
+- **Config** (`app/config.py`): pydantic-settings reads the **repo-root** `.env`, not `backend/.env`. The user's `.env` sets `DATABASE_URL` to `C:\Users\prath\FreshJobs\jobs.db`: the repo lives in OneDrive, and syncing the multi-GB database slowed every query. Never put it under `AppData`: the Claude desktop app is a packaged (MSIX) app, so a folder that its processes create under `AppData\Local` is silently redirected to `AppData\Local\Packages\Claude_*\LocalCache\Local\`. The app's tools and preview servers then see the file, but `start-freshjobs.bat` and the user's own terminals don't, and the backend fails with "unable to open database file". Without it the default is `backend/jobs.db`. API keys: `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`, `HUNTER_API_KEY`, and SMTP settings.
 - **Frontend** (`frontend/src/`): TanStack Query plus Tailwind v4.
-  - Tabs: Feed, Tracker, Sources and Settings.
-  - Feed filters persist in localStorage (`freshjobs.filters.v2`).
+  - Tabs: Feed, My profile, LinkedIn & more, Tracker, Sources and Settings.
+  - **Look** (redesigned 2026-11-06 to make people stay):
+    - **Colour and type.** A violet-indigo `brand` palette is defined in `index.css` `@theme`. Primary actions, selections and active pills use `brand-*`, often as `from-brand-600 to-violet-600` gradients. Green (`emerald`) is reserved for freshness and good news (FreshnessBadge, Live dot, "new today", Enrolled), red (`rose`) for ruled-out signals, and `ink` (#0c0a1d) for the glassy header. Headings, numbers and the logo use Plus Jakarta Sans (`font-display`, loaded in `index.html`); body text is Inter.
+    - **Background and banners.** The page has soft radial glows (`body` in `index.css`). The Feed's top is a dark violet `.hero` with a faint grid (`.hero-grid`) holding the big search bar and the For you / All jobs switch. Other tabs open with `PageHeader` (`ui.tsx`), the same band in a smaller size.
+    - **Cards and panels.** Cards are `rounded-2xl` white with a ring, lift on hover, rise in with a stagger (`animate-rise`), and get a gradient bar when selected. Company avatars are two-tone gradients picked from the name.
+    - **Job panel.** It opens with a gradient banner and a large Apply button, then a **Visa snapshot**: four tiles for H-1B approvals, E-Verify, the role's H-1B median salary and OPT/CPT (`VisaSnapshot` in `JobDetail.tsx`), above the Details list.
+    - **Roles bar.** `RolesBar` keeps its related-role suggestions behind a "✦ N related roles you could add" button.
+    - **Filter dropdowns.** The filter bar is `relative z-20`: its `backdrop-blur` makes it a stacking context, so without that the `FilterPill` panels opened *under* the job cards, which are stacked too because they animate. A pill on the right half of the screen opens its panel right-aligned (`alignRight`), and panels are at most 24rem wide, so none runs off-screen.
+  - The Feed opens on **For you** (`alert_roles_only`, the role keywords in Settings); typing a search looks through all jobs instead. `FreshnessStrip` shows how many jobs matching the current filters were posted in the last hour, 6 h and 24 h, and clicking one sets Date posted. Job cards carry a `FreshnessBadge` coloured by age.
+  - The Feed is laid out like LinkedIn and Jobright: a search bar, a row of filter pills (`FilterPill`/`Choice` in `ui.tsx`), and on screens ≥1024px a list/detail split (`JobDetailContent`). Narrow screens open the `JobDetail` drawer instead.
+  - Every pill with an `onClear` has a ✕ when active and a Reset button in its menu (always shown, greyed out at the default); Sort resets to "Most recently posted", and "Reset all" restores `DEFAULT_FILTERS` (United States).
+  - **Filters apply only on Apply** (2026-11-09: changes used to take effect on every click, so users couldn't tell when a filter was in place).
+    - Inside a pill's panel, changes are staged in the Feed's `draft`. The panel reads `f` (the draft, or the applied filters) and writes with `stage()`. The pill's label, active state and ✕ stay on the applied `filters`.
+    - The panel footer (`FilterPill` with `onApply`/`onCancel`/`dirty`, passed as `{...staging}`) has Reset, Cancel and Apply. Apply stays disabled until something changed.
+    - Closing the panel any other way (outside click, Esc, Cancel) drops the draft. The handlers read the latest `onCancel` through a ref, since they're registered in an effect.
+    - Explicit one-click actions still act at once: the pill's ✕, the panel's Reset, the Remote button, Reset all, the freshness strip and Exact title.
+    - While the user chooses, the draft's first page is prefetched (`queryClient.prefetchQuery`, 350 ms debounce), which also warms the backend's 60 s response cache. Apply then usually shows the results at once (0.39 s measured for a sort change).
+    - The count line shows "Applying filters…" until the new page arrives, then "✓ Filters applied" for 3 s.
+  - Location is three pills, Country, State and City, each a searchable checklist (`FacetList` in `LocationFilter.tsx`). State and City need exactly one country; changing the country clears both, and changing states clears cities.
+  - Feed filters persist in localStorage. **For you and All jobs each keep their own filters and sort** (`freshjobs.filters.v3`: `{view, forYou, all}`), so picking Best match in For you leaves All jobs on its own sort. "Reset all" resets only the open view, and the one-time switch to Best match after a resume upload applies to For you only. The old shared set (`freshjobs.filters.v2`) seeds both views the first time.
   - `App.tsx` invalidates every query when the fast lane's `polling` flips from true to false.
+  - **Backend starting up:** after a reboot the backend took about 5 minutes to start listening (2026-11-09: init_db and `backfill()` read about 4.4 GB of the cold 11.6 GB database). Meanwhile Vite's proxy answers 500 with an empty body, and the page used to show a bare "500 Internal Server Error". `request()` (`api.ts`) now throws `BackendDown` for that (or a failed fetch). `App.tsx` then shows "FreshJobs is starting up…" with a spinner, asks `/api/status` every 5 s, and reloads every query once it answers. `start-freshjobs.bat` already waits for the backend before opening the page, so the 500 came from a tab opened earlier (for example, the browser restoring tabs).
+  - A reload always starts at the top of the page (`main.tsx` sets `history.scrollRestoration = 'manual'`). The browser's own restoration landed halfway down the job list, which loads after the page. Switching tabs also scrolls to the top, and Next/Previous scroll to the top of the results (`goToPage`).
+  - The phone drawer passes `inDrawer` to `JobDetailContent`, which leaves room for the Close button (it used to sit on the title).
+  - The Sources page (`Companies.tsx`) shows the 200 busiest sources and has a search box; adding an existing board returns its real open-jobs count.
 
 ## Gotchas
 
 - **Migrations are add-only and automatic:** `db._add_missing_columns()` runs ALTER TABLE ADD COLUMN for new nullable or scalar-default columns. Renames, type changes and drops need a real migration (Alembic isn't set up).
-- **SQLite runs in WAL mode with a 30s busy timeout** (`app/db.py`), so both lanes and the API can work at once. Without it, you get "database is locked".
+- **SQLite runs in WAL mode with a 30s busy timeout** (`app/db.py`), so both lanes and the API can work at once. Without it, you get "database is locked". With the API reading nonstop, automatic checkpoints never reset the WAL (it reached 1.7 GB and slowed every read), so `run_poll` runs `PRAGMA wal_checkpoint(TRUNCATE)` after each lane.
+- **A damaged database** ("database disk image is malformed" at startup, so the start script waits forever and the Feed shows a 500) happened on 2026-11-06 after the laptop blue-screened mid-write. This laptop has crashed with driver bugchecks (0x133, 0x10E) since before the portal existed. The installed `sqlite3.exe` builds (Anaconda 3.41/3.33) have no `.recover`, so it was salvaged in Python: copy each table in rowid ranges from a read-only connection, split any range that errors until only unreadable rows are skipped (17 of 1.65M jobs were lost), recreate the indexes, and leave out `jobs_fts*` and its triggers (`_ensure_title_search` rebuilds them on start). Run `PRAGMA quick_check` (about 6 min, read-only) to confirm damage first. The damaged original was deleted afterwards to free disk space (C: is nearly full).
+  - One job read back with garbage in its date columns: job 1622196, next to the lost rows. That row made every Feed page it landed on return a 500 ("Invalid isoformat string"), and it was deleted. A full scan then found no other row with a non-date value in a `*_at` column.
+  - After a future salvage, run that same check, for example `... WHERE first_seen_at NOT GLOB '[12][0-9][0-9][0-9]-*'` for each date column.
+- **Laptop load** (measured 2026-11-06, about 1.56M open jobs):
+  - Backend: 6–9% CPU of 16 cores and 1–1.6 GB of RAM. Disk reads run 4–40 MB/s during a fast poll, mostly searches and saves over the 9 GB database.
+  - Vite: about 0% CPU and under 60 MB of RAM. The GPU isn't used.
+  - The first fast poll after a restart took about 14 minutes, almost all of it saving (`of_which_saving`) while caches were cold.
+  - Drive C: is about 95% full.
+  - Proposed and not built, because the user wants to review them first: lighter polling on battery, keep-awake off by default, a daily DB backup, a start script that detects a damaged DB, and moving to a cloud server.
+- **Finding the backend process:** a backend started outside the Claude app's sandbox shows as PID 0 in `Get-NetTCPConnection`/netstat. Find it by command line instead: `Win32_Process` where CommandLine is like `*uvicorn*app.main:app*8000*`.
+- **New indexes on big tables** are created at startup by `_add_missing_columns()`, which takes minutes on the multi-GB `jobs.db` and holds the write lock meanwhile.
 - **Datetimes:** the custom `DateTime` TypeDecorator in `app/models.py` always returns tz-aware UTC. Never use naive datetimes.
 - **Workday quirks** (`app/sources/workday.py`):
   - Some tenants pin "featured" jobs above the newest-first list. A full scan learns the offset where that block ends, kept in memory per slug, and is lost on restart, so the next partial scan becomes a full scan.
   - Boards with `total == 2000` are capped, so their scans are marked incomplete and never close jobs.
-  - The first scan of all tenants takes tens of thousands of detail requests, roughly 30 minutes in the slow lane.
+  - A tenant's first scan (empty `known_ids`) fetches details only for jobs posted in the last `BASELINE_DETAIL_DAYS`. Older baseline jobs are list-only (no description), so harvesting hundreds of tenants doesn't block the slow lane for hours.
 - **Poller robustness:**
   - `_fetch` catches every exception per source. Once, an uncaught AttributeError from one adapter closed the shared httpx client and failed the whole lane.
   - `process_company(commit_every=200)` commits in batches, because a big board's first scan (Amazon, JPMorgan, Apple: thousands of jobs) otherwise held the SQLite write lock for minutes and produced "database is locked".
   - A save error rolls back only that source.
+  - Saving a big first scan must stay linear: new jobs aren't flushed one by one (column defaults like `is_repost` are therefore set explicitly in `process_company`), same-poll jobs are excluded from `find_original` through an incrementally built id set filtered in Python, not a SQL `NOT IN`, and `find_original` compares titles before loading any description. Each of those was quadratic and made JazzHR's 110k-job first scan take over an hour.
 - **Big-company adapters** (`amazon.py`, `microsoft.py`, `google.py`, `apple.py`, `oracle_hcm.py`, `icims.py`, `eightfold.py`, `successfactors.py`; shared retry/JSON-LD helpers in `http_util.py`) are all in the slow lane.
   - Amazon caps offset+limit at 10k, so full scans page per category group.
   - Microsoft is an Eightfold PCSX tenant (a subclass of `EightfoldAdapter`).
@@ -110,9 +312,11 @@ Data flow: `sources/` adapters → `pipeline/poller.py` → SQLite → FastAPI (
   - JSearch's endpoint is `/search-v2` (`/search` was retired). It returns 10 jobs per request, and the free plan is 200 requests a month, hence `JSEARCH_MIN_INTERVAL_MINUTES=480` with 2 saved searches.
 - **Other sources:**
   - SmartRecruiters returns 200 with zero jobs for a wrong slug.
-  - Workable returns 429 after a burst of requests.
+  - Workable returns 429 after a burst of requests (`max_concurrency = 2`, every 3 h; fresh jobs come from `workable_search`, whose API caps pages at 20 and pins "featured" jobs of any age first).
+  - Common Crawl produced ~1,500 Workday "sites" named `robots.txt`; `detect_board` now rejects site names with a dot, and `fix-workday` disabled or renamed the existing ones.
   - Remotive's free feed is tiny and delayed 24 hours.
   - Adzuna descriptions are snippets, so its `no_sponsor` detection is weak.
+  - The user's Adzuna key is on the trial plan (25 calls in total), so the Adzuna source row is disabled in the DB (`enabled = 0`). About 20 of the calls went on a one-off harvest on 2026-11-05 (100 newest jobs for each of 9 role queries, 705 saved; their employers were then probed for Greenhouse/Lever/Ashby and Workday boards), so only a few test calls remain. After an upgrade (5,000 calls a month, 500 a day), re-enable it and size `pages`/`min_interval_minutes` to stay under 500 calls a day.
   - The Muse needs `sort=publication_date`.
 - **Tests:** `tests/conftest.py` swaps in an in-memory StaticPool engine before the app is imported, and the `session` fixture recreates the schema for each test. Adapter tests are respx-mocked (`tests/test_sources*.py`). API tests use FastAPI's `TestClient` (`tests/test_api.py`).
 - **Testing alerts end to end:** delete a matching job (and its `JobEvent`s and `JobLocation`s) from a source that's past its baseline, then trigger a poll; the job comes back as new. For local email, point `.env` at a local SMTP sink (`python -m aiosmtpd -n -l localhost:1025`, with `SMTP_STARTTLS=false`).

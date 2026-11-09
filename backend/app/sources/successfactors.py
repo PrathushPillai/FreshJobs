@@ -205,7 +205,7 @@ class SuccessFactorsAdapter(Adapter):
         return jobs, total, CLASSIC_PAGE
 
     async def fetch(
-        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset()
+        self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         host, filters = parse_slug(slug)
         listed: dict[str, dict] = {}

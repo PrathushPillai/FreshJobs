@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Polling
     poll_minutes: int = 5
     poll_concurrency: int = 10
+    # Minutes a lane's poll may run before the sources it hasn't reached wait for the next one. The slow
+    # lane has none: a big Workday or Amazon scan can take longer and must be allowed to finish.
+    poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30}
     poll_on_startup: bool = True
     scheduler_enabled: bool = True
     # A job missing from its feed this many polls in a row is marked closed.
@@ -25,6 +28,26 @@ class Settings(BaseSettings):
     stale_days: int = 14
     # New employers from aggregators to probe for their own Greenhouse/Lever/Ashby board, per poll.
     discovery_per_poll: int = 15
+    # New company boards to add per poll from aggregator job links (pipeline/harvest.py). 0 = off.
+    harvest_per_poll: int = 200
+    # Minutes between polls of a board that had no open jobs, or failed, last time.
+    idle_poll_minutes: int = 180
+    # A job found more than this long after the source's previous successful check gets a
+    # "posted between" window instead of "posted when we found it" (date-only and undated sources).
+    listed_exact_gap_minutes: int = 45
+    # Jobs per source per poll whose missing details are fetched again (poller.poll_once).
+    enrich_per_poll: int = 200
+    # Jobs per fast poll whose apply page is opened to catch ones taken down (pipeline/liveness.py). 0 = off.
+    verify_per_poll: int = 150
+    # Resume matching (app/matching.py). Where the embedding model is kept: next to the database by default,
+    # never under AppData (the Claude app redirects that folder; see the DATABASE_URL note in CLAUDE.md).
+    models_dir: str = ""
+    # CPU threads the embedding model may use, so scoring doesn't make the laptop sluggish.
+    embed_threads: int = 2
+    # Hours between syncs of hiring Y Combinator startups into sources (pipeline/startups.py). 0 = off.
+    yc_sync_hours: int = 24
+    # Hours between syncs of the community GitHub job lists into sources (pipeline/startup_lists.py). 0 = off.
+    list_sync_hours: int = 12
 
     # Email alerts (leave smtp_host empty to disable)
     smtp_host: str = ""

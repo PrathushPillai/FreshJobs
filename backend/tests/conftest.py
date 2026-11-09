@@ -19,6 +19,14 @@ db.SessionLocal.configure(bind=db.engine)
 def session():
     db.Base.metadata.drop_all(db.engine)
     db.init_db()
+    from app import everify, main
+
+    main._facets.update(at=None, rows=[])  # the location counts snapshot would outlive the test's data
+    everify._status_cache.clear()  # employer -> E-Verify status, cached per process
+    main._jobs_cache.clear()  # cached /api/jobs pages and header counts would outlive the test's data
+    main._status_counts.clear()
+    main._suggestion_cache.clear()
+    main._open_counts.clear()
     with db.SessionLocal() as s:
         yield s
 

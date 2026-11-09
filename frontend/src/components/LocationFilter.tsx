@@ -1,85 +1,45 @@
-import { useQuery } from '@tanstack/react-query'
-import { api, type Facet } from '../api'
+import { useState } from 'react'
+import type { Facet } from '../api'
 
-interface Props {
-  countries: string[]
-  states: string[]
-  cities: string[]
-  onChange: (v: { countries: string[]; states: string[]; cities: string[] }) => void
-}
+const SHOWN = 200
 
-function Picker({ label, options, selected, onAdd, disabledHint }: {
-  label: string
-  options: Facet[]
+/** A searchable checklist of places, the ones picked first. */
+export function FacetList({ options, selected, onChange, loading, placeholder }: {
+  options: Facet[] | undefined
   selected: string[]
-  onAdd: (v: string) => void
-  disabledHint?: string
+  onChange: (values: string[]) => void
+  loading?: boolean
+  placeholder: string
 }) {
-  const available = options.filter((o) => !selected.includes(o.name))
-  return (
-    <select
-      value=""
-      disabled={!!disabledHint}
-      title={disabledHint}
-      onChange={(e) => e.target.value && onAdd(e.target.value)}
-      className="min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:bg-slate-50 disabled:text-slate-400"
-    >
-      <option value="">{disabledHint ?? `+ ${label}`}</option>
-      {available.map((o) => (
-        <option key={o.name} value={o.name}>
-          {o.name} ({o.count.toLocaleString()})
-        </option>
-      ))}
-    </select>
+  const [search, setSearch] = useState('')
+  const needle = search.trim().toLowerCase()
+  const counts = new Map((options ?? []).map((o) => [o.name, o.count]))
+  const rest = (options ?? []).filter((o) => !selected.includes(o.name) && (!needle || o.name.toLowerCase().includes(needle)))
+  const toggle = (name: string) => onChange(selected.includes(name) ? selected.filter((v) => v !== name) : [...selected, name])
+  const row = (name: string, checked: boolean) => (
+    <label key={name} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm text-slate-700 hover:bg-slate-100">
+      <input type="checkbox" className="accent-brand-600" checked={checked} onChange={() => toggle(name)} />
+      <span className="min-w-0 flex-1 truncate">{name}</span>
+      {counts.has(name) && <span className="text-xs text-slate-400">{counts.get(name)!.toLocaleString()}</span>}
+    </label>
   )
-}
-
-function Chips({ values, onRemove }: { values: string[]; onRemove: (v: string) => void }) {
-  return values.map((v) => (
-    <button
-      key={v}
-      onClick={() => onRemove(v)}
-      className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200 hover:bg-emerald-100"
-      title="Remove"
-    >
-      {v} ✕
-    </button>
-  ))
-}
-
-export default function LocationFilter({ countries, states, cities, onChange }: Props) {
-  const oneCountry = countries.length === 1 ? countries[0] : undefined
-  const oneState = states.length === 1 ? states[0] : undefined
-  const facets = useQuery({
-    queryKey: ['facets', oneCountry, oneState],
-    queryFn: () => api.locationFacets(oneCountry, oneState),
-    staleTime: 5 * 60_000,
-  })
-  const f = facets.data
-  const set = (patch: Partial<Props>) => onChange({ countries, states, cities, ...patch })
-  const remove = (list: string[], v: string) => list.filter((x) => x !== v)
-
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className="text-sm font-medium text-slate-700">Location</span>
-      <Picker label="Country" options={f?.countries ?? []} selected={countries} onAdd={(v) => set({ countries: [...countries, v], states: [], cities: [] })} />
-      <Picker
-        label={oneCountry === 'United States' ? 'State' : 'State / province'}
-        options={f?.states ?? []}
-        selected={states}
-        onAdd={(v) => set({ states: [...states, v], cities: [] })}
-        disabledHint={oneCountry ? undefined : 'Pick one country for states'}
+    <div className="w-72 max-w-[calc(100vw-3rem)]">
+      <input
+        autoFocus
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder={placeholder}
+        className="mb-2 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-brand-500"
       />
-      <Picker
-        label="City"
-        options={f?.cities ?? []}
-        selected={cities}
-        onAdd={(v) => set({ cities: [...cities, v] })}
-        disabledHint={oneCountry ? undefined : 'Pick one country for cities'}
-      />
-      <Chips values={countries} onRemove={(v) => set({ countries: remove(countries, v), states: [], cities: [] })} />
-      <Chips values={states} onRemove={(v) => set({ states: remove(states, v), cities: [] })} />
-      <Chips values={cities} onRemove={(v) => set({ cities: remove(cities, v) })} />
+      <div className="max-h-72 overflow-y-auto">
+        {selected.map((name) => row(name, true))}
+        {selected.length > 0 && rest.length > 0 && <hr className="my-1 border-slate-100" />}
+        {rest.slice(0, SHOWN).map((o) => row(o.name, false))}
+        {loading && !options && <p className="px-2 py-1 text-sm text-slate-500">Loading places…</p>}
+        {!loading && options && rest.length === 0 && selected.length === 0 && <p className="px-2 py-1 text-sm text-slate-500">No matches</p>}
+        {rest.length > SHOWN && <p className="px-2 py-1 text-xs text-slate-400">Type to see more ({(rest.length - SHOWN).toLocaleString()} not shown)</p>}
+      </div>
     </div>
   )
 }

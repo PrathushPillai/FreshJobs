@@ -18,16 +18,44 @@ CACHE_DAYS = 30
 _RECRUITING_WORDS = re.compile(r"recruit|talent|sourc|people|hr\b|human resources|hiring", re.I)
 
 
+_ROLE_WORD = re.compile(
+    r"\b(engineer|developer|analyst|scientist|architect|designer|manager|administrator|consultant|specialist|"
+    r"technician|programmer|researcher|intern|internship|nurse|accountant|associate|lead|director|sde|swe)s?\b", re.I)
+_LEGAL_SUFFIX = re.compile(r"[,\s]+(inc|llc|l\.l\.c|ltd|corp|corporation|co|company|plc|gmbh|lp|llp)\.?$", re.I)
+
+
 def core_title(title: str) -> str:
-    """"Software Engineer, Agent Auth (Remote)" -> "Software Engineer"."""
-    t = re.split(r"\s[-–—|]\s|,|\(|\[|:", title)[0]
-    return re.sub(r"\s+", " ", t).strip() or title
+    """The role in a title: "Software Engineer, Agent Auth (Remote)" -> "Software Engineer". The first piece that
+    names a role, so "Urgent Need : Data Analyst : Alpharetta, GA" -> "Data Analyst", not "Urgent Need"."""
+    pieces = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\s[-–—|]\s|,|\(|\)|\[|\]|:", title)]
+    pieces = [p for p in pieces if p]
+    for p in pieces:
+        if _ROLE_WORD.search(p):
+            return p
+    return pieces[0] if pieces else title
+
+
+def short_company(name: str) -> str:
+    """The name people write in posts: "Navtech, Inc." -> "Navtech" (an exact-phrase search with ", Inc." misses)."""
+    out = name.strip()
+    while True:
+        cut = _LEGAL_SUFFIX.sub("", out).strip(" ,")
+        if cut == out or not cut:
+            return out
+        out = cut
+
+
+def hiring_posts_url(company: str, title: str) -> str:
+    """LinkedIn post search for people or the company saying they're hiring for this role: "hiring", the role
+    and the company, past month, newest first. Only a link: LinkedIn itself is never fetched."""
+    return "https://www.linkedin.com/search/results/content/?" + urlencode(
+        {"keywords": f'hiring "{core_title(title)}" "{short_company(company)}"', "datePosted": '"past-month"', "sortBy": '"date_posted"'})
 
 
 def search_links(company: str, title: str) -> list[dict]:
-    role = core_title(title)
+    hiring_posts = hiring_posts_url(company, title)
+    company, role = short_company(company), core_title(title)  # what people write: no ", Inc.", no team or place
     li_people = "https://www.linkedin.com/search/results/people/?"
-    li_posts = "https://www.linkedin.com/search/results/content/?"
     google = "https://www.google.com/search?q="
     return [
         {"label": f"Recruiters at {company} (LinkedIn)",
@@ -37,7 +65,7 @@ def search_links(company: str, title: str) -> list[dict]:
         {"label": f"'{role}' hiring managers at {company} (LinkedIn)",
          "url": li_people + urlencode({"keywords": f"{role} manager {company}"})},
         {"label": f"Recent \"hiring\" posts for {role} at {company} (LinkedIn)",
-         "url": li_posts + urlencode({"keywords": f'hiring "{role}" {company}', "sortBy": '"date_posted"'})},
+         "url": hiring_posts},
         {"label": f"Recruiter profiles at {company} (Google)",
          "url": google + quote(f'site:linkedin.com/in ("recruiter" OR "talent acquisition") "{company}"')},
         {"label": f"Hiring posts for {role} at {company} (Google)",

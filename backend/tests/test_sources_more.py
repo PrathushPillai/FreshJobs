@@ -91,6 +91,22 @@ def test_workday_helpers():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_workday_first_scan_fetches_details_only_for_recent_jobs():
+    old = {**WD_POSTING, "externalPath": "/job/US-TX-Austin/Old-Job_JR9", "postedOn": "Posted 30+ Days Ago"}
+    handler, _ = wd_pages([WD_POSTING, old])
+    respx.post(f"{WD_API}/jobs").mock(side_effect=handler)
+    fresh = respx.get(f"{WD_API}{WD_POSTING['externalPath']}").mock(return_value=httpx.Response(200, json=WD_DETAIL))
+    stale = respx.get(f"{WD_API}{old['externalPath']}")
+
+    async with httpx.AsyncClient() as client:
+        jobs = await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=set(), first_scan=True)
+
+    assert fresh.called and not stale.called
+    assert {j.external_id for j in jobs} == {"JR2019819", "JR9"}
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_workday_full_scan_fetches_details_only_for_new_jobs():
     postings = [WD_POSTING] + [wd_posting(i) for i in range(24)]
     handler, calls = wd_pages(postings)
