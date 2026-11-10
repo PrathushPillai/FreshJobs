@@ -146,6 +146,9 @@ _SHORTHAND = re.compile(r"\b(usc|gc|ead|green\s*card)\b|citizens\s+only", re.I)
 _STUDENT_OR_H1B = re.compile(r"\b(opt|cpt|h-?1-?b|f-?1|stem)\b|all\s+visas|any\s+visa", re.I)
 _NO_STUDENT_OR_H1B = re.compile(r"\bno\s+(h-?1-?b|opt|cpt|f-?1)", re.I)
 _QUOTES = re.compile(r"[\"“”‘’«»]")
+_VISA_ALTERNATIVE = re.compile(
+    r",?\s*or\s+(either\s+)?(hold|have|possess|obtain|be\s+able\s+to\s+obtain)(\s+or\s+be\s+able\s+to\s+obtain)?"
+    r"[^.]{0,60}?(visa|work\s+permit)", re.I)
 _US_DOTS = re.compile(r"\bU\.\s?S\.(?:\s?A\.)?", re.I)
 
 
@@ -158,6 +161,12 @@ def find_no_sponsor_phrase(text: str) -> str | None:
     text = _NOT_REQUIRED.sub(" ", text)  # "No security clearance required" says the opposite
     matches = _NO_SPONSOR.finditer(text) if any(p.search(text) for p in _NO_SPONSOR_EACH) else ()
     for m in matches:
+        # "must be a Citizen or Permanent Resident of the country ..., or either hold or be able to obtain, a valid
+        # working visa" (ALS Global) lets visa holders in. Not when the alternative itself rules sponsorship out
+        # ("or hold work authorization that does not require sponsorship").
+        tail = text[m.end(): m.end() + 160].split(".")[0]
+        if _VISA_ALTERNATIVE.search(tail) and "sponsor" not in tail.lower():
+            continue
         if _SHORTHAND.search(m.group(0)):
             # A staffing visa list counts only if it leaves students and H-1B out: "Need GC,USC,OPT,EAD" and
             # "H1B GC and Citizens Only" welcome them.

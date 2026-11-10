@@ -221,3 +221,13 @@ def test_rules_out_us_only_wordings(text):
 ])
 def test_us_only_look_alikes_do_not_match(text):
     assert find_no_sponsor_phrase(text) is None, find_no_sponsor_phrase(text)
+
+
+def test_citizen_or_visa_holder_is_not_a_ban():
+    # ALS Global: a visa is offered as the alternative, so visa holders qualify.
+    assert find_no_sponsor_phrase("To be eligible to work at ALS you must be a Citizen or Permanent Resident of the "
+                                  "country you are applying for, or either hold or be able to obtain, a valid working visa.") is None
+    # The alternative itself rules sponsorship out: still a ban.
+    assert find_no_sponsor_phrase("You must be a US Citizen or Permanent Resident, or hold a visa that does not require "
+                                  "sponsorship now or in the future.")
+    assert find_no_sponsor_phrase("Must be a U.S. Citizen or Permanent Resident.")

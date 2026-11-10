@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# One-time setup of the FreshJobs server: Ubuntu 24.04 on Oracle Cloud's Always Free Ampere (ARM) VM.
+# One-time setup of the FreshJobs server: any Ubuntu 24.04 VM, x86 or ARM (Google Cloud, AWS, Oracle, Hetzner).
 # Run on the server as the "ubuntu" user:  bash setup-server.sh freshjobs-example.duckdns.org
 #
 # It installs Python, SQLite and Caddy (HTTPS with automatic Let's Encrypt certificates), opens ports 80/443
 # in the server's own firewall (Oracle's Ubuntu image blocks them even when the cloud security list allows
-# them), and installs the always-on backend service. Safe to run again.
+# them; on Google Cloud and AWS the VM's own firewall is open and the cloud firewall decides), and installs the
+# always-on backend service. Safe to run again.
 set -euo pipefail
 DOMAIN="${1:?usage: bash setup-server.sh <your domain, e.g. freshjobs-you.duckdns.org>}"
 APP=/home/ubuntu/freshjobs
@@ -22,7 +23,9 @@ fi
 
 echo "== firewall: allow 80 and 443 (Oracle's image rejects everything but SSH by default)"
 for port in 80 443; do
-  sudo iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || sudo iptables -I INPUT 5 -p tcp --dport "$port" -j ACCEPT
+  # At the top of the chain: Oracle's image ends INPUT with a REJECT rule, and Google Cloud's has an empty chain
+  # (where inserting at position 5 would fail).
+  sudo iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || sudo iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT
 done
 sudo netfilter-persistent save
 
