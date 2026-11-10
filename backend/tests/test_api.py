@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import sign_up
+
 from app.main import app
 from app.models import Company
 from app.pipeline.poller import process_company
@@ -33,6 +35,7 @@ def client(session, now):
     ], prefs, now)
     session.commit()
     with TestClient(app) as c:
+        sign_up(c)
         yield c
 
 
@@ -334,3 +337,62 @@ def test_companies_list_busiest_first_and_searchable(client, session):
     assert [c["name"] for c in client.get("/api/companies", params={"q": "zqglob"}).json()] == ["Zqglobex"]
     assert "Zqglobex" in [c["name"] for c in client.get("/api/companies", params={"q": "lever", "limit": 50_000}).json()]
     assert len(client.get("/api/companies", params={"limit": 1}).json()) == 1
+
+
+def test_a_job_found_closed_leaves_cached_feed_pages_at_once(client, monkeypatch):
+    """Opening a job checks its apply page; when that closes it, the next feed request mustn't show it from the
+    60-second page cache (it did, until the cache was cleared on close)."""
+    from app.pipeline import liveness
+
+    async def gone(client_, url):
+        return False, "the posting is gone (404)"
+
+    params = {"hide_no_sponsor": False}
+    before = client.get("/api/jobs", params=params).json()["items"]
+    assert client.get("/api/jobs", params=params).headers["X-Cache"] == "hit"  # the page is cached
+    target = before[0]
+    monkeypatch.setattr(liveness, "check", gone)
+    assert client.post(f"/api/jobs/{target['id']}/verify").json()["closed_at"] is not None
+    after = client.get("/api/jobs", params=params)
+    assert target["id"] not in [j["id"] for j in after.json()["items"]]
+
+
+def test_sponsor_likely_verdict_and_filter(client, session):
+    from app.models import Job
+
+    jobs = {j.title: j for j in session.query(Job)}
+    jobs["Data Analyst"].h1b_filings = 250  # likely: 10+ filings
+    jobs["Senior Software Engineer"].h1b_filings = 3  # possible: a few filings
+    jobs["Business Intelligence Developer"].everify = "yes"  # possible: E-Verify only (STEM OPT)
+    jobs["Registered Nurse"].sponsors_text = True  # likely: the posting says so
+    jobs["Data Engineer"].h1b_filings = 900  # ruled out by its text, whatever the filings
+    session.commit()
+    from app import main
+
+    main._jobs_cache.clear()
+    all_jobs = client.get("/api/jobs", params={"hide_no_sponsor": False}).json()["items"]
+    assert {j["title"]: j["sponsor_likely"] for j in all_jobs} == {
+        "Data Analyst": "likely", "Senior Software Engineer": "possible",
+        "Business Intelligence Developer": "possible", "Registered Nurse": "likely", "Data Engineer": "ruled_out"}
+    likely = {"hide_no_sponsor": False, "sponsor_likely": "likely"}
+    assert titles(client.get("/api/jobs", params=likely)) == ["Data Analyst", "Registered Nurse"]
+    assert titles(client.get("/api/jobs", params={**likely, "sponsor_likely": "possible"})) == [
+        "Business Intelligence Developer", "Data Analyst", "Registered Nurse", "Senior Software Engineer"]
+
+
+def test_startup_survives_a_locked_database(monkeypatch):
+    """A locked database during the startup backfill used to end the startup; now it's retried later."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import OperationalError
+
+    from app import main
+    started = []
+
+    def locked():
+        raise OperationalError("UPDATE jobs ...", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(main, "backfill", locked)
+    monkeypatch.setattr(main, "_backfill_until_done", lambda: started.append(True))
+    with TestClient(main.app) as client:
+        assert client.get("/api/status").status_code == 200
+    assert started == [True]

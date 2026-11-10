@@ -5,7 +5,7 @@ import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
 import RolesBar from './RolesBar'
-import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
 
 const PAGE = 50
 // "Date posted" uses the company's own posting date; "Found" uses when we first saw the job.
@@ -35,8 +35,14 @@ const SORTS = [
   { value: 'company', label: 'Company A–Z' },
 ] as const
 const EXP_LEVELS: ExpLevel[] = ['entry', 'mid', 'senior']
+// The Visa pill's sponsorship verdict choice (backend sponsorship.sponsor_likelihood).
+const SPONSOR_CHOICES = [
+  { value: 'any', label: 'All jobs', hint: 'Every employer, sponsor or not' },
+  { value: 'likely', label: 'Likely sponsors', hint: 'Says it sponsors, or 10+ H-1B filings' },
+  { value: 'possible', label: 'Likely or may sponsor', hint: 'Also employers with a few H-1Bs, or E-Verify (STEM OPT)' },
+] as const
 
-type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'everify_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
+type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
   Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
@@ -50,6 +56,7 @@ const DEFAULT_FILTERS: Filters = {
   include_unstated: true,
   remote_only: false,
   sponsors_only: false,
+  sponsor_likely: 'any',  // 'likely' / 'possible': the Visa pill's sponsorship choice
   everify_only: false,
   // Shown by default: some employers that say they don't sponsor can still be persuaded. Each such job
   // carries a red "No sponsorship" badge, and the Visa pill can hide them.
@@ -195,6 +202,7 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
           </p>
           <div className="mt-2.5 flex flex-wrap items-center gap-1">
             <ExperienceBadge job={job} />
+            <SponsorLikelyBadge job={job} />
             <SponsorBadge filings={job.h1b_filings} />
             <VisaSignalBadges job={job} />
             {isNew(job) && <Badge tone="green" dot>Found {timeAgo(job.first_seen_at)}</Badge>}
@@ -640,11 +648,21 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
           </button>
 
           <FilterPill {...staging}
-            label={filters.sponsors_only ? 'H-1B sponsors' : 'Visa'}
-            active={filters.sponsors_only || filters.everify_only || filters.hide_no_sponsor}
-            onClear={() => set({ sponsors_only: false, everify_only: false, hide_no_sponsor: false })}
+            label={filters.sponsor_likely === 'likely' ? 'Likely sponsors' : filters.sponsor_likely === 'possible' ? 'Likely or may sponsor' : filters.sponsors_only ? 'H-1B sponsors' : 'Visa'}
+            active={filters.sponsor_likely !== 'any' || filters.sponsors_only || filters.everify_only || filters.hide_no_sponsor}
+            onClear={() => set({ sponsor_likely: 'any', sponsors_only: false, everify_only: false, hide_no_sponsor: false })}
           >
             <div className="space-y-2">
+              <p className="px-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Will they sponsor?</p>
+              {SPONSOR_CHOICES.map((c) => (
+                <Choice key={c.value} selected={f.sponsor_likely === c.value} onClick={() => stage({ sponsor_likely: c.value })}>
+                  <span>
+                    {c.label}
+                    <span className="block text-xs font-normal text-slate-500">{c.hint}</span>
+                  </span>
+                </Choice>
+              ))}
+              <div className="my-1 border-t border-slate-100" />
               <Toggle label="Only companies that filed H-1Bs" checked={f.sponsors_only} onChange={(v) => stage({ sponsors_only: v })} />
               <Toggle
                 label="Only E-Verify employers (needed for STEM OPT)"

@@ -21,10 +21,8 @@ function Integration({ name, ok, hint }: { name: string; ok: boolean; hint: stri
   )
 }
 
-export default function Settings({ status }: { status: Status | undefined }) {
+export default function Settings({ status, isAdmin }: { status: Status | undefined; isAdmin: boolean }) {
   const emailMode = status?.email_mode ?? (status?.email_configured ? 'on' : 'off')
-  const emailConfigured = emailMode === 'on'
-  const testEmail = useMutation({ mutationFn: api.testEmail })
   const queryClient = useQueryClient()
   const prefs = useQuery({ queryKey: ['prefs'], queryFn: api.prefs })
   const [draft, setDraft] = useState<Prefs | null>(null)
@@ -44,25 +42,16 @@ export default function Settings({ status }: { status: Status | undefined }) {
     onSuccess: (data) => {
       queryClient.setQueryData(['prefs'], data)
       queryClient.invalidateQueries({ queryKey: ['jobs'] })
+      queryClient.invalidateQueries({ queryKey: ['alert-settings'] })
     },
   })
 
   if (!draft) return <p className="text-sm text-slate-500">Loading…</p>
 
-  const check = (key: 'email_alerts' | 'hide_no_sponsor' | 'exclude_senior', label: string, hint?: string) => (
-    <label className="flex items-start gap-2 text-sm">
-      <input type="checkbox" className="mt-0.5 accent-brand-600" checked={draft[key]} onChange={(e) => setDraft({ ...draft, [key]: e.target.checked })} />
-      <span>
-        {label}
-        {hint && <span className="block text-xs text-slate-500">{hint}</span>}
-      </span>
-    </label>
-  )
-
   return (
     <div className="space-y-5">
       <PageHeader icon="⚙️" title="Settings">
-        The roles in your "For you" feed, your email alerts and the data sources that are connected.
+        The roles in your “For you” feed and your alerts{isAdmin ? ', and the data sources connected to the portal' : ''}. Alert emails are set up in My profile.
       </PageHeader>
       <form
         onSubmit={(e) => {
@@ -72,61 +61,37 @@ export default function Settings({ status }: { status: Status | undefined }) {
         className="max-w-3xl space-y-5 rounded-3xl bg-white shadow-sm ring-1 ring-slate-200/70 p-5"
       >
         <label className="block text-sm">
-          <span className="mb-1 block font-medium">Email me about roles matching</span>
+          <span className="mb-1 block font-medium">Your roles</span>
           <span className="mb-1 block text-xs text-slate-500">
-            The feed shows every role. These keywords only decide which new jobs trigger an alert email: a job alerts if its title contains any of them. Separate them with commas.
+            “For you” and your alerts show jobs whose title is one of these roles, in any spelling. Separate them with commas. The “Your roles” bar on the Feed edits the same list.
           </span>
           <textarea value={include} onChange={(e) => setInclude(e.target.value)} rows={4} className="w-full rounded-md border border-slate-300 px-3 py-2" />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium">Never alert on titles containing</span>
+          <span className="mb-1 block font-medium">Leave out titles containing</span>
           <textarea value={exclude} onChange={(e) => setExclude(e.target.value)} rows={2} className="w-full rounded-md border border-slate-300 px-3 py-2" />
         </label>
-        <div className="space-y-3">
-          {check('hide_no_sponsor', 'Don’t alert on jobs that won’t sponsor visas', 'Also skips jobs that need US citizenship or a security clearance.')}
-          {check('exclude_senior', 'Don’t alert on senior roles', 'Senior titles, or jobs asking for 6+ years.')}
-          {check(
-            'email_alerts',
-            'Email me new matching jobs right away',
-            emailMode === 'on'
-              ? undefined
-              : emailMode === 'test'
-                ? 'Not delivering: .env points at a local test mail server (localhost). Put your Gmail SMTP settings in .env and restart the backend.'
-                : 'Email isn’t set up yet. Add the SMTP settings to .env and restart the backend (see the README).',
-          )}
-        </div>
-        <div className="space-y-2 border-t border-slate-100 pt-4">
-          <h3 className="text-sm font-medium">Integrations</h3>
-          <ul className="space-y-1.5">
-            <Integration
-              name="Email alerts"
-              ok={emailConfigured}
-              hint={
-                emailMode === 'test'
-                  ? 'Test mode: .env points at a local test mail server, so alerts never reach your inbox. Add your Gmail SMTP settings (see .env.example).'
-                  : 'Add your Gmail SMTP settings to .env (see .env.example).'
-              }
-            />
-            <li className="flex flex-wrap items-center gap-2 pl-5 text-xs">
-              <button
-                type="button"
-                onClick={() => testEmail.mutate()}
-                disabled={testEmail.isPending || emailMode === 'off'}
-                className="rounded-full px-3 py-1 font-semibold text-brand-700 ring-1 ring-brand-200 hover:bg-brand-50 disabled:opacity-40"
-              >
-                {testEmail.isPending ? 'Sending…' : 'Send test email'}
-              </button>
-              {testEmail.data && (
-                <span className={testEmail.data.sent ? 'text-emerald-700' : 'text-rose-700'}>{testEmail.data.detail}</span>
-              )}
-            </li>
-            <Integration name="Adzuna" ok={status?.adzuna_configured ?? false} hint="Free key from developer.adzuna.com. Set ADZUNA_APP_ID and ADZUNA_APP_KEY in .env for jobs from thousands more employers." />
-            <Integration name="Google Jobs (LinkedIn, Indeed, Glassdoor)" ok={status?.jsearch_configured ?? false} hint="Free key from JSearch on RapidAPI. Set JSEARCH_API_KEY in .env, then add searches on the Sources page." />
-            <Integration name={`H-1B sponsor data${status?.h1b_sponsors ? ` (${status.h1b_sponsors.toLocaleString()} employers)` : ''}`} ok={(status?.h1b_sponsors ?? 0) > 0} hint="Download the DOL LCA disclosure file into backend/data/h1b/ and run: python -m app.h1b import <file> (see README)." />
-            <Integration name="Hunter.io" ok={status?.hunter_configured ?? false} hint="Free key from hunter.io. Set HUNTER_API_KEY in .env for recruiter email lookup." />
-          </ul>
-          <p className="text-xs text-slate-500">After editing .env, restart the backend.</p>
-        </div>
+        {isAdmin && (
+          <div className="space-y-2 border-t border-slate-100 pt-4">
+            <h3 className="text-sm font-medium">Connected services (admin)</h3>
+            <ul className="space-y-1.5">
+              <Integration
+                name="Email"
+                ok={emailMode === 'on'}
+                hint={
+                  emailMode === 'test'
+                    ? 'Test mode: .env points at a local test mail server, so no email reaches a real inbox. Add real SMTP settings (see .env.example).'
+                    : 'Add SMTP settings to .env (see .env.example) so the portal can send account emails and alerts.'
+                }
+              />
+              <Integration name="Adzuna" ok={status?.adzuna_configured ?? false} hint="Free key from developer.adzuna.com. Set ADZUNA_APP_ID and ADZUNA_APP_KEY in .env for jobs from thousands more employers." />
+              <Integration name="Google Jobs (LinkedIn, Indeed, Glassdoor)" ok={status?.jsearch_configured ?? false} hint="Free key from JSearch on RapidAPI. Set JSEARCH_API_KEY in .env, then add searches on the Sources page." />
+              <Integration name={`H-1B sponsor data${status?.h1b_sponsors ? ` (${status.h1b_sponsors.toLocaleString()} employers)` : ''}`} ok={(status?.h1b_sponsors ?? 0) > 0} hint="Download the DOL LCA disclosure file into backend/data/h1b/ and run: python -m app.h1b import <file> (see README)." />
+              <Integration name="Hunter.io" ok={status?.hunter_configured ?? false} hint="Free key from hunter.io. Set HUNTER_API_KEY in .env for recruiter email lookup." />
+            </ul>
+            <p className="text-xs text-slate-500">After editing .env, restart the backend.</p>
+          </div>
+        )}
         <div className="flex items-center gap-3">
           <button disabled={save.isPending} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
             Save

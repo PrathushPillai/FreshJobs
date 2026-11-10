@@ -34,14 +34,19 @@ class WorkableAdapter(Adapter):
     # Requests are spaced out instead of sent two at a time as fast as possible: bursts got HTTP 429 for 3,254
     # of the 4,424 boards. One every 2 s is a full pass in about 2.5 h, inside the 3-hour interval above.
     REQUEST_SPACING = 2.0
-    _spacing_lock: asyncio.Lock | None = None
+    # One lock per event loop: each poll runs in its own asyncio.run(), and a lock made in an earlier poll's
+    # loop raises "bound to a different event loop" (2,361 boards failed that way from 2026-11-04 to 11-09).
+    _spacing_locks: dict[int, asyncio.Lock] = {}
     _last_request = 0.0
 
     async def _wait_turn(self) -> None:
         cls = type(self)
-        if cls._spacing_lock is None:
-            cls._spacing_lock = asyncio.Lock()
-        async with cls._spacing_lock:
+        loop = asyncio.get_running_loop()
+        lock = cls._spacing_locks.get(id(loop))
+        if lock is None:
+            cls._spacing_locks = {id(loop): asyncio.Lock()}  # drop the old loops' locks
+            lock = cls._spacing_locks[id(loop)]
+        async with lock:
             wait = cls._last_request + self.REQUEST_SPACING - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)

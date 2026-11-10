@@ -7,6 +7,7 @@ posting instead of whenever the aggregator picks it up. No network requests: onl
 """
 
 import logging
+import re
 from collections.abc import Iterable
 
 from sqlalchemy import select
@@ -20,6 +21,9 @@ log = logging.getLogger(__name__)
 
 # Big-company sites tracked by one hand-made source each: a link to them is never a new board.
 _SINGLETONS = {"amazon", "microsoft", "google", "apple"}
+
+
+_OPAQUE = re.compile(r"[0-9a-fA-F]{12,}|\d+")
 
 
 def board_key(ats: str, slug: str) -> tuple[str, str]:
@@ -57,7 +61,10 @@ def harvest(session: Session, links: Iterable[tuple[str, str]], limit: int) -> l
         if key in tracked:
             continue
         counts[key] = counts.get(key, 0) + 1
-        found.setdefault(key, (hit[0], hit[1], clean_name(name) or name_from_slug(hit[1])))
+        board_name = clean_name(name) or name_from_slug(hit[1])
+        if _OPAQUE.fullmatch(board_name.replace(" ", "")):
+            continue  # an ID (ADP's career-center GUIDs) would be the employer's name in the feed
+        found.setdefault(key, (hit[0], hit[1], board_name))
 
     added = []
     for key in sorted(found, key=lambda k: -counts[k])[:limit]:

@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { api, formatDateTime, type H1BHistory, type JobDetail as JobDetailType, type MatchDetail, money, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
-import { Badge, CompanyAvatar, ExperienceBadge, MatchRing, RepeatBadge, SponsorBadge, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, CompanyAvatar, ExperienceBadge, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, TrackControl, VisaSignalBadges } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
 function guessEmail(pattern: string, domain: string, name: string): string | null {
@@ -136,6 +136,13 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
   const closedNow = check.data?.open === false
   // Saved without a description (older Workday jobs, list stubs, blank Lever postings): fetch it now.
   const queryClient = useQueryClient()
+  // A check that finds the job gone closes it: reload the lists so it leaves the feed now, not on the next refresh.
+  useEffect(() => {
+    if (closedNow) {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
+      queryClient.invalidateQueries({ queryKey: ['top-matches'] })
+    }
+  }, [closedNow, queryClient])
   const needsDescription = !!j && (j.description ?? '').trim().length < 100
   const describe = useQuery({
     queryKey: ['describe', id],
@@ -186,6 +193,7 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-1.5">
           <ExperienceBadge job={j} />
+          <SponsorLikelyBadge job={j} />
           <SponsorBadge filings={j.h1b_filings} />
           <VisaSignalBadges job={j} />
           {j.remote && <Badge tone="slate">Remote</Badge>}

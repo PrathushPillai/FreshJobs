@@ -10,6 +10,8 @@ save it in backend/data/h1b/, then:
 Each fiscal year's file is cumulative (the Q4 file holds the whole year), so pass the latest file of each
 year; the counts and per-occupation wages cover every file given.
     python -m app.h1b discover --top 2000      # find job boards for the biggest sponsors we don't track
+    python -m app.h1b classify data/h1b/<files>   # fill naics/client-site share/kind without re-importing
+    python -m app.h1b classify                 # recompute kind from the stored columns
 """
 
 import argparse
@@ -109,15 +111,15 @@ _TITLE_NOISE = {
 # don't resemble the job's title. First match wins; patterns are checked against the lowercased title.
 _TITLE_SOC = [
     (r"data engineer|etl|data platform|data infrastructure|data warehouse|database", ["15-1243", "15-1242", "15-1252"]),
-    (r"data scien|machine learning|ml|ai|research scientist|applied scientist|deep learning",
+    (r"data scien|machine learning|\bml\b|\bai\b|research scientist|applied scientist|deep learning",
      ["15-2051", "15-1221", "15-1252"]),
-    (r"data analy|analytics|business intelligence|bi|reporting analyst|insights",
+    (r"data analy|analytics|business intelligence|\bbi\b|reporting analyst|insights",
      ["15-2051", "15-2041", "13-1161", "15-1211", "15-2031"]),
     (r"security|cyber", ["15-1212", "15-1299"]),
-    (r"network|cloud|devops|site reliability|sre|infrastructure|systems? admin", ["15-1244", "15-1241", "15-1252", "15-1299"]),
-    (r"qa|quality assurance|test", ["15-1253", "15-1252"]),
-    (r"web|front.?end|ui|ux", ["15-1254", "15-1255", "15-1252"]),
-    (r"software|developer|programmer|engineer.*(full.?stack|back.?end|mobile|ios|android)|swe|sde",
+    (r"network|cloud|devops|site reliability|\bsre\b|infrastructure|systems? admin", ["15-1244", "15-1241", "15-1252", "15-1299"]),
+    (r"\bqa\b|quality assurance|test", ["15-1253", "15-1252"]),
+    (r"web|front.?end|ui\b|ux", ["15-1254", "15-1255", "15-1252"]),
+    (r"software|developer|programmer|engineer.*(full.?stack|back.?end|mobile|ios|android)|\bswe\b|\bsde\b",
      ["15-1252", "15-1253", "15-1299", "15-1211"]),
     (r"business analyst|systems analyst|product analyst", ["15-1211", "13-1111", "15-2051"]),
     (r"product manager|program manager|project manager", ["11-3021", "15-1299", "13-1082", "13-1111"]),
@@ -226,6 +228,71 @@ def _percentile(values: list[int], q: float) -> int | None:
     return values[min(len(values) - 1, int(q * len(values)))]
 
 
+def _yes(value) -> int:
+    return 1 if str(value or "").strip().upper() in ("Y", "YES") else 0
+
+
+# NAICS codes of IT services firms (custom programming, systems design, other computer services, consulting)
+# and of staffing agencies (employment placement, temporary help, PEOs).
+# Prefixes, since employers write 4, 5 or 6 digits ("5415", "54151", "541511"). Accounting firms (5412: EY,
+# Deloitte & Touche) count only when they also place workers at clients.
+_IT_SERVICES_NAICS = ("5415", "5416", "54199")
+_ACCOUNTING_NAICS = ("5412",)
+_STAFFING_NAICS = ("5613",)
+SERVICES_NAME = re.compile(r"\b(consult\w*|staffing|outsourc\w*|infotech|it services|recruit\w*|manpower|"
+                            r"talent solutions|workforce solutions)\b", re.I)
+
+
+def employer_kind(name: str, naics: str, client_site_share: float | None, dependent_share: float | None) -> str:
+    """ "staffing", "consultancy" or "" (an employer hiring for its own products and operations).
+
+    From its own LCAs: a staffing NAICS code; or workers placed at other companies' sites (SECONDARY_ENTITY)
+    for a large share of filings; or an IT-services NAICS code with H-1B-dependent filings or a services name
+    ("... Consulting", "... Infotech"). Product companies file under their own industry (Google 519290,
+    Microsoft 513210, Nvidia 334413) and almost never place workers at a client.
+    """
+    naics = naics or ""
+    client = client_site_share or 0.0
+    dependent = dependent_share or 0.0
+    if naics.startswith(_STAFFING_NAICS):
+        return "staffing"
+    if client >= CLIENT_SITE_SHARE:
+        return "consultancy"
+    if naics.startswith(_IT_SERVICES_NAICS) and (dependent >= 0.5 or client >= 0.1 or SERVICES_NAME.search(name or "")):
+        return "consultancy"
+    if naics.startswith(_ACCOUNTING_NAICS) and client >= 0.1:
+        return "consultancy"
+    return ""
+
+
+CLIENT_SITE_SHARE = 0.3
+
+
+def reclassify(session: Session) -> int:
+    """Recompute H1BSponsor.kind from the stored NAICS and shares (after changing employer_kind)."""
+    changed = 0
+    for s in session.scalars(select(H1BSponsor)):
+        kind = employer_kind(s.name, s.naics, s.client_site_share, s.dependent_share)
+        if kind != (s.kind or ""):
+            s.kind = kind
+            changed += 1
+    session.commit()
+    return changed
+
+
+def classify_file(session: Session, paths: list[Path]) -> int:
+    """Fill naics, shares and kind on the existing sponsor rows from the LCA files, without re-importing."""
+    sponsors, _ = aggregate(paths)
+    rows = [{"k": s["name_key"], "n": s["naics"], "c": s["client_site_share"], "d": s["dependent_share"],
+             "kind": s["kind"]} for s in sponsors]
+    from sqlalchemy import text
+
+    session.execute(text("UPDATE h1b_sponsors SET naics = :n, client_site_share = :c, dependent_share = :d, "
+                         "kind = :kind WHERE name_key = :k"), rows)
+    session.commit()
+    return sum(1 for r in rows if r["kind"])
+
+
 def aggregate(paths: Path | list[Path]) -> tuple[list[dict], list[dict]]:
     """Certified H-1B LCAs per employer (with their commonest titles and states), and per employer and occupation."""
     filings: Counter = Counter()
@@ -236,6 +303,9 @@ def aggregate(paths: Path | list[Path]) -> tuple[list[dict], list[dict]]:
     role_cities: dict[tuple, Counter] = defaultdict(Counter)
     role_wages: dict[tuple, list[int]] = defaultdict(list)
     soc_names: dict[str, Counter] = defaultdict(Counter)
+    naics: dict[tuple, Counter] = defaultdict(Counter)
+    client_site: Counter = Counter()  # filings placing the worker at another company's site
+    dependent: Counter = Counter()  # filings as an H-1B-dependent employer
     seen = 0
     paths = [paths] if isinstance(paths, Path) else paths
     # One fiscal year's file is cumulative (Q4 holds the whole year), so give one file per year.
@@ -253,6 +323,11 @@ def aggregate(paths: Path | list[Path]) -> tuple[list[dict], list[dict]]:
             continue
         filings[key] += 1
         display[key][name] += 1
+        code = str(r.get("NAICS_CODE") or "").strip().split(".")[0]
+        if code:
+            naics[key][code] += 1
+        client_site[key] += _yes(r.get("SECONDARY_ENTITY"))
+        dependent[key] += _yes(r.get("H_1B_DEPENDENT"))
         title = str(r.get("JOB_TITLE") or "").strip().title()
         state = str(r.get("WORKSITE_STATE") or "").strip().upper()
         if title:
@@ -294,9 +369,14 @@ def aggregate(paths: Path | list[Path]) -> tuple[list[dict], list[dict]]:
             "filings": n,
             "top_titles": [t for t, _ in titles[key].most_common(8)],
             "top_states": [s for s, _ in states[key].most_common(5)],
+            "naics": naics[key].most_common(1)[0][0][:10] if naics[key] else "",
+            "client_site_share": round(client_site[key] / n, 3),
+            "dependent_share": round(dependent[key] / n, 3),
         }
         for key, n in filings.most_common()
     ]
+    for s in sponsors:
+        s["kind"] = employer_kind(s["name"], s["naics"], s["client_site_share"], s["dependent_share"])
     return sponsors, roles
 
 
@@ -347,6 +427,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     imp = sub.add_parser("import")
     imp.add_argument("paths", type=Path, nargs="+")
+    cls = sub.add_parser("classify", help="fill employer kind (consultancy/staffing) from the LCA files")
+    cls.add_argument("paths", type=Path, nargs="*")
     disc = sub.add_parser("discover")
     disc.add_argument("--top", type=int, default=2000)
     args = parser.parse_args()
@@ -358,6 +440,12 @@ def main() -> None:
             source = ", ".join(p.name for p in args.paths)
             n = import_file(session, args.paths, source=source[:200])
             print(f"Imported {n} sponsoring employers from {source}")
+        elif args.cmd == "classify":
+            if args.paths:
+                n = classify_file(session, args.paths)
+                print(f"{n} employers are consultancies or staffing firms")
+            else:
+                print(f"{reclassify(session)} employers changed kind")
         else:
             found = asyncio.run(discover_top(session, args.top))
             print(f"Added {len(found)} job boards: " + ", ".join(f"{c.name} ({c.ats})" for c in found))

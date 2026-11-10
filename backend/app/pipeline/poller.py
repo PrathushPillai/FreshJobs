@@ -6,6 +6,8 @@ Run one poll by hand:  python -m app.pipeline.poller --once
 import argparse
 import asyncio
 import logging
+import re
+import socket
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -19,7 +21,6 @@ from app.config import settings
 from app.db import SessionLocal, init_db
 from app.h1b import sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
-from app.notify.email import send_alert
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
@@ -122,6 +123,36 @@ MIN_DESCRIPTION_CHARS = 100
 
 # Failed polls in a row after which a never-working board that answers 404/410 is switched off.
 DEAD_BOARD_FAILS = 3
+
+# A failed name lookup ("getaddrinfo failed") is either a dead host or this machine being offline (Wi-Fi not
+# back after sleep). On 2026-11-10 one poll right after waking failed 15,973 boards that way, and the idle
+# rule then left them unchecked for 3 hours. So a lookup failure is first checked against a few hosts that
+# are always up: if those fail too, the machine is offline and the board is simply tried again next poll.
+_LOOKUP_FAILED = re.compile(r"getaddrinfo failed|Name or service not known|nodename nor servname|"
+                            r"Temporary failure in name resolution|No address associated with hostname", re.I)
+ONLINE_PROBE_HOSTS = ("www.google.com", "boards-api.greenhouse.io", "www.cloudflare.com")
+_online_cache: tuple[float, bool] | None = None
+
+
+def _resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except OSError:
+        return False
+
+
+async def is_offline(error: str) -> bool:
+    """True if `error` is a failed name lookup and this machine can't resolve well-known hosts either.
+    Answers are cached for 30 s, so a poll with thousands of such errors checks only a few times."""
+    global _online_cache
+    if not _LOOKUP_FAILED.search(error or ""):
+        return False
+    now = time.monotonic()
+    if _online_cache is None or now - _online_cache[0] > 30:
+        results = await asyncio.gather(*(asyncio.to_thread(_resolves, h) for h in ONLINE_PROBE_HOSTS))
+        _online_cache = (now, any(results))
+    return not _online_cache[1]
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -247,8 +278,9 @@ def process_company(
             if job.missed_polls >= settings.missed_polls_to_close:
                 job.closed_at = now
                 session.add(JobEvent(job=job, kind="closed", at=now))
-        elif not ADAPTERS[company.ats].complete_feed and job.last_seen_at < now - timedelta(days=settings.stale_days):
-            # Aggregators only list recent jobs, so age jobs out instead.
+        elif ((not ADAPTERS[company.ats].complete_feed or ADAPTERS[company.ats].capped_ages_out)
+              and job.last_seen_at < now - timedelta(days=settings.stale_days)):
+            # Aggregators (and capped newest-N feeds) only list recent jobs, so age jobs out instead.
             job.closed_at = now
             session.add(JobEvent(job=job, kind="closed", at=now, detail=f"not seen for {settings.stale_days} days"))
 
@@ -361,7 +393,8 @@ async def poll_once(lane: str | None = None) -> dict:
             employers: list[str] = []
             links: list[tuple[str, str]] = []  # (employer, job URL) from aggregators, to find their boards
             # Save each source as soon as it's fetched, so fast boards show up while slow ones are still going.
-            cut_short, saving = 0, 0.0
+            cut_short, saving, offline, taken = 0, 0.0, 0, 0
+            loop_started = time.monotonic()
             for next_done in asyncio.as_completed(fetches, timeout=deadline * 60 if deadline else None):
                 try:
                     company, fetched, complete, error = await next_done
@@ -371,6 +404,22 @@ async def poll_once(lane: str | None = None) -> dict:
                         f.cancel()
                     log.info("%s lane hit its %d-minute deadline; %d sources wait for the next poll", lane, deadline, cut_short)
                     break
+                taken += 1
+                if deadline and time.monotonic() - loop_started > deadline * 60:
+                    # The deadline covers saving too: on 2026-11-10 a poll after a 3-hour backlog had every
+                    # fetch done in minutes, then spent 72 minutes saving 12,603 boards, and no fast board was
+                    # rechecked meanwhile. Unsaved sources keep their last check, so they're first next time.
+                    cut_short = len(fetches) - taken + 1
+                    for f in fetches:
+                        f.cancel()
+                    log.info("%s lane hit its %d-minute deadline while saving; %d sources wait for the next poll",
+                             lane, deadline, cut_short)
+                    break
+                if error is not None and await is_offline(error):
+                    # This machine is offline: the board isn't failing. Leave its last check as it was,
+                    # so it's due again (and first in line) on the next poll.
+                    offline += 1
+                    continue
                 if error is not None:
                     # Don't touch the source's jobs: a failed fetch says nothing about whether they closed.
                     errors += 1
@@ -425,9 +474,7 @@ async def poll_once(lane: str | None = None) -> dict:
                 discovered = await discover(session, client, employers, settings.discovery_per_poll)
             lap("discover")
 
-        emailed = False
-        if to_alert and prefs.email_alerts:
-            emailed = send_alert(to_alert)
+        emailed = False  # alerts are per user and opt-in now: pipeline/alerts.deliver_alerts, after each fast poll
         for j in to_alert:
             j.alerted = True
         session.commit()
@@ -436,7 +483,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
-        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short, "timings": timings,
+        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short, "offline": offline, "timings": timings,
     }
     log.info("Poll finished: %s", summary)
     return summary

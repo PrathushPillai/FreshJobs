@@ -28,6 +28,12 @@ from app.pipeline.sponsorship import find_no_sponsor_phrase, says_sponsors
     "Eligible to obtain and maintain an active U.S. Secret security clearance",
     "Requires U.S. citizenship and residence in approved hiring hub: DC/Maryland/Virginia",
     "Candidates must be legally authorized to work in the United States on a permanent basis.",
+    # K2 Space (ITAR), reported by the user on 2026-11-10: shown as "May sponsor" before.
+    "The person hired for this role must therefore either be a “U.S. person” as defined by 22 C.F.R. "
+    "§ 120.15 or otherwise eligible for a federally issued export control license.",
+    "As defined in the ITAR, “U.S. Persons” include U.S. citizens, lawful permanent residents (i.e., Green "
+    "Card holders), and certain protected individuals (e.g., refugees/asylees, American Samoans).",
+    "Candidates must be U.S. persons as defined under the EAR.",
     "This role is not open for work sponsorship at this time.",
     "WSI will not now or in the future commence an immigration case or \"sponsor\" an individual for this position",
     'This role requires access to export-controlled information or items that require "U.S. persons"',
@@ -49,6 +55,9 @@ def test_rules_out_sponsorship(text):
     # A posting that says "permanent basis" but also says it sponsors is mixed: shown with "Says it sponsors"
     "Candidates must be legally authorized to work in the United States on a permanent basis. "
     "Visa sponsorship is available for this position.",
+    "We comply with ITAR and EAR export regulations.",
+    "Our customers include U.S. persons and businesses across the country.",
+    "You must be a person who loves data and must be a self-starter.",
 ])
 def test_does_not_rule_out(text):
     assert find_no_sponsor_phrase(text) is None, text
@@ -127,3 +136,88 @@ def test_reapplying_rules_gives_what_new_jobs_get(session, now):
     session.commit()
     for job in session.query(Job).all():
         assert derive(job.description, job.seniority) == {f: getattr(job, f) for f in FIELDS}, job.title
+
+
+# Every common way of saying "US citizens / US persons / cleared people only" (2026-11-10).
+@pytest.mark.parametrize("text", [
+    "Must hold U.S. citizenship.",
+    "Candidates must possess US citizenship due to contract requirements.",
+    "Applicants must be citizens of the United States.",
+    "Applicants must be United States citizens.",
+    "U.S. Citizen required.",
+    "US citizenship is mandatory for this position.",
+    "U.S. citizenship is a condition of employment.",
+    "This position requires candidates to be U.S. citizens.",
+    "Citizenship: U.S. Citizen",
+    "Citizenship Requirement: US",
+    "US Citizens only.",
+    "Open only to U.S. citizens.",
+    "Only US citizens will be considered for this role.",
+    "This opportunity is restricted to US citizens.",
+    "USC only",
+    "USC/GC only, W2.",
+    "Visa: USC or GC",
+    "GC holders and US citizens only",
+    "Only US citizens and green card holders",
+    "No H1B. No C2C.",
+    "No OPT/CPT",
+    "No H-1B transfers.",
+    "No visa holders, please.",
+    "H1B candidates need not apply.",
+    "We are unable to work with H1B or OPT candidates.",
+    "Not accepting H-1B at this time.",
+    "Applicants requiring sponsorship now or in the future will not be considered.",
+    "Candidates must not require sponsorship now or in the future.",
+    "This position does not qualify for visa sponsorship.",
+    "We are not currently sponsoring visas.",
+    "Applicants must be a U.S. citizen, U.S. national, lawful permanent resident, or protected individual as defined by "
+    "8 U.S.C. 1324b(a)(3).",
+    "a U.S. person as defined in 22 C.F.R. § 120.62",
+    "Applicants must qualify as a U.S. person under ITAR.",
+    "Candidates must meet the definition of a U.S. Person.",
+    "We will need to verify U.S. person status.",
+    "This role is open only to U.S. persons.",
+    "Due to ITAR restrictions, U.S. citizens only.",
+    "Because this role is subject to export control, you must be a U.S. citizen.",
+    "Secret clearance required.",
+    "Must hold an active TS/SCI clearance with polygraph.",
+    "Must be able to obtain a DoD Secret clearance.",
+    "This is a Public Trust position.",
+    "Active TS/SCI with Full Scope Poly",
+    "Candidates must be clearable.",
+    "DOE Q clearance",
+    "No H1B. USC/GC only.",
+    "Need GC and USC",
+    "Visa : Only citizens and GC",
+])
+def test_rules_out_us_only_wordings(text):
+    assert find_no_sponsor_phrase(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "We are an equal opportunity employer and consider applicants without regard to citizenship status.",
+    "No security clearance required.",
+    "A clearance is not required for this role.",
+    "This role does not require a security clearance.",
+    "Medical clearance is required before your start date.",
+    "Must obtain background clearance and drug screen.",
+    "No opt-out of the 401(k) match.",
+    "Graduates from USC and UCLA are welcome.",
+    "We serve US citizens and businesses across 50 states.",
+    "No visa required for this conference trip.",
+    "Our engineers help U.S. persons file their taxes.",
+    "We sponsor H-1B visas for this role.",
+    # Staffing visa lists that welcome students or H-1B (found in the 2026-11-10 sample of 20,000 jobs):
+    "Work Status: OPT,CPT,GC,EAD",
+    "Need GC,USC,OPT,EAD Candidates that can do an in-person interview",
+    "H1B GC and Citizens Only",
+    "Employee Rights under the Family and Medical Leave Act; and Employee Polygraph Protection Act.",
+    "the successful candidate will be required to provide either proof of their country of citizenship or proof of "
+    "their U.S. permanent residency or other protected status (e.g., under 8 U.S.C. 1324b(a)(3)) for assessment of "
+    "eligibility to access the export-controlled technology.",
+    # Massachusetts' lie detector notice:
+    "It is unlawful in Massachusetts to require or administer a lie detector test as a condition of employment, "
+    "that an individual submit to or take a polygraph examination or similar test.",
+])
+def test_us_only_look_alikes_do_not_match(text):
+    assert find_no_sponsor_phrase(text) is None, find_no_sponsor_phrase(text)

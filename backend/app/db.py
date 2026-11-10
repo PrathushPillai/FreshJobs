@@ -41,10 +41,33 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     _add_missing_columns()
+    _rebuild_applications()
     with engine.begin() as conn:
         conn.execute(text("DROP INDEX IF EXISTS ix_jobs_feed"))  # superseded by ix_jobs_feed_v2
     if is_sqlite:
         _ensure_title_search()
+
+
+def _rebuild_applications() -> None:
+    """Before accounts, a job could be tracked once (UNIQUE job_id). Per user it's once per user, so the table is
+    rebuilt once with the new constraint, keeping every row. SQLite can't drop a constraint in place."""
+    if not is_sqlite:
+        return
+    with engine.begin() as conn:
+        uniques = [r[1] for r in conn.exec_driver_sql("PRAGMA index_list(applications)") if r[2]]
+        old = [i for i in uniques if [c[2] for c in conn.exec_driver_sql(f'PRAGMA index_info("{i}")')] == ["job_id"]]
+        if not old:
+            return
+        cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(applications)")]
+        conn.exec_driver_sql("ALTER TABLE applications RENAME TO applications_old")
+        for (name,) in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='applications_old' "
+                                            "AND name NOT LIKE 'sqlite_autoindex%'").all():
+            conn.exec_driver_sql(f'DROP INDEX "{name}"')
+        Base.metadata.tables["applications"].create(conn)
+        new_cols = {c.name for c in Base.metadata.tables["applications"].columns}
+        keep = ", ".join(f'"{c}"' for c in cols if c in new_cols)
+        conn.exec_driver_sql(f"INSERT INTO applications ({keep}) SELECT {keep} FROM applications_old")
+        conn.exec_driver_sql("DROP TABLE applications_old")
 
 
 def _add_missing_columns() -> None:

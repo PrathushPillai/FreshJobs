@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     yc_sync_hours: int = 24
     # Hours between syncs of the community GitHub job lists into sources (pipeline/startup_lists.py). 0 = off.
     list_sync_hours: int = 12
+    # Always-on board discovery (pipeline/autodiscover.py): employers looked for per run, and how often.
+    autodiscover_per_run: int = 150
+    autodiscover_minutes: int = 60
 
     # Email alerts (leave smtp_host empty to disable)
     smtp_host: str = ""
@@ -77,6 +80,14 @@ class Settings(BaseSettings):
     chat_model: str = "claude-sonnet-5-5"
 
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    # Accounts (app/auth.py)
+    public_url: str = "http://localhost:5173"  # where the site is opened: links in emails point here
+    admin_email: str = ""  # this account is the admin; empty = the first account to sign up (fine locally only)
+    secure_cookies: bool = False  # True behind HTTPS (the cloud server), so the login cookie is never sent over HTTP
+    session_days: int = 30
+    support_email: str = ""  # where Contact & support messages go; empty = ADMIN_EMAIL
+    api_docs: bool = False  # serve /docs and /openapi.json (handy locally; off on the shared server)
 
 
 settings = Settings()

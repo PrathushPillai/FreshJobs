@@ -6,6 +6,8 @@ export interface Place {
   country: string | null
 }
 
+export type SponsorLikely = 'likely' | 'possible' | 'unlikely' | 'ruled_out'
+
 export interface Job {
   id: number
   company: string
@@ -44,6 +46,8 @@ export interface Job {
   exp_level: ExpLevel
   baseline: boolean
   h1b_filings: number | null
+  /** How likely the employer is to sponsor (backend sponsorship.sponsor_likelihood). */
+  sponsor_likely: SponsorLikely
   application: { id: number; status: AppStatus } | null
 }
 
@@ -153,6 +157,116 @@ export function matchTone(score: number): 'strong' | 'good' | 'fair' | 'weak' {
   return score >= 75 ? 'strong' : score >= 60 ? 'good' : score >= 45 ? 'fair' : 'weak'
 }
 
+export interface User {
+  id: number
+  email: string
+  name: string
+  is_admin: boolean
+  email_verified: boolean
+  /** Set while the admin views the portal as this user (read-only). */
+  viewing_as?: { admin_email: string; until?: string | null }
+}
+
+export type AlertFrequency = 'instant' | 'hourly' | 'daily'
+
+export interface AlertSettings {
+  email: string
+  email_verified: boolean
+  email_mode: 'off' | 'test' | 'on'
+  email_alerts: boolean
+  alert_frequency: AlertFrequency
+  alert_min_score: number | null
+  alert_daily_cap: number
+  hide_no_sponsor: boolean
+  exclude_senior: boolean
+  roles: string[]
+  last_alert_at: string | null
+  confirmation_sent?: boolean
+}
+
+export interface AdminEvent {
+  id: number
+  at: string
+  kind: string
+  detail: string
+  ip: string
+  user_id: number | null
+  user_email: string | null
+  actor_email: string | null
+}
+
+export interface AdminOverview {
+  users: number
+  confirmed: number
+  disabled: number
+  alerts_on: number
+  with_resume: number
+  signups_7d: number
+  active_24h: number
+  emails_24h: number
+  emails_failed_24h: number
+  email_daily_limit: number
+  email_mode: 'off' | 'test' | 'on'
+  email_sender: string
+  alerts_24h: number
+  failed_logins_24h: number
+  recruiter_lookups_24h: number
+  last_poll: { finished_at: string | null; sources: number | null; errors: number | null; new_jobs: number | null } | null
+  problems: AdminEvent[]
+}
+
+export interface AdminUser {
+  id: number
+  email: string
+  name: string
+  is_admin: boolean
+  disabled: boolean
+  email_verified: boolean
+  created_at: string
+  last_login_at: string | null
+  last_activity_at: string | null
+  events_7d: number
+  alerts_on: boolean
+  alert_frequency: AlertFrequency | null
+  roles: string[]
+  has_resume: boolean
+  tracked: number
+}
+
+export interface AdminUserView {
+  account: { id: number; email: string; name: string; is_admin: boolean; disabled: boolean; email_verified: boolean; created_at: string; last_login_at: string | null; sessions: number }
+  roles: string[]
+  excluded: string[]
+  alerts: {
+    on: boolean; frequency: AlertFrequency; min_score: number | null; daily_cap: number; sent_today: number
+    last_alert_at: string | null; due_now: boolean; hide_no_sponsor: boolean; exclude_senior: boolean
+    next_alert: { title: string; company: string; first_seen_at: string }[]; next_alert_count: number
+  }
+  resume: {
+    uploaded: boolean; filename: string; uploaded_at: string | null; skills: string[]; years: number | null; degree: string
+    target_roles: string[]; visa_status: string; needs_sponsorship: boolean | null; scored: number
+    top_matches: { job_id: number; title: string; score: number }[]
+  }
+  tracker: { company: string; title: string; status: string; applied_at: string | null; created_at: string }[]
+  activity: AdminEvent[]
+}
+
+export interface SupportItem {
+  id: number
+  at: string
+  user_id: number | null
+  email: string
+  name: string
+  topic: string
+  topic_label: string
+  message: string
+  page: string
+  emailed: boolean
+  status: 'open' | 'done'
+}
+
+export type SupportTopic = 'question' | 'bug' | 'idea' | 'account' | 'other'
+
 export interface Prefs {
   include_keywords: string[]
   exclude_keywords: string[]
@@ -230,6 +344,8 @@ export interface JobQuery {
   max_years?: number
   remote_only?: boolean
   sponsors_only?: boolean
+  /** 'likely': likely sponsors only; 'possible': likely or possible; 'any': no filter. */
+  sponsor_likely?: 'any' | 'likely' | 'possible'
   everify_only?: boolean
   /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
   fresh_counts?: boolean
@@ -259,6 +375,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init })
   } catch {
     throw new BackendDown()
+  }
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
+    // The session ended (logged out elsewhere, expired): App shows the login screen.
+    window.dispatchEvent(new Event('freshjobs:logged-out'))
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '')
@@ -320,6 +440,40 @@ export const api = {
   savePrefs: (prefs: Prefs) => request<Prefs>('/api/prefs', { method: 'PUT', body: JSON.stringify(prefs) }),
   status: () => request<Status>('/api/status'),
   poll: () => request<{ started: boolean }>('/api/poll', { method: 'POST' }),
+  me: () => request<User>('/api/auth/me'),
+  signup: (name: string, email: string, password: string) =>
+    request<User>('/api/auth/signup', { method: 'POST', body: JSON.stringify({ name, email, password }) }),
+  login: (email: string, password: string) =>
+    request<User>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  verifyEmail: (token: string) => request<User>('/api/auth/verify', { method: 'POST', body: JSON.stringify({ token }) }),
+  resendVerification: () => request<{ sent: boolean; already_verified?: boolean }>('/api/auth/resend-verification', { method: 'POST' }),
+  forgotPassword: (email: string) => request<{ ok: boolean }>('/api/auth/forgot', { method: 'POST', body: JSON.stringify({ email }) }),
+  resetPassword: (token: string, password: string) =>
+    request<User>('/api/auth/reset', { method: 'POST', body: JSON.stringify({ token, password }) }),
+  changePassword: (current: string, next: string) =>
+    request<{ ok: boolean }>('/api/auth/password', { method: 'POST', body: JSON.stringify({ current, new: next }) }),
+  deleteAccount: (password: string) => request<{ ok: boolean }>('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ password }) }),
+  sendSupport: (body: { topic: SupportTopic; message: string; email?: string; name?: string; page?: string }) =>
+    request<{ ok: boolean; id: number }>('/api/support', { method: 'POST', body: JSON.stringify(body) }),
+  adminOverview: () => request<AdminOverview>('/api/admin/overview'),
+  adminUsers: (q: string) => request<AdminUser[]>(`/api/admin/users?${toParams({ q })}`),
+  adminActivity: (p: { user_id?: number; kind?: string; problems?: boolean; limit?: number }) =>
+    request<AdminEvent[]>(`/api/admin/activity?${toParams(p)}`),
+  adminUser: (id: number) => request<AdminUserView>(`/api/admin/users/${id}`),
+  adminDisable: (id: number, disabled: boolean) =>
+    request<{ ok: boolean }>(`/api/admin/users/${id}/disable`, { method: 'POST', body: JSON.stringify({ disabled }) }),
+  adminAlertsOff: (id: number) => request<{ ok: boolean }>(`/api/admin/users/${id}/alerts-off`, { method: 'POST' }),
+  adminResend: (id: number) => request<{ sent: boolean; already_verified?: boolean }>(`/api/admin/users/${id}/resend-verification`, { method: 'POST' }),
+  startViewAs: (id: number) => request<User>(`/api/admin/users/${id}/view-as`, { method: 'POST' }),
+  stopViewAs: () => request<User>('/api/admin/view-as/stop', { method: 'POST' }),
+  adminDelete: (id: number) => request<{ ok: boolean }>(`/api/admin/users/${id}`, { method: 'DELETE' }),
+  adminSupport: () => request<SupportItem[]>('/api/admin/support'),
+  adminSupportStatus: (id: number, status: 'open' | 'done') =>
+    request<{ ok: boolean }>(`/api/admin/support/${id}`, { method: 'POST', body: JSON.stringify({ status }) }),
+  alertSettings: () => request<AlertSettings>('/api/alerts/settings'),
+  saveAlertSettings: (patch: Partial<Pick<AlertSettings, 'email_alerts' | 'alert_frequency' | 'alert_min_score' | 'alert_daily_cap' | 'hide_no_sponsor' | 'exclude_senior'>>) =>
+    request<AlertSettings>('/api/alerts/settings', { method: 'PUT', body: JSON.stringify(patch) }),
   testEmail: () => request<{ sent: boolean; detail: string; mode: string }>('/api/alerts/test', { method: 'POST' }),
 }
 

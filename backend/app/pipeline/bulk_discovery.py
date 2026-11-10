@@ -8,6 +8,7 @@
     python -m app.pipeline.bulk_discovery fix-workday         # repair Workday sources named after a file (robots.txt)
     python -m app.pipeline.bulk_discovery ai-portfolios       # boards behind AI investors' portfolio company websites
     python -m app.pipeline.bulk_discovery niche --sector robotics|health|all [--dry-run]   # robotics and healthcare
+    python -m app.pipeline.bulk_discovery products [--only vc|pages|lists] [--dry-run]   # product companies (pipeline/product_lists.py)
 
 VC job sites: only ones whose robots.txt allows crawling and that don't ask scrapers to use a paid API
 instead. Getro-hosted boards (General Catalyst, Accel...) ask for that, and Consider-hosted ones
@@ -513,6 +514,9 @@ def main() -> None:
     niche.add_argument("--sector", choices=["robotics", "health", "all"], default="all")
     niche.add_argument("--dry-run", action="store_true", help="find boards behind the list websites, save nothing")
     niche.add_argument("--sponsors", type=int, default=3000, help="how many of the sector's H-1B sponsors to probe")
+    products = sub.add_parser("products", help="product companies from VC portfolios and curated GitHub lists")
+    products.add_argument("--only", choices=["vc", "pages", "lists"])
+    products.add_argument("--dry-run", action="store_true", help="find the boards, save nothing")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
@@ -538,6 +542,10 @@ def main() -> None:
                 return await from_ai_portfolios(client)
             if args.cmd == "niche":
                 return await from_niche(client, args.sector, args.dry_run, args.sponsors)
+            if args.cmd == "products":
+                from app.pipeline.product_lists import from_products
+
+                return await from_products(client, args.only, args.dry_run)
             return await from_commoncrawl(client, args.indexes, args.patterns)
 
     n = asyncio.run(run())

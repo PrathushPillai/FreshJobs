@@ -260,3 +260,114 @@ async def test_dead_boards_are_switched_off_after_three_404s(session, monkeypatc
     dead, fine = session.query(Company).filter_by(slug="dead").one(), session.query(Company).filter_by(slug="fine").one()
     assert not dead.enabled and "never worked" in dead.last_status and dead.fail_streak == 3
     assert fine.enabled and fine.fail_streak == 3  # it worked before: a 404 may be temporary
+
+
+@pytest.mark.asyncio
+async def test_network_down_does_not_count_as_a_failing_board(session, monkeypatch, tmp_path):
+    """A poll while the laptop is offline (Wi-Fi not back after sleep) leaves boards due for the next poll;
+    a lookup failure while the machine is online still counts against the board."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    import httpx
+
+    from app.config import settings
+    from app.pipeline import poller
+    from app.sources import ADAPTERS
+    from app.sources.base import Adapter
+
+    class NoDns(Adapter):
+        ats = "nodns"
+
+        async def fetch(self, client, slug, **_):
+            raise httpx.ConnectError("[Errno 11001] getaddrinfo failed")
+
+    monkeypatch.setitem(ADAPTERS, "nodns", NoDns())
+    empty = tmp_path / "companies.yaml"
+    empty.write_text("[]")
+    monkeypatch.setattr(settings, "companies_file", empty)
+
+    async def nothing(*a, **k):
+        return []
+
+    monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
+    monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
+    earlier = datetime(2026, 11, 10, 3, 0, tzinfo=timezone.utc)
+    session.add(Company(name="Acme", ats="nodns", slug="acme", poll_count=5, last_polled_at=earlier,
+                        last_ok_at=earlier, last_status="ok (12 open)"))
+    session.commit()
+
+    monkeypatch.setattr(poller, "_online_cache", None)
+    monkeypatch.setattr(poller, "_resolves", lambda host: False)  # offline
+    summary = await poller.poll_once("fast")
+    session.expire_all()
+    acme = session.query(Company).one()
+    assert summary["offline"] == 1 and summary["errors"] == 0
+    assert acme.fail_streak == 0 and acme.last_status == "ok (12 open)" and acme.last_polled_at == earlier
+    assert poller._due(acme, datetime.now(timezone.utc))  # first in line next poll
+
+    monkeypatch.setattr(poller, "_online_cache", None)
+    monkeypatch.setattr(poller, "_resolves", lambda host: True)  # online: this board's host really is gone
+    summary = await poller.poll_once("fast")
+    session.expire_all()
+    acme = session.query(Company).one()
+    assert summary["offline"] == 0 and summary["errors"] == 1
+    assert acme.fail_streak == 1 and acme.last_status.startswith("error: ConnectError")
+
+
+@pytest.mark.asyncio
+async def test_is_offline_only_for_lookup_failures(monkeypatch):
+    from app.pipeline import poller
+
+    monkeypatch.setattr(poller, "_online_cache", None)
+    monkeypatch.setattr(poller, "_resolves", lambda host: False)
+    assert await poller.is_offline("ConnectError: [Errno 11001] getaddrinfo failed")
+    assert not await poller.is_offline("HTTP 404")
+    assert not await poller.is_offline("ReadTimeout: ")
+
+
+@pytest.mark.asyncio
+async def test_deadline_also_bounds_saving(session, monkeypatch, tmp_path):
+    """Every fetch finishes at once, but saving is slow: the poll still ends at its deadline."""
+    import asyncio
+    import time as _time
+
+    from app.config import settings
+    from app.pipeline import poller
+    from app.sources import ADAPTERS
+    from app.sources.base import Adapter
+
+    class Quick(Adapter):
+        ats = "quick"
+
+        async def fetch(self, client, slug, **_):
+            return [nj(slug)]
+
+    monkeypatch.setitem(ADAPTERS, "quick", Quick())
+    empty = tmp_path / "companies.yaml"
+    empty.write_text("[]")
+    monkeypatch.setattr(settings, "companies_file", empty)
+    monkeypatch.setattr(settings, "poll_deadline_minutes", {"fast": 0.01})  # 0.6 s
+
+    async def nothing(*a, **k):
+        return []
+
+    monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
+    monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
+    real_save = poller._save
+
+    def slow_save(*a, **k):
+        _time.sleep(0.25)
+        return real_save(*a, **k)
+
+    monkeypatch.setattr(poller, "_save", slow_save)
+    session.add_all([Company(name=f"Q{i}", ats="quick", slug=f"q{i}") for i in range(10)])
+    session.commit()
+
+    summary = await poller.poll_once("fast")
+    session.expire_all()
+    saved = session.query(Company).filter(Company.poll_count > 0).count()
+    assert 0 < saved < 10 and summary["cut_short"] == 10 - saved
+    assert session.query(Company).filter(Company.last_polled_at.is_(None)).count() == 10 - saved

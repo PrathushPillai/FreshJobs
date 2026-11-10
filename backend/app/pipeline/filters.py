@@ -33,7 +33,8 @@ US_CITIES = [
 ]
 _US_WORDS = re.compile(r"\b(united states|usa|u\.s\.a?\.?|us|america)\b", re.I)
 _STATE_CODE = re.compile(r",\s*(" + "|".join(US_STATES) + r")\b")
-_STATE_NAME = re.compile(r"\b(" + "|".join(US_STATES.values()) + r")\b", re.I)
+# "Baja California" is in Mexico, not the US state inside its name.
+_STATE_NAME = re.compile(r"(?<!baja )\b(" +"|".join(US_STATES.values()) + r")\b", re.I)
 _CITY = re.compile(r"\b(" + "|".join(US_CITIES) + r")\b", re.I)
 _NON_US = re.compile(
     r"\b(canada|toronto|vancouver|montreal|uk|united kingdom|london|ireland|dublin|germany|berlin|munich|"

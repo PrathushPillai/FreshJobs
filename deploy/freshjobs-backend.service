@@ -1,0 +1,19 @@
+[Unit]
+Description=FreshJobs backend (API, job pollers, alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/freshjobs/backend
+# One worker: the pollers and the scheduler live in this process. Caddy in front handles HTTPS; the proxy
+# headers give the backend the real client address (login limits, activity log) and the https scheme.
+ExecStart=/home/ubuntu/freshjobs/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+# Starting reads a multi-GB database; give it time before systemd gives up.
+TimeoutStartSec=900
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

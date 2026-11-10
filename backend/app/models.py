@@ -137,7 +137,7 @@ class Job(Base):
     company: Mapped[Company] = relationship(back_populates="jobs")
     events: Mapped[list["JobEvent"]] = relationship(back_populates="job", order_by="JobEvent.at")
     places: Mapped[list["JobLocation"]] = relationship(back_populates="job", cascade="all, delete-orphan")
-    application: Mapped["Application | None"] = relationship(back_populates="job", uselist=False)
+    applications: Mapped[list["Application"]] = relationship(back_populates="job")  # one per user tracking it
 
 
 class JobLocation(Base):
@@ -175,14 +175,25 @@ class JobEvent(Base):
 
 
 class UserPrefs(Base):
-    """Single-row table holding the user's filter settings."""
+    """A user's roles ("For you") and alert settings. One row per user (app/prefs.get_prefs)."""
 
     __tablename__ = "user_prefs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     include_keywords: Mapped[list] = mapped_column(JSON)
     exclude_keywords: Mapped[list] = mapped_column(JSON)
-    email_alerts: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Alerts are opt-in: off until the user switches them on (which sends a confirmation email).
+    email_alerts: Mapped[bool] = mapped_column(Boolean, default=False)
+    alert_frequency: Mapped[str] = mapped_column(String(10), default="instant")  # instant (at most hourly) | hourly | daily
+    alert_min_score: Mapped[int | None] = mapped_column(Integer)  # only jobs whose resume match is at least this
+    alert_daily_cap: Mapped[int] = mapped_column(Integer, default=10)  # emails per day, at most
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Jobs we found after this are new for the user's next alert; moves forward with each email (and starts at
+    # the moment alerts are switched on, so nobody gets a backlog).
+    alert_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    alerts_sent_on: Mapped[date | None] = mapped_column(Date)  # the day alerts_sent_today counts
+    alerts_sent_today: Mapped[int] = mapped_column(Integer, default=0)
     hide_no_sponsor: Mapped[bool] = mapped_column(Boolean, default=True)
     exclude_senior: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -196,6 +207,7 @@ class UserProfile(Base):
     __tablename__ = "user_profile"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     filename: Mapped[str] = mapped_column(String(300), default="")
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resume_text: Mapped[str] = mapped_column(Text, default="")
@@ -224,27 +236,107 @@ class JobVector(Base):
 
 
 class JobMatch(Base):
-    """How well the profile fits a job (app/matching.py score), for one profile version."""
+    """How well one user's profile fits a job (app/matching.py score), for one profile version.
 
-    __tablename__ = "job_matches"
-    __table_args__ = (Index("ix_job_matches_version_score", "profile_version", "score"),)
+    Per user since accounts (2026-11-09); the single-user table it replaced was job_matches (kept, unused)."""
 
+    __tablename__ = "user_job_matches"
+    __table_args__ = (Index("ix_user_job_matches_score", "user_id", "profile_version", "score"),)
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
     profile_version: Mapped[int] = mapped_column(Integer)
     score: Mapped[int] = mapped_column(Integer)
     detail: Mapped[dict] = mapped_column(JSON)  # parts, matched/missing skills, notes
 
 
+class User(Base):
+    """An account (app/auth.py). The first one, or the one with settings.admin_email, is the admin."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True)  # stored lowercased
+    name: Mapped[str] = mapped_column(String(120), default="")
+    password_hash: Mapped[str] = mapped_column(String(300))  # scrypt$n$r$p$salt$hash (app/auth.hash_password)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unsubscribe_token: Mapped[str] = mapped_column(String(64), unique=True)  # one-click unsubscribe, no login
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)  # set by the admin: can't log in, gets no email
+
+
+class AuthSession(Base):
+    """A logged-in browser. The cookie holds a random token; only its SHA-256 is stored."""
+
+    __tablename__ = "auth_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # The admin viewing the portal as this user (read-only, 1 hour); user_id stays the admin (app/auth.py).
+    view_as_user_id: Mapped[int | None] = mapped_column(Integer)
+
+
+class AuthToken(Base):
+    """A one-time link sent by email: confirm the address, or reset the password. Only its SHA-256 is stored."""
+
+    __tablename__ = "auth_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    purpose: Mapped[str] = mapped_column(String(10))  # "verify" | "reset"
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Activity(Base):
+    """Something that happened to an account, for the admin's activity log (app/activity.py). Never holds
+    passwords, tokens or resume text."""
+
+    __tablename__ = "activity"
+    __table_args__ = (Index("ix_activity_user_at", "user_id", "at"), Index("ix_activity_kind_at", "kind", "at"))
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer)  # the account it's about (kept after the account is deleted)
+    actor_id: Mapped[int | None] = mapped_column(Integer)  # an admin acting on someone else's account
+    kind: Mapped[str] = mapped_column(String(40))
+    detail: Mapped[str] = mapped_column(String(500), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+
+
+class SupportRequest(Base):
+    """A message sent through "Contact & support" (app/support.py): emailed to the admin and kept here."""
+
+    __tablename__ = "support_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer)  # None when sent from the login screen
+    email: Mapped[str] = mapped_column(String(320))  # where to reply
+    name: Mapped[str] = mapped_column(String(120), default="")
+    topic: Mapped[str] = mapped_column(String(20))  # question | bug | idea | account | other
+    message: Mapped[str] = mapped_column(Text)
+    page: Mapped[str] = mapped_column(String(200), default="")  # the tab they were on
+    emailed: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(10), default="open")  # open | done
+
+
 APPLICATION_STATUSES = ["saved", "applied", "assessment", "interviewing", "offer", "rejected", "withdrawn", "ghosted"]
 
 
 class Application(Base):
-    """A job the user is tracking. Copies the job's basics so it survives the job closing (or a manual entry)."""
+    """A job a user is tracking. Copies the job's basics so it survives the job closing (or a manual entry)."""
 
     __tablename__ = "applications"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_applications_user_job"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), unique=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), index=True)
     company: Mapped[str] = mapped_column(String(200))
     title: Mapped[str] = mapped_column(String(400))
     url: Mapped[str] = mapped_column(String(1000), default="")
@@ -256,7 +348,7 @@ class Application(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    job: Mapped[Job | None] = relationship(back_populates="application")
+    job: Mapped[Job | None] = relationship(back_populates="applications")
 
 
 class RecruiterCache(Base):
@@ -291,6 +383,14 @@ class H1BSponsor(Base):
     top_titles: Mapped[list] = mapped_column(JSON, default=list)
     top_states: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(200), default="")  # file it came from
+    # What kind of employer it is, from its LCAs (see h1b.employer_kind): its commonest NAICS industry code,
+    # the share of filings that place the worker at another company's site (SECONDARY_ENTITY = Y), and the
+    # share filed as an H-1B-dependent employer. kind is "consultancy", "staffing" or "" (a company hiring
+    # for itself).
+    naics: Mapped[str] = mapped_column(String(10), default="")
+    client_site_share: Mapped[float | None] = mapped_column(Float)
+    dependent_share: Mapped[float | None] = mapped_column(Float)
+    kind: Mapped[str] = mapped_column(String(20), default="")
 
 
 class USCISH1B(Base):

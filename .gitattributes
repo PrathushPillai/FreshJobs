@@ -1,0 +1,3 @@
+# Scripts and configs that run on the Linux server must keep Unix line endings.
+*.sh text eol=lf
+deploy/* text eol=lf

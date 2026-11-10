@@ -1,0 +1,25 @@
+# FreshJobs on the server. {{DOMAIN}} is filled in by setup-server.sh. Caddy gets and renews the HTTPS
+# certificate by itself (Let's Encrypt), and redirects http:// to https://.
+{{DOMAIN}} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
+	# The API (and the one-click unsubscribe links in emails) go to the backend.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Everything else is the built React app; unknown paths load index.html (the app reads ?verify=, ?reset=).
+	handle {
+		root * /home/ubuntu/freshjobs/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

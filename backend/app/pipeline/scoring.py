@@ -30,22 +30,25 @@ from app.prefs import get_prefs
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
 BATCH = 64  # saved per batch, so progress shows and a restart loses little
-progress: dict = {"running": False, "scored": 0, "total": 0}
+progress: dict = {"running": False, "scored": 0, "total": 0, "user_id": None}
 
 
-def get_profile(session: Session) -> UserProfile | None:
-    return session.get(UserProfile, 1)
+def get_profile(session: Session, user_id: int | None = None) -> UserProfile | None:
+    """A user's resume profile (None until they upload one). Without a user: the row from before accounts."""
+    if user_id is None:
+        return session.get(UserProfile, 1)
+    return session.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
 
 
 def profile_view(session: Session, profile: UserProfile) -> dict:
     """What score() needs to know about the user. Target roles: the resume's plus the "Your roles" list."""
-    prefs = get_prefs(session)
+    prefs = get_prefs(session, profile.user_id) if profile.user_id else get_prefs(session)
     targets = list(dict.fromkeys([*(profile.target_roles or []), *(prefs.include_keywords or [])]))
     related = sorted({t for role in targets for t in expand_query(role)[1:]} - set(targets))
     return {
         "skills": profile.skills or [], "years": profile.years, "degree": profile.degree or "",
         "target_roles": targets, "related_roles": related, "needs_sponsorship": profile.needs_sponsorship,
-        "locations": profile.locations or [], "version": profile.version,
+        "locations": profile.locations or [], "version": profile.version, "user_id": profile.user_id,
         "vector": np.frombuffer(profile.vector, dtype=np.float32) if profile.vector else None,
     }
 
@@ -81,28 +84,32 @@ def _score_jobs(session: Session, jobs: list[Job], view: dict) -> list[JobMatch]
     for job in jobs:
         cos = float(np.dot(view["vector"], vectors[job.id])) if view["vector"] is not None else None
         result = matching.score(view, _job_view(job, view), cos)
-        rows.append(JobMatch(job_id=job.id, profile_version=view["version"], score=result["score"], detail=result))
+        rows.append(JobMatch(user_id=view["user_id"], job_id=job.id, profile_version=view["version"], score=result["score"], detail=result))
     for row in rows:
         session.merge(row)
     return rows
 
 
-def stored_scores(session: Session, job_ids: list[int]) -> dict[int, JobMatch]:
-    """The current profile's saved matches for these jobs; scores nothing (lists never wait for embedding)."""
-    profile = get_profile(session)
-    if not profile or not profile.resume_text or not job_ids:
-        return {}
+def _saved(session: Session, profile: UserProfile, job_ids: list[int]) -> dict[int, JobMatch]:
     return {m.job_id: m for m in session.scalars(
-        select(JobMatch).where(JobMatch.job_id.in_(job_ids), JobMatch.profile_version == profile.version))}
+        select(JobMatch).where(JobMatch.user_id == profile.user_id, JobMatch.job_id.in_(job_ids),
+                               JobMatch.profile_version == profile.version))}
 
 
-def ensure_scores(session: Session, job_ids: list[int]) -> dict[int, JobMatch]:
-    """Matches for these jobs (a page of results), scoring the ones not scored for the current profile."""
-    profile = get_profile(session)
+def stored_scores(session: Session, job_ids: list[int], user_id: int | None) -> dict[int, JobMatch]:
+    """This user's saved matches for these jobs; scores nothing (lists never wait for embedding)."""
+    profile = get_profile(session, user_id) if user_id else None
     if not profile or not profile.resume_text or not job_ids:
         return {}
-    found = {m.job_id: m for m in session.scalars(
-        select(JobMatch).where(JobMatch.job_id.in_(job_ids), JobMatch.profile_version == profile.version))}
+    return _saved(session, profile, job_ids)
+
+
+def ensure_scores(session: Session, job_ids: list[int], user_id: int | None) -> dict[int, JobMatch]:
+    """This user's matches for these jobs (a page of results), scoring the ones not scored for their profile."""
+    profile = get_profile(session, user_id) if user_id else None
+    if not profile or not profile.resume_text or not job_ids:
+        return {}
+    found = _saved(session, profile, job_ids)
     missing = [i for i in job_ids if i not in found]
     if missing:
         view = profile_view(session, profile)
@@ -170,26 +177,45 @@ def status() -> dict:
 
 
 def refresh() -> int:
-    """Score every open US "For you" job (newest first) not yet scored for the current profile; returns how many were scored."""
+    """For every user with a resume: score their open US For you jobs (newest first) not yet scored for their
+    current profile. Returns how many were scored in all."""
     if not _lock.acquire(blocking=False):
-        return 0  # already running; it picks up the latest profile version as it goes
+        return 0  # already running; it picks up the latest profile versions as it goes
+    try:
+        with SessionLocal() as session:
+            users = [p.user_id for p in session.scalars(select(UserProfile).where(UserProfile.user_id.is_not(None)))
+                     if p.resume_text]
+        return sum(_refresh_user(u) for u in users)
+    finally:
+        progress["running"] = False
+        _save_progress()
+        _lock.release()
+
+
+def _refresh_user(user_id: int) -> int:
+    from app.pipeline.filters import role_matches
+
     scored = 0
     try:
         with SessionLocal() as session:
-            profile = get_profile(session)
+            profile = get_profile(session, user_id)
             if not profile or not profile.resume_text:
                 return 0
             view = profile_view(session, profile)
-            current = exists().where(JobMatch.job_id == Job.id, JobMatch.profile_version == view["version"])
-            todo = list(session.scalars(
-                select(Job.id).where(Job.closed_at.is_(None), Job.is_repost.is_(False), Job.role_match.is_(True),
-                                    Job.us_eligible.is_(True), ~current)
-                .order_by(Job.id.desc())))
-        progress.update(running=True, scored=0, total=len(todo))
+            prefs = get_prefs(session, user_id)
+            current = exists().where(JobMatch.user_id == user_id, JobMatch.job_id == Job.id,
+                                     JobMatch.profile_version == view["version"])
+            # Job.role_match is "someone's For you"; this user's own roles pick their jobs from it.
+            rows = session.execute(
+                select(Job.id, Job.title).where(Job.closed_at.is_(None), Job.is_repost.is_(False), Job.role_match.is_(True),
+                                                Job.us_eligible.is_(True), ~current)
+                .order_by(Job.id.desc())).all()
+            todo = [i for i, t in rows if role_matches(t or "", prefs.include_keywords, prefs.exclude_keywords)]
+        progress.update(running=True, scored=0, total=len(todo), user_id=user_id)
         _save_progress()
         for start in range(0, len(todo), BATCH):
             with SessionLocal() as session:
-                profile = get_profile(session)
+                profile = get_profile(session, user_id)
                 if not profile or profile.version != view["version"]:
                     break  # the resume or profile changed: the next refresh starts over with it
                 jobs = list(session.scalars(
@@ -198,14 +224,11 @@ def refresh() -> int:
                 session.commit()
             progress["scored"] = scored
             _save_progress()
-        log.info("Scored %d jobs against the resume", scored)
+        log.info("Scored %d jobs against user %d's resume", scored, user_id)
         return scored
     except Exception:
-        log.exception("Scoring jobs against the resume failed")
+        log.exception("Scoring jobs against user %d's resume failed", user_id)
         return scored
-    finally:
-        progress["running"] = False
-        _lock.release()
 
 
 def refresh_in_background() -> None:
@@ -222,12 +245,17 @@ def refresh_in_background() -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
 
-def repair_resume(session: Session) -> bool:
+def repair_resumes(session: Session) -> int:
+    """repair_resume for every saved profile; returns how many were repaired."""
+    return sum(repair_resume(session, p) for p in list(session.scalars(select(UserProfile))))
+
+
+def repair_resume(session: Session, profile: UserProfile | None = None) -> bool:
     """Re-space a saved resume whose words ran together (matching.respace), once. Fields the user edited are kept:
     a field is replaced only if it still equals what the old text gave. Bumps the version, so jobs are rescored."""
     from datetime import date
 
-    profile = get_profile(session)
+    profile = profile or get_profile(session)
     if not profile or not profile.resume_text or matching.spacing(profile.resume_text) >= matching.WELL_SPACED:
         return False
     old, new = profile.resume_text, matching.respace(profile.resume_text)
@@ -260,7 +288,7 @@ def main() -> None:
         return  # another scoring process is running
     try:
         with SessionLocal() as session:
-            repair_resume(session)  # resumes saved before re-spacing existed
+            repair_resumes(session)  # resumes saved before re-spacing existed
         while refresh() > 0:  # again, for jobs found or a profile changed while scoring
             pass
     finally:

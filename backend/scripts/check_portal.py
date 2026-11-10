@@ -3,7 +3,10 @@
     .venv/Scripts/python.exe scripts/check_portal.py                 # backend :8000, frontend :5173
     .venv/Scripts/python.exe scripts/check_portal.py --no-frontend
 
-Read-only: GET requests only, so it never changes jobs, the tracker, prefs or the resume. It checks that every
+Read-only: besides logging in, GET requests only, so it never changes jobs, the tracker, prefs or the resume.
+It logs in as a dedicated check account (an ordinary user, portal-check@freshjobs.local), signed up on the
+first run with a random password kept next to the database (check_account.json), never in the repo. Set
+FRESHJOBS_CHECK_EMAIL and FRESHJOBS_CHECK_PASSWORD to use another account. It checks that every
 page the UI uses answers, and that the answers are *right*: each sort is in order, each filter only returns
 jobs that pass it, search ranks the typed title first, pages don't overlap, counts add up. The unit tests
 (pytest) cover logic on small made-up data; this covers the real 1.6M-job database, where slow queries and odd
@@ -14,7 +17,10 @@ Exit code 1 if anything failed.
 """
 
 import argparse
+import json
+import os
 import random
+import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -79,6 +85,11 @@ def checks(ck: Check, frontend: str | None) -> None:
         return items
 
     # --- basics -----------------------------------------------------------------------------------------
+    def login_required():
+        r = httpx.get(str(ck.c.base_url) + "/api/jobs", timeout=60)  # no cookie
+        assert r.status_code == 401, f"job list answered HTTP {r.status_code} without a login"
+    ck.run("login required", login_required)
+
     def status():
         r, _ = ck.get("/api/status")
         assert r.status_code == 200, f"HTTP {r.status_code}"
@@ -289,6 +300,27 @@ def checks(ck: Check, frontend: str | None) -> None:
         ck.run("frontend and its /api proxy", front)
 
 
+def _log_in(client: httpx.Client) -> None:
+    email, password = os.environ.get("FRESHJOBS_CHECK_EMAIL"), os.environ.get("FRESHJOBS_CHECK_PASSWORD")
+    if not (email and password):
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from app.matching import _models_dir  # the folder next to the database
+
+        path = os.path.join(os.path.dirname(_models_dir()), "check_account.json")
+        if os.path.exists(path):
+            saved = json.load(open(path, encoding="utf-8"))
+            email, password = saved["email"], saved["password"]
+        else:
+            email, password = "portal-check@freshjobs.local", secrets.token_urlsafe(18)
+            r = client.post("/api/auth/signup", json={"name": "Portal check", "email": email, "password": password})
+            if r.status_code not in (200, 409):
+                sys.exit(f"Couldn't create the check account: HTTP {r.status_code} {r.text[:200]}")
+            json.dump({"email": email, "password": password}, open(path, "w", encoding="utf-8"))
+    r = client.post("/api/auth/login", json={"email": email, "password": password})
+    if r.status_code != 200:
+        sys.exit(f"Couldn't log in as {email}: HTTP {r.status_code} {r.text[:200]}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8000")
@@ -296,6 +328,7 @@ def main() -> None:
     ap.add_argument("--no-frontend", action="store_true")
     args = ap.parse_args()
     with httpx.Client(base_url=args.base, timeout=120) as client:
+        _log_in(client)
         checks(Check(client), None if args.no_frontend else args.frontend)
     width = max(len(n) for _, n, _, _ in RESULTS)
     for status, name, secs, detail in RESULTS:

@@ -22,12 +22,14 @@ const TONES = {
   slate: 'bg-slate-100 text-slate-600 ring-slate-200/80',
   blue: 'bg-sky-50 text-sky-700 ring-sky-200/80',
   violet: 'bg-brand-50 text-brand-700 ring-brand-200/80',
+  teal: 'bg-teal-50 text-teal-700 ring-teal-200/80',
 }
 const DOTS = {
   green: 'bg-emerald-500',
   amber: 'bg-amber-500',
   red: 'bg-rose-500',
   slate: 'bg-slate-400',
+  teal: 'bg-teal-500',
   blue: 'bg-sky-500',
   violet: 'bg-brand-500',
 }
@@ -88,6 +90,19 @@ export function VisaSignalBadges({ job }: { job: Pick<Job, 'student_visa' | 'eve
       ) : null}
     </>
   )
+}
+
+/** The sponsorship verdict: "Likely sponsor" or "May sponsor" (nothing for unlikely; ruled out has its own badge). */
+export function SponsorLikelyBadge({ job }: { job: Pick<Job, 'sponsor_likely' | 'sponsors_text' | 'h1b_filings' | 'everify'> }) {
+  if (job.sponsor_likely === 'likely') {
+    const why = job.sponsors_text ? 'the posting says it sponsors visas' : `the employer has ${(job.h1b_filings ?? 0).toLocaleString()} certified H-1B filings in the last two years`
+    return <Badge tone="green" dot title={`Likely to sponsor: ${why}.`}>Likely sponsor</Badge>
+  }
+  if (job.sponsor_likely === 'possible') {
+    const why = job.h1b_filings ? `the employer has filed ${job.h1b_filings} H-1B${job.h1b_filings === 1 ? '' : 's'} recently` : 'no H-1B filings found, but the employer uses E-Verify (STEM OPT is possible)'
+    return <Badge tone="teal" dot title={`May sponsor: ${why}.`}>May sponsor</Badge>
+  }
+  return null
 }
 
 export function SponsorBadge({ filings }: { filings: number | null }) {

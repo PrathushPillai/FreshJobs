@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 PAGE_SIZE = 20  # the API's maximum
@@ -105,10 +106,11 @@ class WorkdayAdapter(Adapter):
         return slug not in self._capped
 
     async def _page(self, client: httpx.AsyncClient, api: str, offset: int) -> dict:
-        resp = await client.post(
-            f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""}
+        # Retried with backoff on 429/503: tenants rate-limit bursts, and one 429 used to fail the whole board
+        # (149 boards, Kraft Heinz, Lowe's, Lilly, CVS Health, GEICO, Wells Fargo..., from 2026-11-06 on).
+        resp = await http_util.post(
+            client, f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""}
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def _list_all(self, client: httpx.AsyncClient, api: str) -> tuple[list[dict], bool]:
@@ -194,8 +196,7 @@ class WorkdayAdapter(Adapter):
                 )
             async with sem:
                 try:
-                    resp = await client.get(f"{api}{path}")
-                    resp.raise_for_status()
+                    resp = await http_util.get(client, f"{api}{path}")
                     info = resp.json().get("jobPostingInfo") or {}
                 except (httpx.HTTPError, ValueError):
                     # Taken down since the list call, or a transient error. Skip it: it's still new
