@@ -8,6 +8,7 @@ ones shown most), and writes only the rows whose answers change, so it can run w
     python -m app.pipeline.visa_signals            # open jobs: For you first, then the rest
     python -m app.pipeline.visa_signals --for-you  # only For you jobs (about an hour)
     python -m app.pipeline.visa_signals --others --resume   # only the rest, continuing where the last run stopped
+    python -m app.pipeline.visa_signals --workers 4 --resume  # the rest, split over 4 processes (about 4x faster)
 
 Progress (the pass and the last job id written) is saved to visa_signals.json next to the database after every
 batch, so --resume continues after a crash, a restart or the laptop sleeping.
@@ -58,45 +59,49 @@ def _write(updates: list[tuple[int, dict]], attempts: int = 20) -> None:
             time.sleep(5 * (attempt + 1))
 
 
-def _progress_path() -> Path:
+def _progress_path(tag: str = "") -> Path:
     from app.matching import _models_dir
 
-    return Path(_models_dir()).parent / "visa_signals.json"  # next to the database, like autodiscover.json
+    name = f"visa_signals-{tag}.json" if tag else "visa_signals.json"
+    return Path(_models_dir()).parent / name  # next to the database, like autodiscover.json
 
 
-def _load_progress() -> dict:
+def _load_progress(tag: str = "") -> dict:
     try:
-        return json.loads(_progress_path().read_text())
+        return json.loads(_progress_path(tag).read_text())
     except (OSError, ValueError):
         return {}
 
 
-def _save_progress(data: dict) -> None:
+def _save_progress(data: dict, tag: str = "") -> None:
     try:
-        _progress_path().write_text(json.dumps(data))
+        _progress_path(tag).write_text(json.dumps(data))
     except OSError:
         log.warning("couldn't save progress", exc_info=True)
 
 
 def refresh(for_you_only: bool = False, others_only: bool = False, resume: bool = False,
-            batch: int = 2000) -> dict[str, int]:
+            batch: int = 2000, id_range: tuple[int, int] | None = None, tag: str = "") -> dict[str, int]:
+    """Re-read open jobs. With id_range (lo, hi], only jobs in it (one worker's slice; progress in its own file)."""
     counts = {"read": 0, "changed": 0, "newly_no_sponsor": 0, "no_longer_no_sponsor": 0, "sponsors_text": 0, "years_changed": 0}
     started = time.time()
     passes = [True] if for_you_only else [False] if others_only else [True, False]
-    saved = _load_progress() if resume else {}
+    saved = _load_progress(tag) if resume else {}
     if saved.get("counts"):
         counts = {**counts, **saved["counts"]}
+    lo, hi = id_range or (0, None)
     for role_match in passes:
         key = "for_you" if role_match else "others"
-        last_id = saved.get(key, 0)
-        if last_id == -1:  # this pass finished in an earlier run
+        if saved.get(key) == -1:  # this pass finished in an earlier run
             continue
+        last_id = max(saved.get(key, 0), lo)
         updates: list[tuple[int, dict]] = []
         while True:
             with SessionLocal() as session:
-                ids = list(session.scalars(
-                    select(Job.id).where(Job.id > last_id, Job.closed_at.is_(None), Job.role_match.is_(role_match))
-                    .order_by(Job.id).limit(batch)))
+                query = select(Job.id).where(Job.id > last_id, Job.closed_at.is_(None), Job.role_match.is_(role_match))
+                if hi is not None:
+                    query = query.where(Job.id <= hi)
+                ids = list(session.scalars(query.order_by(Job.id).limit(batch)))
                 if not ids:
                     break
                 last_id = ids[-1]
@@ -119,13 +124,45 @@ def refresh(for_you_only: bool = False, others_only: bool = False, resume: bool 
             _write(updates)
             updates = []
             saved[key] = last_id
-            _save_progress({**saved, "counts": counts, "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
+            _save_progress({**saved, "counts": counts, "range": [lo, hi],
+                            "updated": time.strftime("%Y-%m-%d %H:%M:%S")}, tag)
             if counts["read"] and counts["read"] % 50_000 < batch:
                 log.info("%s jobs: read %d (%.0fs): %s", "For you" if role_match else "other", counts["read"],
                          time.time() - started, counts)
         saved[key] = -1
-        _save_progress({**saved, "counts": counts, "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
+        _save_progress({**saved, "counts": counts, "range": [lo, hi], "updated": time.strftime("%Y-%m-%d %H:%M:%S")}, tag)
     return counts
+
+
+def run_workers(workers: int, resume: bool = False) -> dict[str, int]:
+    """Re-read the jobs outside For you with `workers` processes, each on its own id range: the description
+    regexes are CPU-bound, and one process used one of the laptop's 16 cores. The ranges are fixed by the first
+    run and kept in visa_signals-w{k}.json, so --resume gives each worker its old range back. A single-process
+    run's position (visa_signals.json) is where the split starts."""
+    import subprocess
+    import sys
+
+    from sqlalchemy import func
+
+    olds = [_load_progress(f"w{k}") if resume else {} for k in range(workers)]
+    if all(o.get("range") for o in olds):
+        ranges = [tuple(o["range"]) for o in olds]
+    else:
+        start = max(_load_progress().get("others", 0), 0)
+        with SessionLocal() as session:
+            top = session.scalar(select(func.max(Job.id))) or 0
+        step = max(1, (top - start) // workers + 1)
+        ranges = [(start + k * step, start + (k + 1) * step) for k in range(workers)]
+    procs = [subprocess.Popen([sys.executable, "-m", "app.pipeline.visa_signals", "--others", "--resume",
+                               "--range", str(lo), str(hi), "--tag", f"w{k}"])
+             for k, (lo, hi) in enumerate(ranges)]
+    for p in procs:
+        p.wait()
+    total: dict[str, int] = {}
+    for k in range(workers):
+        for name, n in _load_progress(f"w{k}").get("counts", {}).items():
+            total[name] = total.get(name, 0) + n
+    return total
 
 
 if __name__ == "__main__":
@@ -133,7 +170,15 @@ if __name__ == "__main__":
     ap.add_argument("--for-you", action="store_true", help="only the For you jobs")
     ap.add_argument("--others", action="store_true", help="only the jobs outside For you")
     ap.add_argument("--resume", action="store_true", help="continue from the last run's saved position")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="split the jobs outside For you into N id ranges, each re-read by its own process")
+    ap.add_argument("--range", nargs=2, type=int, metavar=("LO", "HI"), help=argparse.SUPPRESS)
+    ap.add_argument("--tag", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     init_db()
-    print(refresh(for_you_only=args.for_you, others_only=args.others, resume=args.resume))
+    if args.workers > 1:
+        print(run_workers(args.workers, resume=args.resume))
+    else:
+        print(refresh(for_you_only=args.for_you, others_only=args.others, resume=args.resume,
+                      id_range=tuple(args.range) if args.range else None, tag=args.tag))
