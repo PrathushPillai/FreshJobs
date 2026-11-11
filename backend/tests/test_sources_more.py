@@ -207,6 +207,31 @@ async def test_workday_list_error_raises():
             await WorkdayAdapter().fetch(client, WD_SLUG)
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_host_without_a_wd_number():
+    # NXP's wd3 host shows Workday's maintenance page; the tenant answers at nxp.myworkdayjobs.com.
+    handler, _ = wd_pages([wd_posting(1)])
+    respx.post("https://nxp.myworkdayjobs.com/wday/cxs/nxp/careers/jobs").mock(side_effect=handler)
+    async with httpx.AsyncClient() as client:
+        jobs = await WorkdayAdapter().fetch(client, "nxp|-|careers", known_ids={"JR1001-1"})
+    assert [j.url for j in jobs] == ["https://nxp.myworkdayjobs.com/careers/job/US-TX-Austin/Engineer-1_JR1001-1"]
+
+
+def test_workday_hosts_without_a_wd_number_are_detected():
+    from app.pipeline.bulk_discovery import _workday_url
+    from app.pipeline.detect import detect_board
+    from app.pipeline.liveness import _workday_api
+
+    assert detect_board("https://nxp.myworkdayjobs.com/careers") == ("workday", "nxp|-|careers")
+    assert detect_board("https://nxp.myworkdayjobs.com/en-US/careers/job/Austin/Engineer_R1") == ("workday", "nxp|-|careers")
+    assert detect_board("https://www.myworkdayjobs.com/") is None
+    assert _workday_api("https://nxp.myworkdayjobs.com/careers/job/Austin/Engineer_R1") == (
+        "https://nxp.myworkdayjobs.com/wday/cxs/nxp/careers/job/Austin/Engineer_R1")
+    assert _workday_url("nxp|-|careers") == "https://nxp.myworkdayjobs.com/careers"
+    assert _workday_url("nvidia|wd5|Ext") == "https://nvidia.wd5.myworkdayjobs.com/Ext"
+
+
 # --- SmartRecruiters ---------------------------------------------------------------------------
 
 SR_API = "https://api.smartrecruiters.com/v1/companies/ServiceNow/postings"

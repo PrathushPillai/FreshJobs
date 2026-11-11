@@ -1,7 +1,8 @@
 """Workday career sites, through the JSON API ("CXS") that the public career site itself uses.
 
 slug: "{tenant}|{wdN}|{site}", taken from the career-site URL
-https://{tenant}.{wdN}.myworkdayjobs.com/{site}, e.g. "nvidia|wd5|NVIDIAExternalCareerSite".
+https://{tenant}.{wdN}.myworkdayjobs.com/{site}, e.g. "nvidia|wd5|NVIDIAExternalCareerSite". A few tenants live on a host with no wdN
+(https://nxp.myworkdayjobs.com/careers); their slug has "-" in the middle: "nxp|-|careers".
 
 API quirks (verified live, Nov 2026):
 - The list endpoint caps `limit` at 20 (larger values return HTTP 400).
@@ -43,6 +44,15 @@ def parse_slug(slug: str) -> tuple[str, str, str]:
     if len(parts) != 3 or not all(parts):
         raise ValueError(f"Workday slug must look like 'tenant|wd5|Site', got {slug!r}")
     return parts[0], parts[1], parts[2]
+
+
+def board_host(tenant: str, wd: str) -> str:
+    """https://{tenant}.{wdN}.myworkdayjobs.com, or https://{tenant}.myworkdayjobs.com when wd is "-".
+
+    NXP's wd3 host has shown Workday's maintenance page since 2026-11-06 (CXS answers 422) while
+    nxp.myworkdayjobs.com serves the same 800 jobs.
+    """
+    return f"https://{tenant}.myworkdayjobs.com" if wd == "-" else f"https://{tenant}.{wd}.myworkdayjobs.com"
 
 
 def days_ago(posted_on: str | None) -> int | None:
@@ -213,7 +223,7 @@ class WorkdayAdapter(Adapter):
         first_scan: bool = False,
     ) -> list[NormalizedJob]:
         tenant, wd, site = parse_slug(slug)
-        host = f"https://{tenant}.{wd}.myworkdayjobs.com"
+        host = board_host(tenant, wd)
         api = f"{host}/wday/cxs/{tenant}/{site}"
 
         self._load_state()

@@ -102,14 +102,15 @@ def _detect_board(url: str) -> tuple[str, str] | None:
         return "ashby", seg
 
     # --- Workday: {tenant}.wd{N}.myworkdayjobs.com/[locale/]{site} ---
-    m = re.match(r"^([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com$", host)
-    if m:
+    m = re.match(r"^([a-z0-9-]+)\.(?:(wd\d+)\.)?myworkdayjobs\.com$", host)
+    if m and m.group(1) != "www":
+        wd = m.group(2) or "-"  # nxp.myworkdayjobs.com has no wdN
         parts = [p for p in path.split("/") if p]
         if parts and parts[0] == "wday":  # the CXS API: /wday/cxs/{tenant}/{site}/...
-            return ("workday", f"{m.group(1)}|{m.group(2)}|{parts[3]}") if len(parts) >= 4 else None
+            return ("workday", f"{m.group(1)}|{wd}|{parts[3]}") if len(parts) >= 4 else None
         parts = [p for p in parts if not _LOCALE.match(p)]
         # Site names never contain dots: robots.txt, llms.txt, sitemap.xml are files at the host's root.
-        return ("workday", f"{m.group(1)}|{m.group(2)}|{parts[0]}") if parts and "." not in parts[0] else None
+        return ("workday", f"{m.group(1)}|{wd}|{parts[0]}") if parts and "." not in parts[0] else None
 
     if host in ("jobs.smartrecruiters.com", "careers.smartrecruiters.com") and seg.lower() not in _RESERVED:
         return "smartrecruiters", seg

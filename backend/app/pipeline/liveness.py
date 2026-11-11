@@ -51,7 +51,7 @@ def visible_text(html: str) -> str:
 def _workday_api(url: str) -> str | None:
     """A Workday job page's JSON endpoint: {host}/wday/cxs/{tenant}/{site}/job/..."""
     p = urlparse(url)
-    m = re.match(r"^([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com$", p.hostname or "")
+    m = re.match(r"^([a-z0-9-]+)\.(?:wd\d+\.)?myworkdayjobs\.com$", p.hostname or "")
     parts = [x for x in p.path.split("/") if x and not _LOCALE.match(x)]
     if not m or "job" not in parts or parts.index("job") == 0:
         return None

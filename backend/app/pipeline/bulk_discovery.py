@@ -453,8 +453,15 @@ def _board_url(ats: str, slug: str) -> str:
         "recruitee": f"https://{slug}.recruitee.com",
         "breezy": f"https://{slug}.breezy.hr",
         "pinpoint": f"https://{slug}.pinpointhq.com",
-        "workday": "https://{0}.{1}.myworkdayjobs.com/{2}".format(*slug.split("|")) if slug.count("|") == 2 else "",
+        "workday": _workday_url(slug),
     }.get(ats, "")
+
+
+def _workday_url(slug: str) -> str:
+    from app.sources.workday import board_host
+
+    parts = slug.split("|")
+    return f"{board_host(parts[0], parts[1])}/{parts[2]}" if len(parts) == 3 else ""
 
 
 async def _cc_get(client: httpx.AsyncClient, url: str, tries: int = 4) -> httpx.Response | None:
