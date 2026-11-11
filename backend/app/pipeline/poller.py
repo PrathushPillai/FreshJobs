@@ -206,6 +206,7 @@ def process_company(
     seen_ids = set()
     new_jobs: list[Job] = []
     same_poll_ids: set[int] = set()
+    titles: dict = {}  # dedupe.find_original's per-employer title index, built once per save
     pending: deque[Job] = deque()  # new jobs whose ids haven't been moved into same_poll_ids yet
 
     for nj in fetched:
@@ -263,7 +264,7 @@ def process_company(
             apply_flags(session, job, prefs)
             original = find_original(
                 session, job.company_key, nj.title, nj.location, nj.description, now,
-                settings.repost_window_days, same_poll_ids, company.id,
+                settings.repost_window_days, same_poll_ids, company.id, titles,
             )
         kind, detail = "seen", ""
         if original is not None:

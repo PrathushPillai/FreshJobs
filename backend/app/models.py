@@ -70,6 +70,9 @@ class Job(Base):
         # was 95% of a save (2026-11-10).
         Index("ix_jobs_company_sync", "company_id", "external_id", "last_seen_at", "missed_polls", "closed_at",
               "described"),
+        # The repost check's read of an employer's recent titles (dedupe.find_original), index-only: through
+        # ix_jobs_company_key it read each job's row, up to 4.5 s cold for Amazon, once per save with new jobs.
+        Index("ix_jobs_company_titles", "company_key", "first_seen_at", "closed_at", "company_id", "title"),
         # Keyed by id: a search that starts from its full-text matches checks each job's filters here
         # instead of reading the job's row (whose description comes before these columns).
         Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",

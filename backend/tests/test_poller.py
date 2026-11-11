@@ -423,3 +423,56 @@ def test_a_working_board_that_fails_once_is_retried_soon(now):
     assert _due(blip, now)            # one blip on a board that works: try again at the normal pace
     assert not _due(still, now)       # failing for a while: back to every idle_poll_minutes
     assert not _due(never, now)       # never worked: no hurry
+
+
+def test_repost_check_reads_an_employers_titles_once_per_save(session, now):
+    # Reading every recent title at the employer for each new job made big saves crawl (2026-11-11 profile).
+    from sqlalchemy import event
+
+    company, prefs = make_company(session), get_prefs(session)
+    [original] = process_company(session, company, [nj("1")], prefs, now)
+    for minutes in (5, 10):  # the original closes
+        process_company(session, company, [], prefs, now + timedelta(minutes=minutes))
+    title_reads = []
+
+    def count(conn, cursor, statement, *args):
+        if statement.lstrip().startswith("SELECT jobs.id, jobs.title"):
+            title_reads.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", count)
+    try:
+        fresh = [nj(str(i), title=f"Role {i}", location=f"City {i}, TX") for i in range(2, 12)]
+        jobs = process_company(session, company, [nj("50", location="Austin, TX")] + fresh, prefs,
+                               now + timedelta(days=2))
+    finally:
+        event.remove(engine, "before_cursor_execute", count)
+    assert len(title_reads) == 1
+    assert jobs[0].is_repost and jobs[0].repost_of_id == original.id  # still found through the cached titles
+    assert not any(j.is_repost for j in jobs[1:])
+
+
+def test_repost_title_check_reads_only_the_covering_index(session, now):
+    """find_original's read of an employer's recent titles must be index-only (ix_jobs_company_titles)."""
+    from sqlalchemy import or_, select, text
+
+    from app.models import Job
+
+    stmt = select(Job.id, Job.title, Job.company_id, Job.closed_at).where(
+        Job.company_key == "amazon", or_(Job.closed_at.is_(None), Job.closed_at >= now - timedelta(days=60)),
+        Job.first_seen_at >= now - timedelta(days=60))
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
+    assert "COVERING INDEX ix_jobs_company_titles" in plan, plan
+
+
+def test_repost_fingerprint_check_uses_the_fingerprint_index(session, now):
+    from sqlalchemy import or_, select, text
+
+    from app.models import Job
+
+    stmt = select(Job.id).where(Job.fingerprint == "abc", or_(Job.closed_at.is_(None),
+                                Job.closed_at >= now - timedelta(days=60))).order_by(Job.first_seen_at)
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
+    assert "ix_jobs_fingerprint" in plan, plan
