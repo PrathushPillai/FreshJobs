@@ -87,6 +87,33 @@ async def test_jobdiva_dead_portal_raises():
         await run(JobDivaAdapter(), f"www2/{JD_KEY}")
 
 
+BLANK = chr(10) * 3 + chr(13) + chr(10)  # what JobDiva sends: blank lines only
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobdiva_retries_a_blank_answer(monkeypatch):
+    # JobDiva sometimes answers 200 with only blank lines under load; the next request returns the feed.
+    monkeypatch.setattr(jobdiva, "BLANK_RETRY_SECONDS", 0)
+    route = respx.get(JD_FEED).mock(side_effect=[
+        httpx.Response(200, text=BLANK),
+        httpx.Response(200, text=jd_feed(jd_item(1, "Data Engineer (26-1) - TX", "November 9, 2026 2:35:10 PM EST"))),
+    ])
+    jobs = await run(JobDivaAdapter(), f"www2/{JD_KEY}")
+    assert [j.title for j in jobs] == ["Data Engineer"]
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobdiva_always_blank_still_fails(monkeypatch):
+    monkeypatch.setattr(jobdiva, "BLANK_RETRY_SECONDS", 0)
+    route = respx.get(JD_FEED).mock(return_value=httpx.Response(200, text=BLANK))
+    with pytest.raises(httpx.HTTPError):
+        await run(JobDivaAdapter(), f"www2/{JD_KEY}")
+    assert route.call_count == jobdiva.BLANK_RETRIES + 1
+
+
 def test_jobdiva_detect_and_page():
     portal = f"https://www2.jobdiva.com/portal/?a={JD_KEY}&compid=0#/"
     assert jobdiva.detect(portal) == f"www2/{JD_KEY}"

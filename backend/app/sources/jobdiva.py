@@ -17,6 +17,7 @@ Verified live (Nov 2026):
   nothing (`last_fetch_complete`); those jobs are closed by the liveness checks instead.
 """
 
+import asyncio
 import html as htmllib
 import re
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,8 @@ from app.sources.staffing_common import outside_us, page_urls
 
 FEED_LIMIT = 200  # the most the feed returns
 DEFAULT_HOST = "www2"
+BLANK_RETRIES = 3
+BLANK_RETRY_SECONDS = 3.0  # waits 3, 6, 9 s: blank answers come in bursts (6 portals in one poll still failed after 2 + 4 s)
 
 _ITEM = re.compile(r"<item>(.*?)</item>", re.S)
 _TITLE_REF = re.compile(r"^(.*\S)\s*\(([^()]*)\)\s+-\s*(.*)$", re.S)
@@ -130,7 +133,7 @@ class JobDivaAdapter(Adapter):
     ats = "jobdiva"
     min_interval_minutes = 15
     capped_ages_out = True  # the RSS feed shows the newest 200 jobs only
-    max_concurrency = 4
+    max_concurrency = 2  # 4 at a time drew bursts of blank answers (2026-11-11)
 
     def __init__(self) -> None:
         self._capped: dict[str, bool] = {}
@@ -140,11 +143,17 @@ class JobDivaAdapter(Adapter):
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
         host, key = parse_slug(slug)
-        resp = await http_util.get(
-            client,
-            f"https://{host}.jobdiva.com/candidates/myjobs/getjobsrssfeed.jsp",
-            params={"a": key, "noofjobs": FEED_LIMIT, "versionid": 2},
-        )
+        for attempt in range(BLANK_RETRIES + 1):
+            resp = await http_util.get(
+                client,
+                f"https://{host}.jobdiva.com/candidates/myjobs/getjobsrssfeed.jsp",
+                params={"a": key, "noofjobs": FEED_LIMIT, "versionid": 2},
+            )
+            # Under load JobDiva sometimes answers 200 with a page of blank lines; asked again a moment later it
+            # returns the feed (2026-11-11: 18 of 276 portals failed a poll this way, 5 of 24 in a burst of 4 at a time).
+            if resp.text.strip() or attempt == BLANK_RETRIES:
+                break
+            await asyncio.sleep(BLANK_RETRY_SECONDS * (attempt + 1))
         if "<rss" not in resp.text[:500]:
             raise httpx.HTTPStatusError(f"JobDiva portal {slug} returned no feed", request=resp.request, response=resp)
         jobs = parse_feed(resp.text, host, key)
