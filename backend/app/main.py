@@ -53,9 +53,35 @@ log = logging.getLogger(__name__)
 
 # Fast boards (Greenhouse, Lever, Ashby, aggregators) and slow ones (Workday, SmartRecruiters: a request
 # per job) poll in separate lanes with their own locks, so a long Workday scan never delays the fast boards.
-LANES = ("fast", "slow", "bulk")  # bulk: rate-limited ATSs with thousands of boards (Workable)
+# Each lane runs in its own worker process (app/lanes.py, settings.poll_workers); without workers, in a thread
+# of this process with its own lock.
+from app.lanes import LANES  # noqa: E402
+
 _poll_locks = {lane: threading.Lock() for lane in LANES}
 _last_poll: dict[str, dict] = {}
+
+
+def _lane_busy(lane: str) -> bool:
+    """Whether a lane (or "discovery") is polling right now: its worker's status file, or this process's lock."""
+    if not settings.poll_workers:
+        return _discovery_lock.locked() if lane == "discovery" else _poll_locks[lane].locked()
+    from app import lanes
+
+    st = lanes.lane_status(lane)
+    try:  # a worker that stopped mid-poll left polling=true behind: trust it only with a recent heartbeat
+        fresh = datetime.now(timezone.utc) - datetime.fromisoformat(st["heartbeat"]) < timedelta(minutes=2)
+    except (KeyError, ValueError):
+        fresh = False
+    return bool(st.get("polling")) and fresh
+
+
+def _after_poll(lane: str, summary: dict) -> None:
+    """The API process's share of a finished poll (the worker does scoring and alerts)."""
+    _last_poll[lane] = summary
+    _jobs_cache.clear()  # cached result pages would miss this poll's jobs
+    if lane == "fast":
+        _place_counts(force=True)  # location picker counts include this poll's jobs
+        threading.Thread(target=_warm_suggestions, daemon=True).start()
 
 
 # Counting stops here ("2,000+"): counting further meant reading up to 10,000 matching jobs (42 s cold).
@@ -145,6 +171,7 @@ async def lifespan(app: FastAPI):
         log.warning("Startup backfill postponed (%s); retrying in the background", e.orig)
         threading.Thread(target=_backfill_until_done, daemon=True).start()
     scheduler = BackgroundScheduler()
+    workers = settings.scheduler_enabled and settings.poll_workers
     if settings.scheduler_enabled:
         threading.Thread(target=_place_counts, daemon=True).start()  # location picker counts, off the startup path
         with SessionLocal() as s:
@@ -155,6 +182,15 @@ async def lifespan(app: FastAPI):
         scoring.refresh_in_background()  # jobs found while the backend was off
         _open_counts_lock.acquire()
         threading.Thread(target=_recount_open_jobs, daemon=True).start()  # the Sources page's counts
+    if workers:
+        from app import lanes
+
+        for lane in lanes.WORKERS:  # what the workers last reported, until their next poll
+            if lanes.lane_status(lane).get("last"):
+                _last_poll[lane] = lanes.lane_status(lane)["last"]
+        lanes.start_workers()
+        threading.Thread(target=lanes.watch_lanes, args=(_after_poll,), daemon=True).start()
+    elif settings.scheduler_enabled:
         first_run = datetime.now() if settings.poll_on_startup else None
         for lane in LANES:
             scheduler.add_job(run_poll, "interval", args=[lane], minutes=settings.poll_minutes,
@@ -166,6 +202,8 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    if workers:
+        lanes.stop_workers()
 
 
 app = FastAPI(title="Job Portal", lifespan=lifespan, dependencies=[Depends(require_login)],
@@ -1503,7 +1541,12 @@ def test_alert_email(user: User = Depends(current_user)):
 @app.post("/api/poll")
 def trigger_poll(_: User = Depends(admin_user)):
     # "Check now" refreshes the fast lane; the slow lane keeps its own schedule.
-    threading.Thread(target=run_poll, args=["fast"], daemon=True).start()
+    if settings.poll_workers and settings.scheduler_enabled:
+        from app import lanes
+
+        lanes.request_poll("fast")  # the fast worker starts it within a few seconds
+    else:
+        threading.Thread(target=run_poll, args=["fast"], daemon=True).start()
     return {"started": True}
 
 
@@ -1535,8 +1578,8 @@ def status(request: Request, session: Session = Depends(get_session)):
     counts = _counts(session)
     user = user_from_request(request, session)
     return {
-        "polling": _poll_locks["fast"].locked(),
-        "slow_polling": _poll_locks["slow"].locked(),
+        "polling": _lane_busy("fast"),
+        "slow_polling": _lane_busy("slow"),
         "poll_minutes": settings.poll_minutes,
         "last_poll": _last_poll.get("fast"),
         "last_slow_poll": _last_poll.get("slow"),
@@ -1550,7 +1593,7 @@ def status(request: Request, session: Session = Depends(get_session)):
         "tracked": session.scalar(select(func.count()).select_from(Application).where(Application.user_id == user.id)) if user else 0,
         "h1b_sponsors": counts["h1b_sponsors"],
         "jsearch_configured": ADAPTERS["jsearch"].is_configured() if "jsearch" in ADAPTERS else False,
-        "discovery": {"running": _discovery_lock.locked(), **_discovery_status()},
+        "discovery": {"running": _lane_busy("discovery"), **_discovery_status()},
     }
 
 

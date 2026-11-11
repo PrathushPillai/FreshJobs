@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30}
     poll_on_startup: bool = True
     scheduler_enabled: bool = True
+    # Each polling lane (and discovery) in its own worker process (app/lanes.py), so they don't share one core
+    # with the API under the GIL. false: every lane in a thread of the backend process, as before 2026-11-10.
+    poll_workers: bool = True
     # A job missing from its feed this many polls in a row is marked closed.
     missed_polls_to_close: int = 2
     repost_window_days: int = 60
