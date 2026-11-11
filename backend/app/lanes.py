@@ -146,9 +146,67 @@ def _exit_when_parent_goes(parent_pid: int) -> None:
     os._exit(0)
 
 
+PROFILE_INTERVAL = 0.01  # seconds between samples
+
+
+def sample_stacks(seconds: float, *, interval: float = PROFILE_INTERVAL, skip: set[int] = frozenset()) -> str:
+    """A text report of where this process's threads spend their time, from sampling their stacks.
+
+    Started by writing a number of seconds to lanes/{lane}.profile (see _profile_watcher); the report goes to
+    lanes/{lane}.profile.txt. Written because the slow worker ran at 100% of a core and saved only ~35 boards a
+    minute (2026-11-11) while each board's fetch and save measured well under a second, and py-spy isn't installed.
+    """
+    import collections
+    import sys
+
+    me = threading.get_ident()
+    own: collections.Counter = collections.Counter()  # innermost frame in our code (or the first one)
+    leaf: collections.Counter = collections.Counter()  # innermost frame anywhere
+    samples = 0
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        for ident, frame in sys._current_frames().items():
+            if ident == me or ident in skip:
+                continue
+            stack = []
+            f = frame
+            while f is not None and len(stack) < 60:
+                stack.append(f)
+                f = f.f_back
+            if not stack or stack[0].f_code.co_name in ("wait", "select", "_worker", "sleep", "_wait_for_tstate_lock"):
+                continue  # idle threads
+            top = stack[0].f_code
+            leaf[f"{top.co_filename.rsplit(chr(92), 1)[-1]}:{top.co_name}"] += 1
+            mine = next((x for x in stack if f"{os.sep}app{os.sep}" in x.f_code.co_filename), stack[0])
+            own[f"{mine.f_code.co_filename.split(os.sep + 'app' + os.sep)[-1]}:{mine.f_code.co_name}:{mine.f_lineno}"] += 1
+        samples += 1
+        time.sleep(interval)
+    lines = [f"{samples} samples over {seconds:.0f} s", "", "innermost app frame:"]
+    lines += [f"  {n:6d}  {k}" for k, n in own.most_common(25)]
+    lines += ["", "innermost frame:"] + [f"  {n:6d}  {k}" for k, n in leaf.most_common(15)]
+    return "\n".join(lines)
+
+
+def _profile_watcher(lane: str) -> None:
+    trigger = lanes_dir() / f"{lane}.profile"
+    while True:
+        time.sleep(POLL_CHECK_SECONDS)
+        try:
+            seconds = float(trigger.read_text().strip() or 30)
+            trigger.unlink()
+        except (OSError, ValueError):
+            continue
+        try:
+            (lanes_dir() / f"{lane}.profile.txt").write_text(sample_stacks(min(seconds, 600)))
+        except Exception:
+            log.warning("%s worker: profiling failed", lane, exc_info=True)
+
+
 def serve(lane: str, *, max_polls: int | None = None) -> None:
     """Run a lane's polls (or discovery) on its schedule until the backend goes away."""
     from app.config import settings
+
+    threading.Thread(target=_profile_watcher, args=(lane,), daemon=True).start()
 
     if lane == "discovery":
         interval, first = settings.autodiscover_minutes * 60, time.monotonic() + 600  # 10 minutes after start

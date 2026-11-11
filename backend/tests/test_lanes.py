@@ -126,3 +126,25 @@ def test_heartbeat_continues_during_a_long_poll(lane_dir, monkeypatch):
     lanes.serve("slow", max_polls=1)
     first, during = beats[0]
     assert during["polling"] is True and during["heartbeat"] > first
+
+
+def test_sample_stacks_reports_where_a_busy_thread_spends_its_time():
+    import threading
+    import time
+
+    from app.lanes import sample_stacks
+
+    stop = threading.Event()
+
+    def busy_loop():
+        while not stop.is_set():
+            sum(range(1000))
+
+    t = threading.Thread(target=busy_loop)
+    t.start()
+    try:
+        report = sample_stacks(0.3, interval=0.005)
+    finally:
+        stop.set()
+        t.join()
+    assert "samples over" in report and "busy_loop" in report
