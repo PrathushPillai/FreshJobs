@@ -19,6 +19,7 @@ Verified live (Nov 2026) on Koch (behind gp.com/careers, molex.com...), Bloomber
 """
 
 import asyncio
+import time
 import html as htmllib
 import re
 from collections.abc import Set
@@ -36,6 +37,15 @@ _RETRY = (406, 429, 503)
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 DETAIL_CONCURRENCY = 3
+# When a portal's locale sitemap comes back empty (Deloitte's since 2026-11-10, 1,400 open jobs), its
+# SearchJobs pages are read instead: 10 jobs a page whatever jobRecordsPerPage asks, one page at a time.
+SEARCH_PAGE_SIZE = 10
+SEARCH_MAX_PAGES = 300
+# The search fallback reads every page at most this often, and only the newest pages in between: Avature's
+# servers are shared, and after one live read of Deloitte's 150 pages 24 other Avature boards got 406 (2026-11-11).
+# Decided here, not through full_scan_every, which would make sitemap boards close jobs only on full scans.
+SEARCH_FULL_EVERY_SECONDS = 6 * 3600
+SEARCH_PAGE_DELAY = 1.5  # seconds between pages: back to back, Deloitte answered 406 (slow down) in a live poll
 MIN_DESCRIPTION_BLOCK = 150  # unlabeled blocks shorter than this are titles, buttons or notes
 
 _LOCALE = re.compile(r"^[a-z]{2}_[A-Z]{2}$")
@@ -43,6 +53,7 @@ _SITEMAP_LOC = re.compile(r"<sitemap>\s*<loc>\s*([^<\s]+)\s*</loc>", re.I)
 _JOB = re.compile(
     r"<loc>\s*(https?://[^<\s]+?/JobDetail/(?:([^<\s]*)/)?(\d+))\s*</loc>(?:\s*<lastmod>\s*([^<\s]+)\s*</lastmod>)?",
     re.I)
+_SEARCH_JOB = re.compile(r'href="(https?://[^"]+?/JobDetail/(?:([^"/]*)/)?(\d+))"', re.I)
 _DETECT = re.compile(
     r"^https?://([^/?#]+)/(?:([a-z]{2}_[A-Z]{2})/)?([A-Za-z0-9_-]+)/(?:JobDetail|SearchJobs|Login|Register|"
     r"ApplicationMethods|sitemap)\b", re.I)
@@ -51,6 +62,11 @@ _AVATURE_LINK = re.compile(
 _FIELD = re.compile(r'<div\s+class="article__content__view__field(?:\s[^"]*)?"', re.I)
 _LABEL = re.compile(r'<div\s+class="article__content__view__field__label[^"]*"[^>]*>(.*?)</div>', re.S | re.I)
 _DIV = re.compile(r"<(/?)div\b[^>]*>", re.I)
+# Deloitte's template: og:title is "Check out this job at Deloitte, {title}", places are paragraphs in the
+# header, and the description is only in the page's JSON-LD (all 1,421 Deloitte jobs were saved without one).
+_SHARE_PREFIX = re.compile(r"^Check out this job at [^,]{1,60},\s*", re.I)
+_HEADER_PLACES = re.compile(r'<div class="article__header--locations[^"]*"[^>]*>(.*?)</div>\s*</div>', re.S | re.I)
+_PARAGRAPH = re.compile(r'<p class="paragraph">(.*?)</p>', re.S | re.I)
 _OG_TITLE = re.compile(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', re.I)
 _TITLE_TAG = re.compile(r"<title>(.*?)</title>", re.S | re.I)
 _NOT_PORTAL = {"portal", "_cms", "favicon.ico", "sitemap.xml", "robots.txt", "image", "images"}
@@ -186,6 +202,7 @@ def parse_job_page(html: str, job_id: str) -> dict:
     # og:title is escaped twice on some tenants ("Analytics &amp;amp; Sales"); titles may end in "-{id}".
     title = htmllib.unescape(htmllib.unescape(title)).strip()
     title = re.sub(rf"\s*-\s*{job_id}\s*$", "", title)
+    title = _SHARE_PREFIX.sub("", title)
 
     location = first(r"locations?(\(s\))?", r"job locations?", r"work locations?", r"primary location")
     if location:
@@ -194,18 +211,28 @@ def parse_job_page(html: str, job_id: str) -> dict:
         place = ", ".join(p for p in (first(r"city"), first(r"state|state/province|province|region"),
                                       first(r"country|country/region|jurisdiction / country")) if p)
         locations = [place] if place else []
+    if not locations:
+        header = _HEADER_PLACES.search(html)
+        if header:
+            locations = [t for t in (html_to_text(p).strip() for p in _PARAGRAPH.findall(header.group(1))) if t]
 
     description_parts = [
         value for label, value in fields
         if (not label and len(value) >= MIN_DESCRIPTION_BLOCK)
         or re.search(r"description|responsibilit|qualification|requirement|about the (role|job)", label, re.I)
     ]
+    description = "\n\n".join(dict.fromkeys(description_parts))
+    posted_at = parse_date(first(r"date posted", r"posted( date| on)?", r"posting date", r"publish(ed)? date"))
+    if not description:  # Deloitte's template has the description only in its JSON-LD
+        ld = http_util.json_ld_job(html)
+        description = html_to_text(ld.get("description") or "")
+        posted_at = posted_at or parse_iso(ld.get("datePosted"))
     remote_value = first(r"(eligible for )?remote( eligible| jobs?| work)?", r"remote eligible", r"workplace type")
     return {
         "title": title,
         "locations": locations,
-        "description": "\n\n".join(dict.fromkeys(description_parts)),
-        "posted_at": parse_date(first(r"date posted", r"posted( date| on)?", r"posting date", r"publish(ed)? date")),
+        "description": description,
+        "posted_at": posted_at,
         "remote": remote_value.lower().startswith(("yes", "remote", "fully remote"))
         or any("remote" in loc.lower() for loc in locations),
         "company": first(r"company", r"business", r"legal entity"),
@@ -237,7 +264,39 @@ class AvatureAdapter(Adapter):
     lane = "slow"
     max_concurrency = 3
 
-    async def _sitemap(self, client: httpx.AsyncClient, host: str, locale: str, portal: str) -> str:
+    def __init__(self) -> None:
+        self._incomplete: set[str] = set()
+        self._full_search_at: dict[str, float] = {}  # slug -> time.monotonic() of its last full search
+
+    def last_fetch_complete(self, slug: str) -> bool:
+        return slug not in self._incomplete
+
+    async def _search(
+        self, client: httpx.AsyncClient, search_url: str, known_ids: Set[str] | None = None,
+    ) -> tuple[list[dict], bool]:
+        """Jobs on the portal's SearchJobs pages, and whether the list reached its end.
+
+        With known_ids (a partial scan) it stops after the first page with no unknown job, newest first.
+        """
+        jobs: dict[str, dict] = {}
+        for page in range(SEARCH_MAX_PAGES):
+            resp = await http_util.get(
+                client, search_url, params={"jobRecordsPerPage": SEARCH_PAGE_SIZE, "jobOffset": page * SEARCH_PAGE_SIZE},
+                follow_redirects=True, retry_statuses=_RETRY)
+            fresh = 0
+            for url, slug_text, job_id in _SEARCH_JOB.findall(resp.text):
+                if job_id not in jobs:
+                    jobs[job_id] = {"id": job_id, "url": htmllib.unescape(url), "slug": slug_text, "lastmod": ""}
+                    fresh += 1
+            if not fresh:
+                return list(jobs.values()), True
+            if known_ids is not None and all(j in known_ids for j in list(jobs)[-fresh:]):
+                return list(jobs.values()), False
+            await asyncio.sleep(SEARCH_PAGE_DELAY)
+        return list(jobs.values()), False
+
+    async def _sitemap(self, client: httpx.AsyncClient, host: str, locale: str, portal: str) -> tuple[str | None, str]:
+        """(the locale sitemap, its URL); the text is None when the sitemap is empty."""
         if locale:
             url = f"https://{host}/{locale}/{portal}/sitemap.xml"
         else:
@@ -249,18 +308,34 @@ class AvatureAdapter(Adapter):
             chosen = pick_locale([htmllib.unescape(s) for s in _SITEMAP_LOC.findall(text)])
             if not chosen:
                 break
-            text = (await http_util.get(client, chosen[0], follow_redirects=True, retry_statuses=_RETRY)).text
+            url = chosen[0]
+            text = (await http_util.get(client, url, follow_redirects=True, retry_statuses=_RETRY)).text
+        if not text.strip() and url.endswith("/sitemap.xml"):
+            return None, url
         if "<urlset" not in text[:2000]:
             # An error or challenge page: a failed fetch, not "no jobs" (which would close every job).
             raise ValueError(f"no Avature job sitemap for {host}/{portal}")
-        return text
+        return text, url
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, full: bool = True, known_ids: Set[str] = frozenset(),
         first_scan: bool = False,
     ) -> list[NormalizedJob]:
         host, locale, portal = parse_slug(slug)
-        listed = parse_sitemap(await self._sitemap(client, host, locale, portal))
+        text, sitemap_url = await self._sitemap(client, host, locale, portal)
+        if text is None:
+            last_full = self._full_search_at.get(slug)
+            read_all = first_scan or last_full is None or time.monotonic() - last_full >= SEARCH_FULL_EVERY_SECONDS
+            listed, complete = await self._search(
+                client, sitemap_url[: -len("sitemap.xml")] + "SearchJobs/", None if read_all else known_ids)
+            if read_all and complete:
+                self._full_search_at[slug] = time.monotonic()
+            if not listed:  # an empty sitemap and no search results: not trusted as "no jobs"
+                raise ValueError(f"no Avature job sitemap or search results for {host}/{portal}")
+            (self._incomplete.discard if complete else self._incomplete.add)(slug)
+        else:
+            listed = parse_sitemap(text)
+            self._incomplete.discard(slug)
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
         async def build(j: dict) -> NormalizedJob | None:

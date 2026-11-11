@@ -300,6 +300,63 @@ async def test_avature_error_page_is_a_failed_fetch():
             await AvatureAdapter().fetch(client, "koch.avature.net/careers")
 
 
+DELOITTE = "https://apply.deloitte.com"
+
+
+def _search_page(*ids: int) -> str:
+    links = "".join(f'<a href="{DELOITTE}/en_US/careers/JobDetail/Azure-Cloud-Engineer-{i}/{i}">x</a>' for i in ids)
+    return f"<html><body>{links}<a href='{DELOITTE}/en_US/careers/SearchJobs/?jobOffset=10'>next</a></body></html>"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_avature_empty_sitemap_falls_back_to_search_pages(monkeypatch):
+    monkeypatch.setattr(avature, "SEARCH_PAGE_DELAY", 0)
+    # Deloitte's en_US sitemap has answered 200 with an empty body since 2026-11-10.
+    respx.get(f"{DELOITTE}/careers/sitemap_index.xml").mock(return_value=httpx.Response(200, text=(
+        f'<?xml version="1.0"?><sitemapindex><sitemap><loc>{DELOITTE}/en_US/careers/sitemap.xml</loc></sitemap>'
+        "</sitemapindex>")))
+    respx.get(f"{DELOITTE}/en_US/careers/sitemap.xml").mock(return_value=httpx.Response(200, text=""))
+    pages = {0: _search_page(101, 102), 10: _search_page(102, 103), 20: _search_page()}
+    search = respx.get(url__startswith=f"{DELOITTE}/en_US/careers/SearchJobs/").mock(
+        side_effect=lambda req: httpx.Response(200, text=pages[int(req.url.params["jobOffset"])]))
+    detail = respx.get(f"{DELOITTE}/en_US/careers/JobDetail/Azure-Cloud-Engineer-103/103").mock(
+        return_value=httpx.Response(200, text=KOCH_JOB))
+    adapter = AvatureAdapter()
+    async with httpx.AsyncClient() as client:
+        jobs = await adapter.fetch(client, "apply.deloitte.com/careers", known_ids={"101", "102"})
+    assert search.call_count == 3 and detail.called
+    assert {j.external_id for j in jobs} == {"101", "102", "103"}
+    assert adapter.last_fetch_complete("apply.deloitte.com/careers")
+
+    pages[20] = _search_page()
+    pages[0] = _search_page()  # empty sitemap and no search results: a failed fetch, not "no jobs"
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError):
+            await adapter.fetch(client, "apply.deloitte.com/careers")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_avature_search_fallback_partial_scan_stops_at_known_jobs(monkeypatch):
+    monkeypatch.setattr(avature, "SEARCH_PAGE_DELAY", 0)
+    respx.get(f"{DELOITTE}/careers/sitemap_index.xml").mock(return_value=httpx.Response(200, text=(
+        f'<?xml version="1.0"?><sitemapindex><sitemap><loc>{DELOITTE}/en_US/careers/sitemap.xml</loc></sitemap>'
+        "</sitemapindex>")))
+    respx.get(f"{DELOITTE}/en_US/careers/sitemap.xml").mock(return_value=httpx.Response(200, text=""))
+    pages = {0: _search_page(105, 104), 10: _search_page(103, 102), 20: _search_page(101), 30: _search_page()}
+    search = respx.get(url__startswith=f"{DELOITTE}/en_US/careers/SearchJobs/").mock(
+        side_effect=lambda req: httpx.Response(200, text=pages[int(req.url.params["jobOffset"])]))
+    respx.get(url__regex=r".*/JobDetail/.*/105$").mock(return_value=httpx.Response(200, text=KOCH_JOB))
+    adapter = AvatureAdapter()
+    adapter._full_search_at["apply.deloitte.com/careers"] = avature.time.monotonic()  # read in full just now
+    async with httpx.AsyncClient() as client:
+        jobs = await adapter.fetch(client, "apply.deloitte.com/careers", known_ids={"104", "103", "102", "101"})
+    assert search.call_count == 2  # page 2 had only known jobs
+    assert {j.external_id for j in jobs} == {"105", "104", "103", "102"}
+    assert not adapter.last_fetch_complete("apply.deloitte.com/careers")  # a partial list closes nothing
+
+
 def test_avature_slugs_detect_and_page_marker():
     assert avature.parse_slug("koch.avature.net/careers") == ("koch.avature.net", "", "careers")
     assert avature.parse_slug("koch.avature.net/en_US/careers") == ("koch.avature.net", "en_US", "careers")
