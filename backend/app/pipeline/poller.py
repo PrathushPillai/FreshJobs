@@ -13,9 +13,10 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from app.config import settings
 from app.db import SessionLocal, init_db
@@ -181,11 +182,15 @@ def process_company(
     gap_start = company.last_ok_at or (company.last_polled_at if (company.last_status or "").startswith("ok") else None)
     if gap_start is not None and now - gap_start <= timedelta(minutes=settings.listed_exact_gap_minutes):
         gap_start = None
-    # Descriptions are most of the table's size: leave them unloaded, and only note which jobs lack one.
-    existing = {j.external_id: j for j in session.scalars(
-        select(Job).where(Job.company_id == company.id).options(defer(Job.description)))}
-    undescribed = set(session.scalars(select(Job.id).where(
-        Job.company_id == company.id, Job.described.is_(False))))
+    # The few columns the reconcile needs, read from the covering index ix_jobs_company_sync: loading every job
+    # as a full row (even with the description deferred) read past each description's overflow pages and was
+    # 95% of a save. Changes are written as UPDATEs by id; a full Job is loaded only to fill in a description.
+    existing = {r.external_id: r for r in session.execute(
+        select(Job.external_id, Job.id, Job.last_seen_at, Job.missed_polls, Job.closed_at, Job.described)
+        .where(Job.company_id == company.id))}
+    refresh_seen: list[int] = []  # last_seen_at older than LAST_SEEN_RESOLUTION
+    reset_missed: list[int] = []
+    reopened: list[int] = []
     seen_ids = set()
     new_jobs: list[Job] = []
     same_poll_ids: set[int] = set()
@@ -195,26 +200,27 @@ def process_company(
         if nj.external_id in seen_ids:
             continue
         seen_ids.add(nj.external_id)
-        job = existing.get(nj.external_id)
-        if job is not None:
+        row = existing.get(nj.external_id)
+        if row is not None:
             # Only write when something changed. Rewriting last_seen_at on every job every poll rewrote
             # ~900k rows (with their descriptions) per pass and held the write lock for tens of seconds.
             # last_seen_at only has to be accurate to the day (aggregators close after stale_days).
-            if job.last_seen_at is None or now - job.last_seen_at > LAST_SEEN_RESOLUTION:
-                job.last_seen_at = now
-            if job.missed_polls:
-                job.missed_polls = 0
-            if job.id in undescribed and nj.description:
+            if row.last_seen_at is None or now - row.last_seen_at > LAST_SEEN_RESOLUTION:
+                refresh_seen.append(row.id)
+            if row.missed_polls:
+                reset_missed.append(row.id)
+            if not row.described and nj.description:
                 # Enrichment: saved without its details (e.g. a Workday first scan), fetched now.
+                job = session.get(Job, row.id)
                 job.description = nj.description
                 job.posted_at = job.posted_at or nj.posted_at
                 job.location = nj.location[:400] or job.location
                 job.remote = job.remote or nj.remote
                 with session.no_autoflush:
                     apply_flags(session, job, prefs)
-            if job.closed_at is not None:
-                job.closed_at = None
-                session.add(JobEvent(job=job, kind="reopened", at=now))
+            if row.closed_at is not None:
+                reopened.append(row.id)
+                session.add(JobEvent(job_id=row.id, kind="reopened", at=now))
             continue
 
         job = Job(
@@ -269,20 +275,44 @@ def process_company(
             # SQLite write lock is never held long enough to block the other lane or the API.
             session.commit()
 
-    for ext_id, job in existing.items():
-        if ext_id in seen_ids or job.closed_at is not None:
+    missed: dict[int, list[int]] = {}  # new missed_polls -> job ids still short of closing
+    to_close: list[int] = []
+    for ext_id, row in existing.items():
+        if ext_id in seen_ids or row.closed_at is not None:
             continue
         if complete:
             # Gone from a complete listing: close after enough misses in a row.
-            job.missed_polls += 1
-            if job.missed_polls >= settings.missed_polls_to_close:
-                job.closed_at = now
-                session.add(JobEvent(job=job, kind="closed", at=now))
+            misses = (row.missed_polls or 0) + 1
+            if misses >= settings.missed_polls_to_close:
+                to_close.append(row.id)
+                session.add(JobEvent(job_id=row.id, kind="closed", at=now))
+            missed.setdefault(misses, []).append(row.id)
         elif ((not ADAPTERS[company.ats].complete_feed or ADAPTERS[company.ats].capped_ages_out)
-              and job.last_seen_at < now - timedelta(days=settings.stale_days)):
+              and row.last_seen_at < now - timedelta(days=settings.stale_days)):
             # Aggregators (and capped newest-N feeds) only list recent jobs, so age jobs out instead.
-            job.closed_at = now
-            session.add(JobEvent(job=job, kind="closed", at=now, detail=f"not seen for {settings.stale_days} days"))
+            to_close.append(row.id)
+            session.add(JobEvent(job_id=row.id, kind="closed", at=now, detail=f"not seen for {settings.stale_days} days"))
+
+    touched: set[int] = set()
+
+    def bulk(ids: list[int], **values) -> None:
+        touched.update(ids)
+        for i in range(0, len(ids), 500):  # SQLite's limit on bound parameters
+            session.execute(update(Job).where(Job.id.in_(ids[i:i + 500])).values(**values)
+                            .execution_options(synchronize_session=False))
+
+    bulk(refresh_seen, last_seen_at=now)
+    bulk(reset_missed, missed_polls=0)
+    bulk(reopened, closed_at=None)
+    for misses, ids in missed.items():
+        bulk(ids, missed_polls=misses)
+    bulk(to_close, closed_at=now)
+    # Jobs this session already holds (added in an earlier poll of the same session, as in tests, or loaded
+    # for enrichment) would keep their old values: let them reload on next access.
+    for job_id in touched:
+        obj = session.identity_map.get(identity_key(Job, job_id))
+        if obj is not None:
+            session.expire(obj, ["last_seen_at", "missed_polls", "closed_at"])
 
     company.poll_count += 1
     company.last_polled_at = now

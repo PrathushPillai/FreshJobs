@@ -371,3 +371,17 @@ async def test_deadline_also_bounds_saving(session, monkeypatch, tmp_path):
     saved = session.query(Company).filter(Company.poll_count > 0).count()
     assert 0 < saved < 10 and summary["cut_short"] == 10 - saved
     assert session.query(Company).filter(Company.last_polled_at.is_(None)).count() == 10 - saved
+
+
+def test_save_reads_existing_jobs_from_the_covering_index(session):
+    """process_company's read of a board's jobs must be index-only (no job rows, whose columns after the
+    description sit past its overflow pages: loading full rows was 95% of a save)."""
+    from sqlalchemy import select, text
+
+    from app.models import Job
+
+    stmt = select(Job.external_id, Job.id, Job.last_seen_at, Job.missed_polls, Job.closed_at, Job.described).where(
+        Job.company_id == 1)
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
+    assert "COVERING INDEX ix_jobs_company_sync" in plan, plan

@@ -65,6 +65,11 @@ class Job(Base):
         Index("ix_jobs_by_found_v2", "closed_at", "is_repost", "first_seen_at", "listed_at", "no_sponsor", "remote",
               "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
         Index("ix_jobs_company_described", "company_id", "described", "closed_at"),
+        # Everything a poll's save step reads about a board's existing jobs (poller.process_company), so it never
+        # reads the job rows: the columns after `description` sit past its overflow pages, and loading full rows
+        # was 95% of a save (2026-11-10).
+        Index("ix_jobs_company_sync", "company_id", "external_id", "last_seen_at", "missed_polls", "closed_at",
+              "described"),
         # Keyed by id: a search that starts from its full-text matches checks each job's filters here
         # instead of reading the job's row (whose description comes before these columns).
         Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
