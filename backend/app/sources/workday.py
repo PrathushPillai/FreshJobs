@@ -95,12 +95,60 @@ class WorkdayAdapter(Adapter):
     min_interval_minutes = 10
     full_scan_every = 6
     lane = "slow"
+    # Each employer is its own tenant, and 429s are retried with backoff (http_util). With the default 10,
+    # a pass over ~3,700 boards left the median Workday board unchecked for 6.6 hours (2026-11-10).
+    max_concurrency = 20
 
     def __init__(self) -> None:
         # slug -> offset where the newest-first list starts (after any pinned block), learned on full scans.
+        # Kept in workday_state.json next to the database: held only in memory, every restart turned each
+        # board's next partial scan into a full one (up to 100 list requests for a big board).
         self._pinned: dict[str, int] = {}
         # Slugs whose last full scan hit Workday's 2000-result cap: jobs past it are invisible, not closed.
         self._capped: set[str] = set()
+        self._loaded = False
+
+    def _state_path(self):
+        """workday_state.json next to the database; None for an in-memory database (tests)."""
+        from pathlib import Path
+
+        from app.config import settings
+        from app.matching import _models_dir
+
+        url = settings.database_url
+        if url in ("sqlite://", "sqlite:///:memory:") or ":memory:" in url:
+            return None
+        return Path(_models_dir()).parent / "workday_state.json"
+
+    def _load_state(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        import json
+
+        path = self._state_path()
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text())
+            self._pinned.update({k: int(v) for k, v in data.get("pinned", {}).items()})
+            self._capped.update(data.get("capped", []))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save_state(self) -> None:
+        import json
+        import os
+
+        path = self._state_path()
+        if path is None:
+            return
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps({"pinned": self._pinned, "capped": sorted(self._capped)}))
+            os.replace(tmp, path)
+        except OSError:
+            pass  # only a speed-up: the next full scan learns it again
 
     def last_fetch_complete(self, slug: str) -> bool:
         return slug not in self._capped
@@ -168,10 +216,12 @@ class WorkdayAdapter(Adapter):
         host = f"https://{tenant}.{wd}.myworkdayjobs.com"
         api = f"{host}/wday/cxs/{tenant}/{site}"
 
+        self._load_state()
         if full or slug not in self._pinned:  # a partial scan needs the pinned offset from a full scan
             postings, complete = await self._list_all(client, api)
             (self._capped.discard if complete else self._capped.add)(slug)
             self._pinned[slug] = _pinned_end(postings) // PAGE_SIZE * PAGE_SIZE
+            self._save_state()
         else:
             postings = await self._list_recent(client, api, self._pinned[slug], known_ids)
 

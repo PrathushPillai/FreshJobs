@@ -19,14 +19,19 @@ def _retry_after(resp: httpx.Response, attempt: int) -> float:
         return min(2.0 * 2**attempt, MAX_BACKOFF_SECONDS)
 
 
-async def request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+RETRY_STATUSES = (429, 503)
+
+
+async def request(client: httpx.AsyncClient, method: str, url: str, *, retry_statuses: tuple[int, ...] = RETRY_STATUSES,
+                  **kwargs) -> httpx.Response:
     """client.request(), retried with backoff on 429 and 503 (Retry-After is honoured, capped at a minute).
 
+    retry_statuses: more answers that mean "slow down" for a given platform (Avature's 406).
     The final response is returned as is (with its status raised), so callers decide what an error means.
     """
     for attempt in range(MAX_RETRIES + 1):
         resp = await client.request(method, url, **kwargs)
-        if resp.status_code not in (429, 503) or attempt == MAX_RETRIES:
+        if resp.status_code not in retry_statuses or attempt == MAX_RETRIES:
             resp.raise_for_status()
             return resp
         await asyncio.sleep(_retry_after(resp, attempt))

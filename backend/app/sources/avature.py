@@ -29,6 +29,10 @@ import httpx
 
 from app.pipeline.normalize import html_to_text
 from app.sources import http_util
+
+# Avature's shared servers answer 406 to a burst of requests (15 boards in one poll, 2026-11-10; the same
+# boards worked minutes later): a sign to slow down, like 429.
+_RETRY = (406, 429, 503)
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 DETAIL_CONCURRENCY = 3
@@ -238,14 +242,14 @@ class AvatureAdapter(Adapter):
             url = f"https://{host}/{locale}/{portal}/sitemap.xml"
         else:
             url = f"https://{host}/{portal}/sitemap_index.xml"
-        text = (await http_util.get(client, url, follow_redirects=True)).text
+        text = (await http_util.get(client, url, follow_redirects=True, retry_statuses=_RETRY)).text
         for _depth in range(2):
             if "<sitemapindex" not in text[:2000]:
                 break
             chosen = pick_locale([htmllib.unescape(s) for s in _SITEMAP_LOC.findall(text)])
             if not chosen:
                 break
-            text = (await http_util.get(client, chosen[0], follow_redirects=True)).text
+            text = (await http_util.get(client, chosen[0], follow_redirects=True, retry_statuses=_RETRY)).text
         if "<urlset" not in text[:2000]:
             # An error or challenge page: a failed fetch, not "no jobs" (which would close every job).
             raise ValueError(f"no Avature job sitemap for {host}/{portal}")
@@ -270,7 +274,7 @@ class AvatureAdapter(Adapter):
                 return job
             async with sem:
                 try:
-                    page = await http_util.get(client, j["url"], follow_redirects=True)
+                    page = await http_util.get(client, j["url"], follow_redirects=True, retry_statuses=_RETRY)
                 except httpx.HTTPError:
                     return None  # still new next poll, so it gets another try
             info = parse_job_page(page.text, j["id"])

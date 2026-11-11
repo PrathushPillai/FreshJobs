@@ -99,3 +99,11 @@ async def test_greenhouse_later_polls_fetch_details_only_for_new_jobs():
     assert respx.calls[0].request.url.params.get("content") is None
     assert fresh.description == "Pipelines." and fresh.department == "Data" and fresh.remote
     assert old.title == "Data Analyst" and old.description == ""
+
+
+def test_greenhouse_job_with_null_location_and_department():
+    from app.sources.greenhouse import _job
+
+    job = _job({"id": 1, "title": "Engineer", "absolute_url": "u", "location": {"name": None},
+                "departments": [{"name": None}], "content": "x"})
+    assert job.locations == [] and job.remote is False and job.department == ""

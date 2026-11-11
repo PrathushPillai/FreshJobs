@@ -20,7 +20,8 @@ DETAIL_CONCURRENCY = 4
 
 def _job(j: dict, content: dict | None = None) -> NormalizedJob:
     content = content or j
-    location = (j.get("location") or {}).get("name", "")
+    # Some boards send "location": {"name": null} (Veracode, Podium, Built: they never loaded until 2026-11-10).
+    location = (j.get("location") or {}).get("name") or ""
     departments = content.get("departments") or []
     return NormalizedJob(
         external_id=str(j["id"]),
@@ -30,7 +31,7 @@ def _job(j: dict, content: dict | None = None) -> NormalizedJob:
         remote="remote" in location.lower(),
         # Greenhouse returns the description HTML-escaped, so unescape before stripping tags.
         description=html_to_text(html.unescape(content.get("content") or "")),
-        department=departments[0]["name"] if departments else "",
+        department=(departments[0].get("name") or "") if departments else "",
         posted_at=parse_iso(j.get("first_published") or j.get("updated_at")),
     )
 

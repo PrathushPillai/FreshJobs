@@ -122,8 +122,20 @@ def refresh_role_match_for(terms: list[str], include: list[str], exclude: list[s
 # Shorter than this, a job counts as having no description (enrichment and the UI fetch it again).
 MIN_DESCRIPTION_CHARS = 100
 
-# Failed polls in a row after which a never-working board that answers 404/410 is switched off.
+# Failed polls in a row after which a never-working board is switched off, by its answer: "not found" (404,
+# 410) and "no such site" (422: Workday's unknown tenant or site, Polymer) are dead links; 403 may be a
+# temporary block, so it takes longer. On 2026-11-10, 160 Workday 422s, 54 Workday 403s and 10 Polymer 422s
+# from discovery had never worked and were retried every 3 hours. A board that ever worked is never switched off.
 DEAD_BOARD_FAILS = 3
+DEAD_BOARD_RULES = {"HTTP 404": DEAD_BOARD_FAILS, "HTTP 410": DEAD_BOARD_FAILS, "HTTP 422": DEAD_BOARD_FAILS,
+                    "HTTP 403": 10}
+
+
+def is_dead_board(company: Company, error: str) -> bool:
+    if company.last_ok_at is not None:
+        return False
+    code = " ".join(str(error).split()[:2])  # "HTTP 404"
+    return company.fail_streak >= DEAD_BOARD_RULES.get(code, 10**9)
 
 # A failed name lookup ("getaddrinfo failed") is either a dead host or this machine being offline (Wi-Fi not
 # back after sleep). On 2026-11-10 one poll right after waking failed 15,973 boards that way, and the idle
@@ -321,6 +333,9 @@ def process_company(
     return new_jobs
 
 
+RETRY_FAILS = 2  # failures in a row a previously working board is retried at its normal pace
+
+
 def _due(company: Company, now: datetime) -> bool:
     adapter = ADAPTERS.get(company.ats)
     if adapter is None or not adapter.is_configured():
@@ -329,9 +344,17 @@ def _due(company: Company, now: datetime) -> bool:
         return True
     interval = adapter.min_interval_minutes
     # Boards with no open jobs, or whose last fetch failed, are checked less often: with thousands of
-    # discovered boards, most are small companies that post rarely.
+    # discovered boards, most are small companies that post rarely. But a board that has worked before gets
+    # RETRY_FAILS tries at its normal pace first: one timeout or 502 used to park Accenture, Micron and
+    # Prime Healthcare (2-3k jobs each) for 3 hours, and all of them answered fine minutes later.
+    # Empty boards are checked at the normal pace too (except in the rate-limited bulk lane): a small company's
+    # first new job is exactly the kind found hours late on LinkedIn, and since polls save every due board
+    # (lanes in their own processes, 2026-11-10) the 1,678 empty fast-lane boards cost about a minute a poll.
     status = company.last_status or ""
-    if status.startswith(("ok (0 ", "error")):
+    failing = status.startswith("error")
+    retry_soon = failing and company.last_ok_at is not None and (company.fail_streak or 0) <= RETRY_FAILS
+    empty_and_slowed = status.startswith("ok (0 ") and adapter.lane == "bulk"
+    if empty_and_slowed or (failing and not retry_soon):
         interval = max(interval, settings.idle_poll_minutes)
     if interval <= 0:
         return True
@@ -456,7 +479,7 @@ async def poll_once(lane: str | None = None) -> dict:
                     company.last_polled_at = now
                     company.last_status = f"error: {error}"
                     company.fail_streak = (company.fail_streak or 0) + 1
-                    if company.last_ok_at is None and company.fail_streak >= DEAD_BOARD_FAILS and str(error).startswith(("HTTP 404", "HTTP 410")):
+                    if is_dead_board(company, error):
                         # A board that has never worked and keeps saying "not found" is a dead link from
                         # discovery or a list (2,078 of them were retried every 3 hours): switch it off.
                         company.enabled = False

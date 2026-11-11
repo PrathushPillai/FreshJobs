@@ -127,9 +127,12 @@ def test_empty_and_failing_boards_are_polled_less_often(now):
 
     busy = Company(name="Busy", ats="greenhouse", slug="busy", last_polled_at=now - timedelta(minutes=10), last_status="ok (40 open)")
     empty = Company(name="Empty", ats="greenhouse", slug="empty", last_polled_at=now - timedelta(minutes=10), last_status="ok (0 open)")
+    empty_bulk = Company(name="EmptyW", ats="workable", slug="emptyw", last_polled_at=now - timedelta(hours=2), last_status="ok (0 open)")
     broken = Company(name="Broken", ats="greenhouse", slug="broken", last_polled_at=now - timedelta(hours=1), last_status="error: HTTP 404")
-    assert _due(busy, now) and not _due(empty, now) and not _due(broken, now)
-    assert _due(empty, now + timedelta(hours=3))
+    assert _due(busy, now) and not _due(broken, now)
+    assert _due(empty, now)  # an empty board's first new job matters: normal pace (fast and slow lanes)
+    assert not _due(empty_bulk, now) and _due(empty_bulk, now + timedelta(hours=1))  # rate-limited bulk lane
+    assert _due(broken, now + timedelta(hours=3))
 
 
 def test_job_saved_without_description_is_enriched_later(session, now):
@@ -385,3 +388,38 @@ def test_save_reads_existing_jobs_from_the_covering_index(session):
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
     assert "COVERING INDEX ix_jobs_company_sync" in plan, plan
+
+
+@pytest.mark.parametrize("error, streak, worked, dead", [
+    ("HTTP 404", 3, False, True),
+    ("HTTP 422", 3, False, True),     # Workday: no such tenant or site
+    ("HTTP 422", 2, False, False),
+    ("HTTP 403", 9, False, False),    # may be a temporary block: takes longer
+    ("HTTP 403", 10, False, True),
+    ("HTTP 422", 50, True, False),    # it worked before: never switched off this way
+    ("HTTP 500", 50, False, False),
+    ("ReadTimeout: ", 50, False, False),
+])
+def test_dead_board_rules(error, streak, worked, dead):
+    from datetime import datetime, timezone
+
+    from app.pipeline.poller import is_dead_board
+
+    company = Company(name="X", ats="workday", slug="x", fail_streak=streak,
+                      last_ok_at=datetime(2026, 1, 1, tzinfo=timezone.utc) if worked else None)
+    assert is_dead_board(company, error) is dead
+
+
+def test_a_working_board_that_fails_once_is_retried_soon(now):
+    from app.pipeline.poller import _due
+
+    worked = now - timedelta(days=1)
+    blip = Company(name="Big", ats="greenhouse", slug="big", last_polled_at=now - timedelta(minutes=10),
+                   last_status="error: ReadTimeout: ", fail_streak=1, last_ok_at=worked)
+    still = Company(name="Big2", ats="greenhouse", slug="big2", last_polled_at=now - timedelta(minutes=10),
+                    last_status="error: HTTP 502", fail_streak=3, last_ok_at=worked)
+    never = Company(name="New", ats="greenhouse", slug="new", last_polled_at=now - timedelta(minutes=10),
+                    last_status="error: ReadTimeout: ", fail_streak=1, last_ok_at=None)
+    assert _due(blip, now)            # one blip on a board that works: try again at the normal pace
+    assert not _due(still, now)       # failing for a while: back to every idle_poll_minutes
+    assert not _due(never, now)       # never worked: no hurry

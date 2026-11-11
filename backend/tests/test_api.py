@@ -396,3 +396,28 @@ def test_startup_survives_a_locked_database(monkeypatch):
     with TestClient(main.app) as client:
         assert client.get("/api/status").status_code == 200
     assert started == [True]
+
+
+def test_status_counts_are_served_at_once_and_recounted_in_the_background(session, monkeypatch):
+    import threading
+    import time as _time
+
+    from app import main
+
+    main._status_counts.clear()
+    first = main._counts(session)  # nothing counted yet: this one waits
+    assert "open_jobs" in first
+    main._status_counts["at"] = _time.monotonic() - 120  # stale
+    started = threading.Event()
+    real = main._recount
+    monkeypatch.setattr(main, "_recount", lambda s: (started.set(), _time.sleep(0.3), real(s)))
+    t = _time.monotonic()
+    again = main._counts(session)
+    assert _time.monotonic() - t < 0.1 and again is main._status_counts  # served stale, at once
+    assert started.wait(2)  # and recounted in the background
+    for _ in range(100):
+        if _time.monotonic() - main._status_counts["at"] < 60:
+            break
+        _time.sleep(0.05)
+    assert _time.monotonic() - main._status_counts["at"] < 60
+    main._status_counts.clear()

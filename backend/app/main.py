@@ -1553,13 +1553,12 @@ def trigger_poll(_: User = Depends(admin_user)):
 _status_counts: dict = {}  # "at" (monotonic seconds) and the counts
 
 
-def _counts(session: Session) -> dict:
-    """The header's totals. Counting 1.6M jobs takes seconds, and the header asks every few seconds while a
-    check runs, so they're recomputed at most once a minute."""
-    if _status_counts and time.monotonic() - _status_counts["at"] < 60:
-        return _status_counts
+_counts_lock = threading.Lock()
+
+
+def _recount(session: Session) -> None:
     day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-    _status_counts.update(
+    fresh = dict(
         at=time.monotonic(),
         companies=session.scalar(select(func.count()).select_from(Company)),
         open_jobs=session.scalar(select(func.count()).where(Job.closed_at.is_(None), Job.is_repost.is_(False))),
@@ -1568,6 +1567,30 @@ def _counts(session: Session) -> dict:
         ),
         h1b_sponsors=session.scalar(select(func.count()).select_from(H1BSponsor)),
     )
+    _status_counts.update(fresh)
+
+
+def _recount_in_background() -> None:
+    try:
+        with SessionLocal() as s:
+            _recount(s)
+    except Exception:
+        log.warning("status recount failed", exc_info=True)
+    finally:
+        _counts_lock.release()
+
+
+def _counts(session: Session) -> dict:
+    """The header's totals, recounted at most once a minute. Counting 1.8M jobs took over 10 s while polls
+    loaded the disk (2026-11-10), and the header asks every 10 s: so the last counts are served at once and
+    recounted in the background. Only the very first request (nothing counted yet) waits."""
+    if not _status_counts:
+        with _counts_lock:
+            if not _status_counts:
+                _recount(session)
+        return _status_counts
+    if time.monotonic() - _status_counts["at"] >= 60 and _counts_lock.acquire(blocking=False):
+        threading.Thread(target=_recount_in_background, daemon=True).start()
     return _status_counts
 
 

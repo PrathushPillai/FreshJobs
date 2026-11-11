@@ -488,3 +488,17 @@ def test_registry_settings():
         assert ADAPTERS[ats].complete_feed
     assert ADAPTERS["remotive"].min_interval_minutes == 360
     assert ADAPTERS["workday"].full_scan_every > 1
+
+
+def test_workday_pinned_offsets_survive_a_restart(tmp_path, monkeypatch):
+    """A restart used to forget where each board's pinned block ends, so every board's next scan was a full one."""
+    path = tmp_path / "workday_state.json"
+    monkeypatch.setattr(WorkdayAdapter, "_state_path", lambda self: path)
+    first = WorkdayAdapter()
+    first._load_state()
+    first._pinned["acme|wd1|External"] = 40
+    first._capped.add("big|wd5|Careers")
+    first._save_state()
+    again = WorkdayAdapter()  # a new process
+    again._load_state()
+    assert again._pinned == {"acme|wd1|External": 40} and not again.last_fetch_complete("big|wd5|Careers")
