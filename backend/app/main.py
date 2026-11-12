@@ -139,6 +139,9 @@ def run_discovery() -> dict:
         summary = asyncio.run(autodiscover.run_once())
         summary["jobdiva_added"] = asyncio.run(autodiscover.jobdiva_portals())  # weekly
         summary["crawl_added"] = asyncio.run(autodiscover.crawl_new_index())  # only when a new index is out
+        from app.pipeline import sbir
+
+        summary["sbir_added"] = asyncio.run(sbir.maybe_import())  # only when SBIR.gov publishes a new award file
         return summary
     except Exception:
         log.exception("Board discovery failed")

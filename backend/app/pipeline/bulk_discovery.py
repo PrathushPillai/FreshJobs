@@ -574,6 +574,10 @@ def main() -> None:
     bl.add_argument("--ats", nargs="*", help="only these ATSs (default: every supported one)")
     bl.add_argument("--dry-run", action="store_true", help="check the boards and keep the verdicts, add nothing")
     bl.add_argument("--limit", type=int, help="check at most this many slugs")
+    sb = sub.add_parser("sbir", help="small businesses with recent SBIR/STTR awards (also re-read when SBIR.gov updates)")
+    sb.add_argument("--since-year", type=int, default=2023)
+    sb.add_argument("--min-employees", type=int, default=5)
+    sb.add_argument("--dry-run", action="store_true", help="find the boards, save nothing")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
@@ -603,6 +607,10 @@ def main() -> None:
                 from app.pipeline.product_lists import from_products
 
                 return await from_products(client, args.only, args.dry_run)
+            if args.cmd == "sbir":
+                from app.pipeline.sbir import from_sbir
+
+                return (await from_sbir(client, args.since_year, args.min_employees, args.dry_run))[0]
             if args.cmd == "board-lists":
                 from app.pipeline.board_lists import from_board_lists
 
