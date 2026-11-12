@@ -8,12 +8,14 @@ import asyncio
 import logging
 import re
 import socket
+import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import inspect, or_, select, text, update
+from sqlalchemy import func, inspect, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -340,6 +342,69 @@ def process_company(
 RETRY_FAILS = 2  # failures in a row a previously working board is retried at its normal pace
 
 
+# Activity-paced polling (2026-11-12). Checking all ~13,600 fast-lane boards every 5 minutes needed more CPU than
+# the 2-vCPU cloud server has in the US daytime (a poll saved ~8,350 of ~12,400 due boards, so Greenhouse boards
+# waited ~76 minutes), while only ~2,000 of them had posted in the last day. A board's pace now follows how
+# recently it posted: within a day, its normal interval; within a week, twice that; otherwise (or empty) four
+# times (fast lane: 5 / 10 / 20 minutes). A board that posts something new is back at full pace at once.
+ACTIVITY_REFRESH_SECONDS = 3600
+QUIET_FACTORS = ((1, 1), (7, 2))  # (posted within N days, interval factor); older or empty boards: QUIET_FACTOR
+QUIET_FACTOR = 4
+# Per worker process: each board's newest job id, and the job-id boundaries of 1 and 7 days ago.
+_activity: dict = {"at": None, "max_id": {}, "cuts": {}}
+_activity_lock = threading.Lock()
+
+
+def _load_activity() -> None:
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as session:
+        cuts = {days: session.scalar(select(func.max(JobEvent.job_id)).where(
+            JobEvent.kind == "seen", JobEvent.at < now - timedelta(days=days))) or 0 for days, _ in QUIET_FACTORS}
+        hint = "INDEXED BY ix_jobs_company_described " if session.get_bind().dialect.name == "sqlite" else ""
+        max_id = dict(session.execute(text(f"SELECT company_id, max(id) FROM jobs {hint}GROUP BY company_id")).all())
+    _activity.update(max_id=max_id, cuts=cuts)
+
+
+def refresh_activity(*, wait: bool = False) -> None:
+    """Refresh _activity at most every ACTIVITY_REFRESH_SECONDS, in a background thread (the boundary lookup takes
+    ~20 s on the cloud server) unless wait. Until the first load finishes every board keeps its normal pace."""
+    with _activity_lock:
+        at = _activity["at"]
+        if at is not None and time.monotonic() - at < ACTIVITY_REFRESH_SECONDS:
+            return
+        _activity["at"] = time.monotonic()
+
+    def load() -> None:
+        try:
+            _load_activity()
+        except Exception:
+            log.warning("Board activity not refreshed", exc_info=True)
+            _activity["at"] = None  # try again next poll
+
+    if wait:
+        load()
+    else:
+        threading.Thread(target=load, daemon=True).start()
+
+
+def note_new_jobs(company_id: int) -> None:
+    """A board just posted something new: full pace until the next refresh shows it anyway."""
+    _activity["max_id"][company_id] = sys.maxsize
+
+
+def activity_factor(company: Company) -> int:
+    """How many times its normal interval a board waits, from how recently it posted (QUIET_FACTORS). While the
+    database holds less than that much history (a boundary of 0) or before the first load, 1."""
+    cuts = _activity["cuts"]
+    if not cuts:
+        return 1
+    newest = _activity["max_id"].get(company.id, 0)
+    for days, factor in QUIET_FACTORS:
+        if newest > cuts[days] or cuts[days] == 0:
+            return factor
+    return QUIET_FACTOR
+
+
 def _due(company: Company, now: datetime) -> bool:
     adapter = ADAPTERS.get(company.ats)
     if adapter is None or not adapter.is_configured():
@@ -347,6 +412,9 @@ def _due(company: Company, now: datetime) -> bool:
     if company.last_polled_at is None:
         return True
     interval = adapter.min_interval_minutes
+    factor = activity_factor(company)
+    if factor > 1:  # boards with no interval of their own (Greenhouse, Lever...) go at the lane's poll pace
+        interval = max(interval, settings.poll_minutes) * factor
     # Boards with no open jobs, or whose last fetch failed, are checked less often: with thousands of
     # discovered boards, most are small companies that post rarely. But a board that has worked before gets
     # RETRY_FAILS tries at its normal pace first: one timeout or 502 used to park Accenture, Micron and
@@ -439,6 +507,7 @@ async def poll_once(lane: str | None = None) -> dict:
         if lane in (None, "fast"):  # one lane adds new companies, so two lanes starting together can't both insert them
             sync_companies(session, settings.companies_file)
         prefs = get_prefs(session)
+        refresh_activity()  # background, hourly: how recently each board posted (activity_factor)
         companies = [
             c for c in session.scalars(select(Company).where(Company.enabled.is_(True)))
             if _due(c, now) and (lane is None or ADAPTERS[c.ats].lane == lane)
@@ -553,6 +622,8 @@ async def poll_once(lane: str | None = None) -> dict:
                 if new_jobs is None:
                     continue
                 company.fail_streak = 0
+                if new_jobs:
+                    note_new_jobs(company.id)
                 new_total += len(new_jobs)
                 to_alert += [j for j in new_jobs if is_alert_worthy(j, prefs)]
                 if ADAPTERS[company.ats].aggregator:

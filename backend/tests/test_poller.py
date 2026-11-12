@@ -478,3 +478,50 @@ def test_repost_fingerprint_check_uses_the_fingerprint_index(session, now):
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
     assert "ix_jobs_fingerprint" in plan, plan
+
+
+def test_quiet_boards_are_checked_less_often(now, monkeypatch):
+    from app.pipeline import poller
+    from app.pipeline.poller import _due, activity_factor
+
+    monkeypatch.setitem(poller._activity, "cuts", {1: 1000, 7: 500})
+    monkeypatch.setitem(poller._activity, "max_id", {1: 1200, 2: 800, 3: 100})  # posted today / this week / long ago
+    boards = [Company(id=i, name=f"B{i}", ats="greenhouse", slug=f"b{i}", last_status="ok (5 open)") for i in (1, 2, 3, 4)]
+    assert [activity_factor(b) for b in boards] == [1, 2, 4, 4]  # board 4 has no jobs at all
+    for b in boards:
+        b.last_polled_at = now - timedelta(minutes=12)
+    assert [_due(b, now) for b in boards] == [True, True, False, False]  # 5, 10, 20, 20 minutes
+    poller.note_new_jobs(3)  # it just posted: full pace again
+    assert activity_factor(boards[2]) == 1
+
+
+def test_a_young_database_keeps_every_board_at_full_pace(monkeypatch):
+    from app.pipeline import poller
+
+    monkeypatch.setitem(poller._activity, "cuts", {1: 0, 7: 0})  # no history older than a day yet
+    monkeypatch.setitem(poller._activity, "max_id", {})
+    assert poller.activity_factor(Company(id=9, name="New", ats="greenhouse", slug="n")) == 1
+
+
+def test_board_activity_loads_from_the_database(session):
+    from datetime import datetime, timezone
+
+    from app.models import Job, JobEvent
+    from app.pipeline import poller
+
+    now = datetime.now(timezone.utc)  # the boundaries are taken from the real clock
+
+    old, fresh = make_company(session), Company(name="Fresh", ats="greenhouse", slug="fresh")
+    session.add(fresh)
+    session.flush()
+    for company, job_id, age in ((old, 1, 30), (fresh, 2, 0)):
+        session.add(Job(id=job_id, company_id=company.id, external_id=str(job_id), title="T", url="u", fingerprint="f",
+                        first_seen_at=now, last_seen_at=now))
+        session.flush()
+        session.add(JobEvent(job_id=job_id, kind="seen", at=now - timedelta(days=age)))
+    session.commit()
+    poller.refresh_activity.__globals__["_activity"].update(at=None, max_id={}, cuts={})
+    poller.refresh_activity(wait=True)
+    assert poller._activity["max_id"] == {old.id: 1, fresh.id: 2}
+    assert poller.activity_factor(fresh) == 1 and poller.activity_factor(old) == 4
+    poller._activity.update(at=None, max_id={}, cuts={})
