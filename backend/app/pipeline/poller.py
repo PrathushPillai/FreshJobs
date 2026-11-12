@@ -131,9 +131,15 @@ MIN_DESCRIPTION_CHARS = 100
 # 410) and "no such site" (422: Workday's unknown tenant or site, Polymer) are dead links; 403 may be a
 # temporary block, so it takes longer. On 2026-11-10, 160 Workday 422s, 54 Workday 403s and 10 Polymer 422s
 # from discovery had never worked and were retried every 3 hours. A board that ever worked is never switched off.
+# Since 2026-11-12 also 400 and 401 (a wrong slug or a private board: Check24, Gensler, Mercari, a SmartRecruiters
+# "board" named robots.txt from crawl data), and server errors after 20 tries in a row (about 2.5 days at one try
+# every 3 hours: three Whole Foods Workday sites had answered 502 every time since they were found).
 DEAD_BOARD_FAILS = 3
+SERVER_ERROR_FAILS = 20
 DEAD_BOARD_RULES = {"HTTP 404": DEAD_BOARD_FAILS, "HTTP 410": DEAD_BOARD_FAILS, "HTTP 422": DEAD_BOARD_FAILS,
-                    "HTTP 403": 10}
+                    "HTTP 400": DEAD_BOARD_FAILS, "HTTP 401": DEAD_BOARD_FAILS, "HTTP 403": 10,
+                    "HTTP 500": SERVER_ERROR_FAILS, "HTTP 502": SERVER_ERROR_FAILS, "HTTP 503": SERVER_ERROR_FAILS,
+                    "HTTP 504": SERVER_ERROR_FAILS}
 
 
 def is_dead_board(company: Company, error: str) -> bool:

@@ -399,7 +399,11 @@ def test_save_reads_existing_jobs_from_the_covering_index(session):
     ("HTTP 403", 9, False, False),    # may be a temporary block: takes longer
     ("HTTP 403", 10, False, True),
     ("HTTP 422", 50, True, False),    # it worked before: never switched off this way
-    ("HTTP 500", 50, False, False),
+    ("HTTP 400", 3, False, True),     # a wrong slug (SmartRecruiters "robots.txt")
+    ("HTTP 401", 3, False, True),     # a private board
+    ("HTTP 502", 19, False, False),   # server errors take longer
+    ("HTTP 502", 20, False, True),    # Whole Foods' Workday sites: 502 every time since they were found
+    ("HTTP 500", 50, True, False),    # it worked before: never switched off this way
     ("ReadTimeout: ", 50, False, False),
 ])
 def test_dead_board_rules(error, streak, worked, dead):
