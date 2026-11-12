@@ -64,6 +64,38 @@ def _job_view(job: Job, view: dict) -> dict:
     }
 
 
+def _upsert(session: Session, model, rows: list[dict], keys: list[str]) -> None:
+    """Insert rows, or update the ones that exist, in one statement.
+
+    session.merge looks a row up and then inserts it, so two writers at once (the job panel's request, a second
+    request for the same job, the scoring process) both found nothing and both inserted: "UNIQUE constraint
+    failed: job_vectors.job_id", and opening a job answered 500 (cloud server, 2026-11-12).
+    """
+    if not rows:
+        return
+    dialect = session.get_bind().dialect.name
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    elif dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        for row in rows:
+            session.merge(model(**row))
+        return
+    for start in range(0, len(rows), 100):  # well under SQLite's limit on bound values
+        stmt = insert(model.__table__).values(rows[start:start + 100])
+        stmt = stmt.on_conflict_do_update(index_elements=keys,
+                                          set_={c: stmt.excluded[c] for c in rows[0] if c not in keys})
+        session.execute(stmt)
+    # Copies already loaded in this session would keep their old values: reload them on next use.
+    from sqlalchemy.orm.util import identity_key
+
+    for row in rows:
+        obj = session.identity_map.get(identity_key(model, tuple(row[k] for k in keys)))
+        if obj is not None:
+            session.expire(obj)
+
+
 def _vectors(session: Session, jobs: list[Job]) -> dict[int, np.ndarray]:
     """Embeddings for these jobs, computing and saving the missing ones."""
     ids = [j.id for j in jobs]
@@ -74,7 +106,8 @@ def _vectors(session: Session, jobs: list[Job]) -> dict[int, np.ndarray]:
         vectors = matching.embed([matching.job_text(j.title, j.description or "") for j in todo])
         for job, vec in zip(todo, vectors):
             have[job.id] = vec
-            session.merge(JobVector(job_id=job.id, vector=vec.astype(np.float32).tobytes(), described=bool(job.described)))
+        _upsert(session, JobVector, [{"job_id": job.id, "vector": vec.astype(np.float32).tobytes(),
+                                      "described": bool(job.described)} for job, vec in zip(todo, vectors)], ["job_id"])
     return have
 
 
@@ -85,8 +118,8 @@ def _score_jobs(session: Session, jobs: list[Job], view: dict) -> list[JobMatch]
         cos = float(np.dot(view["vector"], vectors[job.id])) if view["vector"] is not None else None
         result = matching.score(view, _job_view(job, view), cos)
         rows.append(JobMatch(user_id=view["user_id"], job_id=job.id, profile_version=view["version"], score=result["score"], detail=result))
-    for row in rows:
-        session.merge(row)
+    _upsert(session, JobMatch, [{"user_id": r.user_id, "job_id": r.job_id, "profile_version": r.profile_version,
+                                 "score": r.score, "detail": r.detail} for r in rows], ["user_id", "job_id"])
     return rows
 
 
