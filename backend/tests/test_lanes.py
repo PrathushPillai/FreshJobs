@@ -148,3 +148,13 @@ def test_sample_stacks_reports_where_a_busy_thread_spends_its_time():
         stop.set()
         t.join()
     assert "samples over" in report and "busy_loop" in report
+
+
+def test_only_the_fast_lane_keeps_normal_cpu_priority(monkeypatch):
+    from app import lanes
+
+    calls = []
+    monkeypatch.setattr(lanes.os, "nice", lambda n: calls.append(n), raising=False)
+    assert lanes.lower_priority("fast") is False
+    assert [lanes.lower_priority(lane) for lane in ("slow", "bulk", "discovery")] == [True, True, True]
+    assert calls == [lanes.BACKGROUND_NICE] * 3

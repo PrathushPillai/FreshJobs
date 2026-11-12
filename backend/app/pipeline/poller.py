@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import inspect, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -34,7 +34,7 @@ from app.pipeline.normalize import company_key, experience_level, experience_yea
 from app.everify import status_for as everify_status
 from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, says_sponsors, student_visa_signal
 from app.prefs import get_prefs, sync_companies
-from app.sources import ADAPTERS, NormalizedJob
+from app.sources import ADAPTERS, NormalizedJob, http_util
 
 log = logging.getLogger(__name__)
 
@@ -363,20 +363,35 @@ def _due(company: Company, now: datetime) -> bool:
     return now - company.last_polled_at >= timedelta(minutes=interval - 1)
 
 
-async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Company, known_ids: set[str]):
-    adapter = ADAPTERS[company.ats]
-    full = company.poll_count % adapter.full_scan_every == 0
+def _source_info(company: Company) -> tuple[str, str, int, str]:
+    """What a fetch needs to know about its source, read when the poll starts: (ats, slug, poll_count, name)."""
+    return company.ats, company.slug, company.poll_count or 0, company.name
+
+
+async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Company, known_ids: set[str],
+                 info: tuple[str, str, int, str] | None = None):
+    """Fetch one source. It never touches the database session: `info` is read before the poll's saves begin.
+
+    Saves run in a worker thread and commit, which expires every company in the session. Reading company.slug
+    here after waiting for a fetch slot then loaded it on the event loop while that thread was flushing the
+    same session: on the cloud server's slower disk (2026-11-11) that corrupted it ("Session.add() is not
+    supported within the execution stage of the flush", then an INSERT of a job with a stale id: UNIQUE
+    constraint failed: jobs.id), and every later query in the slow and bulk lanes' runs failed.
+    """
+    ats, slug, poll_count, name = info or _source_info(company)
+    adapter = ADAPTERS[ats]
+    full = poll_count % adapter.full_scan_every == 0
     async with sem:
         try:
-            jobs = await adapter.fetch(client, company.slug, full=full, known_ids=known_ids, first_scan=company.poll_count == 0)
-            complete = adapter.complete_feed and full and adapter.last_fetch_complete(company.slug)
+            jobs = await adapter.fetch(client, slug, full=full, known_ids=known_ids, first_scan=poll_count == 0)
+            complete = adapter.complete_feed and full and adapter.last_fetch_complete(slug)
             return company, jobs, complete, None
         except httpx.HTTPStatusError as e:
             return company, None, False, f"HTTP {e.response.status_code}"
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
             return company, None, False, f"{type(e).__name__}: {e}"[:300]
         except Exception as e:  # an adapter bug must only fail its own source, never the whole poll
-            log.exception("Unexpected error fetching %s (%s/%s)", company.name, company.ats, company.slug)
+            log.exception("Unexpected error fetching %s (%s/%s)", name, ats, slug)
             return company, None, False, f"{type(e).__name__}: {e}"[:300]
 
 
@@ -384,6 +399,26 @@ def _save(session: Session, company: Company, fetched: list[NormalizedJob], pref
     new_jobs = process_company(session, company, fetched, prefs, now, complete=complete, commit_every=200)
     session.commit()  # per source, so the write lock is held only briefly
     return new_jobs
+
+
+SAVE_TRIES = 3  # a save that failed only because the database stayed locked is tried again
+
+
+def _recover_failed_save(session: Session, company: Company) -> Company | None:
+    """After a save failed: roll back, and return the source (None if it no longer exists)."""
+    company_id = inspect(company).identity[0]
+    session.rollback()
+    return session.get(Company, company_id)
+
+
+def _record_save_error(session: Session, company: Company | None, error: Exception) -> None:
+    if company is None:
+        return
+    company.last_status = f"error: save failed ({type(error).__name__})"
+    try:
+        session.commit()
+    except SQLAlchemyError:  # still locked: the status waits for the next save
+        session.rollback()
 
 
 async def poll_once(lane: str | None = None) -> dict:
@@ -435,8 +470,11 @@ async def poll_once(lane: str | None = None) -> dict:
             ats: asyncio.Semaphore(ADAPTERS[ats].max_concurrency or settings.poll_concurrency)
             for ats in {c.ats for c in companies}
         }
-        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
-            fetches = [asyncio.ensure_future(_fetch(client, sems[c.ats], c, known.get(c.id, set()))) for c in companies]
+        # A bounded cookie jar: httpx copies the whole jar on every request (see http_util.BoundedCookieJar).
+        async with http_util.client(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+            # Each fetch gets its source's details now, before any save can expire them (see _fetch).
+            fetches = [asyncio.ensure_future(_fetch(client, sems[c.ats], c, known.get(c.id, set()), _source_info(c)))
+                       for c in companies]
             # A poll ends by its deadline so the next one starts on time: one slow batch of boards
             # mustn't keep every other board from being checked again for an hour. Sources not
             # reached keep their last_polled_at, so they're first in line next time.
@@ -487,19 +525,29 @@ async def poll_once(lane: str | None = None) -> dict:
                         company.last_status = f"error: {error} (switched off: this board never worked)"
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
                     continue
-                try:
-                    # In a worker thread: saving a big board takes seconds, and on the event loop it froze
-                    # every download in flight. One save at a time, so the session is never shared.
-                    started_save = time.monotonic()
-                    new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
-                    saving += time.monotonic() - started_save
-                except SQLAlchemyError as e:
-                    # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
-                    session.rollback()
-                    errors += 1
-                    log.exception("Saving %s (%s/%s) failed", company.name, company.ats, company.slug)
-                    company.last_status = f"error: save failed ({type(e).__name__})"
-                    session.commit()
+                # Read before saving: after a failed save, touching the board's attributes would flush it.
+                label = f"{company.name} ({company.ats}/{company.slug})"
+                new_jobs = None
+                for attempt in range(SAVE_TRIES):
+                    try:
+                        # In a worker thread: saving a big board takes seconds, and on the event loop it froze
+                        # every download in flight. One save at a time, so the session is never shared.
+                        started_save = time.monotonic()
+                        new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
+                        saving += time.monotonic() - started_save
+                        break
+                    except SQLAlchemyError as e:
+                        # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
+                        company = await asyncio.to_thread(_recover_failed_save, session, company)
+                        if company is not None and "database is locked" in str(e) and attempt + 1 < SAVE_TRIES:
+                            log.warning("Saving %s: database locked, trying again", label)
+                            await asyncio.sleep(5 * (attempt + 1))
+                            continue
+                        errors += 1
+                        log.exception("Saving %s failed", label)
+                        await asyncio.to_thread(_record_save_error, session, company, e)
+                        break
+                if new_jobs is None:
                     continue
                 company.fail_streak = 0
                 new_total += len(new_jobs)

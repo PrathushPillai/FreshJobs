@@ -202,10 +202,28 @@ def _profile_watcher(lane: str) -> None:
             log.warning("%s worker: profiling failed", lane, exc_info=True)
 
 
+# How much lower than the fast lane the other workers run (Unix nice). The fast lane is what brings new jobs
+# in within minutes; on the 2-vCPU cloud server (2026-11-11) every worker ran at the same priority, the slow
+# lane's catch-up pass took 78% of a CPU and the fast lane saved only ~3,400 of ~12,700 due boards per poll.
+BACKGROUND_NICE = 10
+
+
+def lower_priority(lane: str) -> bool:
+    """Lower this worker's CPU priority unless it's the fast lane. True if it was lowered (Unix only)."""
+    if lane == "fast" or not hasattr(os, "nice"):
+        return False
+    try:
+        os.nice(BACKGROUND_NICE)
+        return True
+    except OSError:
+        return False
+
+
 def serve(lane: str, *, max_polls: int | None = None) -> None:
     """Run a lane's polls (or discovery) on its schedule until the backend goes away."""
     from app.config import settings
 
+    lower_priority(lane)
     threading.Thread(target=_profile_watcher, args=(lane,), daemon=True).start()
 
     if lane == "discovery":

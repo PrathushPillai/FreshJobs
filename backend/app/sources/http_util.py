@@ -1,6 +1,7 @@
 """Small HTTP helpers shared by the big-company career-site adapters."""
 
 import asyncio
+import http.cookiejar
 import json
 import re
 from datetime import datetime, timezone
@@ -9,6 +10,37 @@ import httpx
 
 MAX_RETRIES = 3
 MAX_BACKOFF_SECONDS = 60
+
+COOKIE_DOMAINS = 50  # sites whose cookies a long-lived client keeps (the most recently set)
+
+
+class BoundedCookieJar(http.cookiejar.CookieJar):
+    """A cookie jar that keeps only the most recent COOKIE_DOMAINS sites' cookies.
+
+    httpx copies the client's whole jar into a new one on every request (Client._merge_cookies). A poll visits
+    thousands of employers' sites and each sets a few cookies, so every request got slower as the pass went
+    on: on the 2-vCPU cloud server (2026-11-11) about three quarters of the slow lane's CPU went to copying
+    cookies (cookiejar.deepvalues and set_cookie). A board's own requests all go to one site, so its cookies
+    survive; old sites' cookies are dropped.
+    """
+
+    def __init__(self, max_domains: int = COOKIE_DOMAINS) -> None:
+        super().__init__()
+        self.max_domains = max_domains
+
+    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:
+        with self._cookies_lock:
+            super().set_cookie(cookie)
+            domain = cookie.domain
+            if domain in self._cookies:
+                self._cookies[domain] = self._cookies.pop(domain)  # most recently set last
+            while len(self._cookies) > self.max_domains:
+                self._cookies.pop(next(iter(self._cookies)))
+
+
+def client(**kwargs) -> httpx.AsyncClient:
+    """An AsyncClient for long runs over many sites (polls, discovery), with a BoundedCookieJar."""
+    return httpx.AsyncClient(cookies=BoundedCookieJar(), **kwargs)
 
 
 def _retry_after(resp: httpx.Response, attempt: int) -> float:
@@ -20,17 +52,33 @@ def _retry_after(resp: httpx.Response, attempt: int) -> float:
 
 
 RETRY_STATUSES = (429, 503)
+# A dropped or refused connection is tried again too. A big Workday board is up to 100 list requests in a row,
+# and one connection reset failed the whole board: on the cloud server (2026-11-11) 109 Workday boards that work
+# (CVS Health 20k jobs, Lowe's, RTX, Micron...) failed a pass with ReadError, "Server disconnected" or ConnectError.
+# Read timeouts aren't retried: a slow server would just take three times as long.
+TRANSIENT_ERRORS = (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.ConnectError,
+                    httpx.ConnectTimeout)
+TRANSIENT_RETRIES = 2
+TRANSIENT_BACKOFF_SECONDS = 2.0
 
 
 async def request(client: httpx.AsyncClient, method: str, url: str, *, retry_statuses: tuple[int, ...] = RETRY_STATUSES,
                   **kwargs) -> httpx.Response:
-    """client.request(), retried with backoff on 429 and 503 (Retry-After is honoured, capped at a minute).
+    """client.request(), retried with backoff on 429 and 503 (Retry-After is honoured, capped at a minute), and
+    on a dropped or refused connection (TRANSIENT_ERRORS, twice). Every caller only reads, so a retry is safe.
 
     retry_statuses: more answers that mean "slow down" for a given platform (Avature's 406).
     The final response is returned as is (with its status raised), so callers decide what an error means.
     """
     for attempt in range(MAX_RETRIES + 1):
-        resp = await client.request(method, url, **kwargs)
+        for tries in range(TRANSIENT_RETRIES + 1):
+            try:
+                resp = await client.request(method, url, **kwargs)
+                break
+            except TRANSIENT_ERRORS:
+                if tries == TRANSIENT_RETRIES:
+                    raise
+                await asyncio.sleep(TRANSIENT_BACKOFF_SECONDS * (tries + 1))
         if resp.status_code not in retry_statuses or attempt == MAX_RETRIES:
             resp.raise_for_status()
             return resp

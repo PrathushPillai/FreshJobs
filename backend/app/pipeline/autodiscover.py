@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+from app.sources import http_util
 from sqlalchemy import select, text
 
 from app.config import settings
@@ -319,7 +321,7 @@ async def run_once(names: int | None = None, concurrency: int = 8) -> dict:
         return {"looked_for": 0, "added": 0}
     sem = asyncio.Semaphore(concurrency)
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
+    async with http_util.client(timeout=15, follow_redirects=True, headers=headers) as client:
         finder = Finder(client)
 
         async def one(name: str):
@@ -378,7 +380,7 @@ async def crawl_new_index() -> int:
     so a busy index server doesn't make every run retry it."""
     from app.pipeline.bulk_discovery import CC_INFO, CC_PATTERNS, _cc_get, from_commoncrawl
 
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+    async with http_util.client(timeout=60, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         info = await _cc_get(client, CC_INFO, tries=2)
         if info is None:
             return 0
@@ -412,7 +414,7 @@ async def jobdiva_portals(every_days: int = 7) -> int:
         if session.get(ProbeCache, f"jobdiva-index:{week}"):
             return 0
         tracked = {c.slug.split("/")[-1] for c in session.scalars(select(Company).where(Company.ats == "jobdiva"))}
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+    async with http_util.client(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         try:
             r = await client.get(JOBDIVA_INDEX)
             r.raise_for_status()
