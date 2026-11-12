@@ -40,7 +40,8 @@ log = logging.getLogger(__name__)
 
 USER_AGENT = "job-portal-personal/0.1 (personal job search tool)"
 # How stale a still-listed job's last_seen_at may get before it is rewritten (see process_company).
-LAST_SEEN_RESOLUTION = timedelta(hours=6)
+LAST_SEEN_RESOLUTION = timedelta(hours=24)  # was 6 h: on the cloud server's slow disk those rewrites (~80 a second
+# across 1.8M jobs) were a quarter of the fast lane's saving time; aggregators close after stale_days (14), so a day is enough
 
 
 def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:

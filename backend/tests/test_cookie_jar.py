@@ -75,3 +75,13 @@ async def test_a_connection_that_keeps_failing_still_raises(monkeypatch):
         with pytest.raises(httpx.ConnectError):
             await http_util.get(client, "https://gone.example/jobs")
     assert route.call_count == http_util.TRANSIENT_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_long_run_clients_keep_many_connections_open():
+    # httpx keeps 20 idle connections by default; a poll's 25-per-platform concurrency closed and reopened them
+    # constantly (new HTTPS handshakes were the fast lane's biggest CPU cost).
+    async with http_util.client() as client:
+        pool = client._transport._pool
+        assert pool._max_keepalive_connections >= 150 and pool._max_connections >= 200

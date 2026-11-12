@@ -38,8 +38,16 @@ class BoundedCookieJar(http.cookiejar.CookieJar):
                 self._cookies.pop(next(iter(self._cookies)))
 
 
+# Connection pool for long runs. httpx keeps 20 idle connections by default; a poll runs 25 requests at a time
+# per platform (Greenhouse, Lever, Ashby... each one API host), so connections were closed and reopened all the
+# time, and the new HTTPS handshakes were the fast lane's biggest CPU cost on the cloud server (2026-11-12 profile:
+# ssl.do_handshake first, then socket setup and teardown).
+POOL_LIMITS = httpx.Limits(max_connections=300, max_keepalive_connections=200, keepalive_expiry=60)
+
+
 def client(**kwargs) -> httpx.AsyncClient:
-    """An AsyncClient for long runs over many sites (polls, discovery), with a BoundedCookieJar."""
+    """An AsyncClient for long runs over many sites (polls, discovery): a BoundedCookieJar and a bigger pool."""
+    kwargs.setdefault("limits", POOL_LIMITS)
     return httpx.AsyncClient(cookies=BoundedCookieJar(), **kwargs)
 
 

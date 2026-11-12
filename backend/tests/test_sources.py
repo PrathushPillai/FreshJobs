@@ -107,3 +107,31 @@ def test_greenhouse_job_with_null_location_and_department():
     job = _job({"id": 1, "title": "Engineer", "absolute_url": "u", "location": {"name": None},
                 "departments": [{"name": None}], "content": "x"})
     assert job.locations == [] and job.remote is False and job.department == ""
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_known_jobs_skip_their_description_on_ashby_lever_and_gem():
+    # Converting every job's HTML on every poll was about a fifth of the fast lane's CPU; only new jobs need it.
+    from app.sources.ashby import AshbyAdapter
+    from app.sources.gem import GemAdapter
+    from app.sources.lever import LeverAdapter
+
+    body = "<p>" + "Build data pipelines in Spark and SQL. " * 5 + "</p>"
+    respx.get("https://api.ashbyhq.com/posting-api/job-board/acme").mock(return_value=httpx.Response(200, json={"jobs": [
+        {"id": "a1", "title": "Data Engineer", "jobUrl": "https://x/a1", "descriptionHtml": body},
+        {"id": "a2", "title": "ML Engineer", "jobUrl": "https://x/a2", "descriptionHtml": body}]}))
+    respx.get("https://api.lever.co/v0/postings/acme").mock(return_value=httpx.Response(200, json=[
+        {"id": "l1", "text": "Data Engineer", "hostedUrl": "https://x/l1", "descriptionPlain": body},
+        {"id": "l2", "text": "ML Engineer", "hostedUrl": "https://x/l2", "descriptionPlain": body}]))
+    respx.get(url__regex=r"https://api\.gem\.com/job_board/v0/acme/.*").mock(return_value=httpx.Response(200, json=[
+        {"id": 1, "title": "Data Engineer", "absolute_url": "https://x/g1", "content": body},
+        {"id": 2, "title": "ML Engineer", "absolute_url": "https://x/g2", "content": body}]))
+    async with httpx.AsyncClient() as client:
+        ashby = await AshbyAdapter().fetch(client, "acme", known_ids={"a1"})
+        lever = await LeverAdapter().fetch(client, "acme", known_ids={"l1"})
+        gem = await GemAdapter().fetch(client, "acme", known_ids={"1"})
+    for jobs, known in ((ashby, "a1"), (lever, "l1"), (gem, "1")):
+        by_id = {j.external_id: j for j in jobs}
+        assert by_id[known].description == "" and by_id[known].title == "Data Engineer"
+        assert all("Spark and SQL" in j.description for k, j in by_id.items() if k != known)

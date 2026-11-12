@@ -36,7 +36,7 @@ security list.
 | `/home/ubuntu/freshjobs` | the code (sent by `deploy.sh`) and its `.env` |
 | `/home/ubuntu/freshjobs-data/jobs.db` | the database |
 | `/home/ubuntu/freshjobs-data/models` | the resume-match model, downloaded on first use |
-| `/home/ubuntu/freshjobs-data/backups` | nightly compressed copies (04:15 UTC, lowest CPU and disk priority, each checked with `PRAGMA quick_check` before it's kept), the newest 3; output in `journalctl -t freshjobs-backup` |
+| `/home/ubuntu/freshjobs-data/backups` | nightly compressed copies (09:15 UTC: 4:15 am Eastern, 1:15 am Pacific, the quietest hour for US postings; lowest CPU and disk priority, each checked with `PRAGMA quick_check` before it's kept), the newest 3; output in `journalctl -t freshjobs-backup` |
 | `freshjobs-backend` (systemd) | the API, pollers and alerts; restarts by itself |
 | `caddy` (systemd) | HTTPS, the frontend and `/api` |
 

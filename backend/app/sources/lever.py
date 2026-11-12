@@ -1,3 +1,5 @@
+from collections.abc import Set
+
 import httpx
 
 from app.pipeline.normalize import html_to_text
@@ -26,7 +28,8 @@ class LeverAdapter(Adapter):
     ats = "lever"
     max_concurrency = 25  # public postings API, one request per board
 
-    async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
+    async def fetch(self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_) -> list[NormalizedJob]:
+        # Known jobs skip their description (see AshbyAdapter.fetch).
         resp = await client.get(f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"})
         resp.raise_for_status()
         jobs = []
@@ -41,7 +44,7 @@ class LeverAdapter(Adapter):
                     url=j.get("hostedUrl", ""),
                     locations=locations,
                     remote=workplace == "remote" or any("remote" in loc.lower() for loc in locations),
-                    description=lever_description(j),
+                    description="" if j["id"] in known_ids else lever_description(j),
                     department=cats.get("team") or cats.get("department") or "",
                     posted_at=from_epoch_ms(j.get("createdAt")),
                 )

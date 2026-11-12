@@ -218,7 +218,9 @@ def test_still_listed_jobs_are_not_rewritten_every_poll(session, now):
     process_company(session, company, [nj("1")], prefs, now + timedelta(minutes=5))
     assert job.last_seen_at == now and job not in session.dirty  # nothing to write for the job
     process_company(session, company, [nj("1")], prefs, now + timedelta(hours=7))
-    assert job.last_seen_at == now + timedelta(hours=7)
+    assert job.last_seen_at == now  # refreshed at most once a day (LAST_SEEN_RESOLUTION)
+    process_company(session, company, [nj("1")], prefs, now + timedelta(hours=25))
+    assert job.last_seen_at == now + timedelta(hours=25)
 
 
 @pytest.mark.asyncio
