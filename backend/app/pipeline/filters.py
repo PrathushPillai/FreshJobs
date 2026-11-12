@@ -31,6 +31,77 @@ US_CITIES = [
     "denver", "atlanta", "miami", "washington", "dallas", "houston", "san diego", "pittsburgh",
     "philadelphia", "portland", "salt lake city", "raleigh", "bay area", "silicon valley", "cambridge",
 ]
+# "City, XX" where XX is both a US state and a country's code: SuccessFactors and others write "Hyderabad, IN"
+# (India), and every such job counted as Indiana, so Indian, Canadian, German and Israeli jobs showed in the US
+# feed (2026-11-12, "Consultant - ServiceNow Reporting", Yash Technologies, Hyderabad, IN). Only well-known cities
+# of those countries are listed, and none that also exists in that US state (Ontario, California is left out).
+FOREIGN_CITIES = {
+    "IN": ("India", {
+        "hyderabad", "secunderabad", "bangalore", "bengaluru", "pune", "chennai", "mumbai", "navi mumbai", "thane",
+        "delhi", "new delhi", "gurgaon", "gurugram", "noida", "greater noida", "kolkata", "ahmedabad", "kochi",
+        "cochin", "coimbatore", "trivandrum", "thiruvananthapuram", "mohali", "chandigarh", "jaipur", "indore",
+        "nagpur", "vadodara", "visakhapatnam", "vizag", "mysore", "mysuru", "bhubaneswar", "lucknow", "mangalore",
+        "mangaluru", "madurai", "nashik", "surat", "goa", "panaji", "vijayawada", "warangal", "hubli", "dehradun",
+        "bhopal", "raipur", "ranchi", "patna", "guwahati", "gandhinagar", "vellore", "tiruchirappalli", "trichy",
+        "faridabad", "ghaziabad", "manesar", "hinjewadi", "whitefield", "gachibowli", "madhapur", "kharadi",
+        "aurangabad", "rajkot", "kozhikode", "calicut", "thrissur", "nellore", "guntur", "kakinada", "salem",
+    }),
+    "CA": ("Canada", {
+        "toronto", "vancouver", "montreal", "montréal", "ottawa", "calgary", "edmonton", "waterloo", "kitchener",
+        "mississauga", "markham", "winnipeg", "halifax", "quebec city", "québec", "burnaby", "brampton",
+        "saskatoon", "regina", "oakville", "richmond hill", "vaughan", "laval", "gatineau", "guelph", "kanata",
+    }),
+    "DE": ("Germany", {
+        "berlin", "munich", "münchen", "muenchen", "frankfurt", "frankfurt am main", "hamburg", "cologne", "köln",
+        "stuttgart", "düsseldorf", "dusseldorf", "leipzig", "dresden", "nuremberg", "nürnberg", "hannover",
+        "heidelberg", "karlsruhe", "bonn", "mannheim", "walldorf", "darmstadt", "aachen", "potsdam",
+    }),
+    "IL": ("Israel", {
+        "tel aviv", "tel aviv-yafo", "jerusalem", "haifa", "herzliya", "petah tikva", "petach tikva", "ra'anana",
+        "raanana", "netanya", "beer sheva", "be'er sheva", "rehovot", "yokneam", "caesarea", "kfar saba",
+        "hod hasharon", "rosh haayin", "ramat gan", "airport city", "modiin", "or yehuda",
+    }),
+    "CO": ("Colombia", {"bogota", "bogotá", "medellin", "medellín", "cali", "barranquilla", "cartagena"}),
+    "AR": ("Argentina", {"buenos aires", "cordoba", "córdoba", "rosario", "mendoza"}),
+    "MA": ("Morocco", {"casablanca", "rabat", "marrakech", "tangier", "fes"}),
+    "ID": ("Indonesia", {"jakarta", "bandung", "surabaya", "denpasar", "bali"}),
+    "PA": ("Panama", {"panama city", "ciudad de panamá"}),
+}
+
+
+# Cities that are never a US place whatever state code follows them: "Bangalore, CA" (478 jobs) is India. Only
+# cities with no US namesake of note (not Vancouver, WA; Berlin, NH; Salem, OR; Delhi, NY; Ottawa, IL).
+NEVER_US = {city: country for country, cities in (
+    ("India", ("hyderabad", "secunderabad", "bangalore", "bengaluru", "pune", "chennai", "mumbai", "navi mumbai",
+               "gurgaon", "gurugram", "noida", "greater noida", "kolkata", "kochi", "cochin", "coimbatore",
+               "trivandrum", "thiruvananthapuram", "mohali", "ahmedabad", "visakhapatnam", "bhubaneswar", "mysuru",
+               "hinjewadi", "whitefield", "gachibowli", "madhapur")),
+    ("Canada", ("toronto", "montreal", "montréal", "mississauga", "brampton")),
+    ("Israel", ("tel aviv", "tel aviv-yafo", "herzliya", "petah tikva", "petach tikva", "ra'anana", "raanana")),
+    ("Germany", ("munich", "münchen", "frankfurt am main", "düsseldorf")),
+    ("Colombia", ("bogotá", "medellín", "medellin")),
+    ("Argentina", ("buenos aires",)),
+    ("Indonesia", ("jakarta",)),
+    ("Morocco", ("casablanca",)),
+) for city in cities}
+
+
+def foreign_country(city: str, code: str) -> str | None:
+    """The country for "City, XX" when XX looks like a US state code but the place isn't in the US: XX is also that
+    country's code and the city one of its well-known ones (FOREIGN_CITIES: "Hyderabad, IN" -> "India"), or the
+    city is never a US place (NEVER_US: "Bangalore, CA" -> "India"). Else None."""
+    c, code = (city or "").strip().lower(), (code or "").upper()
+    entry = FOREIGN_CITIES.get(code)
+    if entry and c in entry[1]:
+        return entry[0]
+    return NEVER_US.get(c) if code in US_STATES else None
+
+
+# "Montreal, QC, CA", "Montreal - QC - CA", "Toronto, Ontario, CA": CA after a Canadian province is Canada, not
+# California. A place must come first, so "Ontario, CA" (a city in California) stays US.
+_PROVINCE_THEN_CA = re.compile(r"(?:,|\s[-–]\s)\s*(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT|alberta|british columbia|manitoba|new brunswick|newfoundland(?: and labrador)?|nova scotia|ontario|prince edward island|qu[eé]bec|saskatchewan)\s*(?:,|\s[-–]\s)\s*CA(?![A-Za-z])", re.I)
+_CITY_CODE = re.compile(r"(?:^|[-–—/(]\s*)([^,\-–—/()]+?)\s*,\s*([A-Za-z]{2})\s*(?:[,)]|$)")
+
 _US_WORDS = re.compile(r"\b(united states|usa|u\.s\.a?\.?|us|america)\b", re.I)
 _STATE_CODE = re.compile(r",\s*(" + "|".join(US_STATES) + r")\b")
 # "Baja California" is in Mexico, not the US state inside its name.
@@ -50,6 +121,10 @@ def is_us_location(location: str, remote: bool) -> bool:
     if not location:
         return remote
     for part in re.split(r"\s*\|\s*|;", location):
+        if (m := _CITY_CODE.search(part)) and foreign_country(m.group(1), m.group(2)) and not _US_WORDS.search(part):
+            continue  # "Hyderabad, IN" is India, not Indiana
+        if _PROVINCE_THEN_CA.search(part) and not _US_WORDS.search(part):
+            continue
         if _US_WORDS.search(part) or _STATE_CODE.search(part) or _STATE_NAME.search(part) or _CITY.search(part):
             return True
         if "remote" in part.lower() and not _NON_US.search(part):

@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from app.pipeline.filters import US_STATES
+from app.pipeline.filters import US_STATES, foreign_country
 
 STATE_NAME_TO_CODE = {name: code for code, name in US_STATES.items()}
 
@@ -186,6 +186,8 @@ def _parse_part(part: str) -> list[Place]:
         low = raw.lower()
         if low in COUNTRIES and not (low == "us" and raw != raw.upper()):
             country = COUNTRIES[low]
+        elif len(raw) == 2 and i > 0 and country is None and (foreign := foreign_country(tokens[i - 1], raw)):
+            country = foreign  # "Hyderabad, IN" is India, not Indiana (filters.FOREIGN_CITIES)
         elif len(raw) == 2 and raw.upper() in US_STATES and (raw.isupper() or i > 0) and country in (None, "United States"):
             state, country = raw.upper(), "United States"
         elif low in STATE_NAME_TO_CODE and (low not in CITIES or (is_remote and low == "washington")):
@@ -198,6 +200,8 @@ def _parse_part(part: str) -> list[Place]:
             country = COUNTRY_CODES[raw]
         elif low in _REGIONS:
             continue
+        elif raw == "CA" and country == "Canada":
+            continue  # "Montreal, QC, CA": the country's code after its province, not a city called CA
         elif (cs := re.fullmatch(r"([A-Z]{2,3})-([A-Z]{2,3})", raw)) and cs.group(1) in COUNTRY_CODES:
             # "Denver, USA-CO, USA, 12421" (SuccessFactors): country code and state, not a city called USA-CO
             country = COUNTRY_CODES[cs.group(1)]
@@ -206,7 +210,8 @@ def _parse_part(part: str) -> list[Place]:
         else:
             # "Fort Worth TX", "San Mateo, CA United States", "CA United States"
             m = re.match(r"^(?:(.*?)\s+)?([A-Z]{2})(?:\s+(?:united states|usa|us))?$", raw, re.I)
-            if m and m.group(2).upper() in US_STATES and (m.group(2).isupper() or m.group(1) is None):
+            # Only while no other country was found: "Montreal, QC, CA" is Quebec, Canada, not California.
+            if m and m.group(2).upper() in US_STATES and (m.group(2).isupper() or m.group(1) is None)                     and country in (None, "United States"):
                 state, country = m.group(2).upper(), "United States"
                 if m.group(1):
                     leftovers.append(m.group(1))
