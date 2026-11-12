@@ -6,10 +6,11 @@ set -euo pipefail
 DATA=/home/ubuntu/freshjobs-data
 OUT="$DATA/backups/jobs-$(date +%Y%m%d).db"
 NICE="nice -n 19 ionice -c 3"
-rm -f "$OUT" "$OUT.gz.part"
+cleanup() { rm -f "$OUT" "$OUT-shm" "$OUT-wal" "$OUT.gz.part"; }  # the copy and SQLite's side files
+cleanup
 $NICE sqlite3 "$DATA/jobs.db" ".backup '$OUT'"
 # A copy that isn't a sound database is no backup: check it before keeping it.
-[ "$($NICE sqlite3 -readonly "$OUT" 'PRAGMA quick_check;')" = "ok" ] || { echo "backup $OUT failed its check" >&2; rm -f "$OUT"; exit 1; }
-$NICE gzip -1 -c "$OUT" > "$OUT.gz.part" && mv "$OUT.gz.part" "$OUT.gz" && rm -f "$OUT"
+[ "$($NICE sqlite3 -readonly "$OUT" 'PRAGMA quick_check;')" = "ok" ] || { echo "backup $OUT failed its check" >&2; cleanup; exit 1; }
+$NICE gzip -1 -c "$OUT" > "$OUT.gz.part" && mv "$OUT.gz.part" "$OUT.gz" && rm -f "$OUT" "$OUT-shm" "$OUT-wal"
 ls -1t "$DATA"/backups/jobs-*.db.gz | tail -n +4 | xargs -r rm --
 echo "backup $OUT.gz $(du -h "$OUT.gz" | cut -f1)"
