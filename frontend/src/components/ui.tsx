@@ -105,6 +105,18 @@ export function SponsorLikelyBadge({ job }: { job: Pick<Job, 'sponsor_likely' | 
   return null
 }
 
+/** "Consultancy" or "Staffing firm": the employer mostly places people at client companies (from its own H-1B
+ * filings, a staffing agency's job system, or its name). Shown, never hidden unasked; More can hide them. */
+export function EmployerKindBadge({ kind }: { kind: Job['employer_kind'] }) {
+  if (kind === 'consultancy') {
+    return <Badge tone="amber" dot title="A consultancy: most of its H-1B workers are placed at client companies (US Department of Labor data), or its name says so. More → Hide consultancies & staffing firms leaves these out.">Consultancy</Badge>
+  }
+  if (kind === 'staffing') {
+    return <Badge tone="amber" dot title="A staffing firm: it recruits for client companies, so the job is with one of its clients. More → Hide consultancies & staffing firms leaves these out.">Staffing firm</Badge>
+  }
+  return null
+}
+
 export function SponsorBadge({ filings }: { filings: number | null }) {
   if (!filings) return null
   const label = filings >= 1000 ? `${(filings / 1000).toFixed(filings >= 10_000 ? 0 : 1)}k` : String(filings)

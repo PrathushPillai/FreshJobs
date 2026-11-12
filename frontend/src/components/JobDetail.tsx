@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { api, formatDateTime, type H1BHistory, type JobDetail as JobDetailType, type MatchDetail, money, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
-import { Badge, CompanyAvatar, ExperienceBadge, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, CompanyAvatar, EmployerKindBadge, ExperienceBadge, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, TrackControl, VisaSignalBadges } from './ui'
 
 /** Apply a Hunter.io pattern like "{first}.{last}" to a name. */
 function guessEmail(pattern: string, domain: string, name: string): string | null {
@@ -196,6 +196,7 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
           <SponsorLikelyBadge job={j} />
           <SponsorBadge filings={j.h1b_filings} />
           <VisaSignalBadges job={j} />
+          <EmployerKindBadge kind={j.employer_kind} />
           {j.remote && <Badge tone="slate">Remote</Badge>}
           {j.no_sponsor && <Badge tone="red" dot>No sponsorship</Badge>}
           <RepeatBadge job={j} />

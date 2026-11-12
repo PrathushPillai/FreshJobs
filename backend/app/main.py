@@ -317,6 +317,7 @@ class JobOut(BaseModel):
     exp_level: str
     baseline: bool
     h1b_filings: int | None
+    employer_kind: str | None = None  # "consultancy", "staffing" or empty (h1b.job_employer_kind): a badge
     application: TrackedOut | None
     # How likely the employer is to sponsor (pipeline/sponsorship.sponsor_likelihood): likely, possible,
     # unlikely or ruled_out. Derived from the fields above, so it never disagrees with them.
@@ -646,6 +647,7 @@ def list_jobs(
     sponsors_only: bool = False,
     sponsor_likely: str | None = None,  # "likely": likely only; "possible": likely or possible (sponsor_likelihood)
     everify_only: bool = False,  # employers in USCIS's E-Verify list, or whose posting says they use it
+    hide_consultancies: bool = False,  # opt-in: leave out consultancies and staffing firms (Job.employer_kind)
     hide_no_sponsor: bool = True,
     show_reposts: bool = False,
     repeat_kinds: list[str] = Query([]),  # with show_reposts: which repeats to show (empty = all of REPEAT_KINDS)
@@ -727,6 +729,9 @@ def list_jobs(
                 stmt = stmt.where(mine)  # and this user's own roles
         if remote_only:
             stmt = stmt.where(Job.remote.is_(True))
+        if hide_consultancies:
+            # Opt-in, so it may read job rows (employer_kind isn't in the sort indexes): the walk stops after a page.
+            stmt = stmt.where(or_(Job.employer_kind.is_(None), Job.employer_kind == ""))
         if sponsors_only:
             # "+jobs.h1b_filings" except when sorting by filings: as a plain range SQLite started from
             # ix_jobs_by_sponsor, read every sponsored open job and sorted them all by date (5 s warm,

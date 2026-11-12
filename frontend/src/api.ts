@@ -46,6 +46,8 @@ export interface Job {
   exp_level: ExpLevel
   baseline: boolean
   h1b_filings: number | null
+  /** A consultancy or staffing firm (backend h1b.job_employer_kind): a badge, and the opt-in hide filter. */
+  employer_kind: 'consultancy' | 'staffing' | '' | null
   /** How likely the employer is to sponsor (backend sponsorship.sponsor_likelihood). */
   sponsor_likely: SponsorLikely
   application: { id: number; status: AppStatus } | null
@@ -347,6 +349,8 @@ export interface JobQuery {
   /** 'likely': likely sponsors only; 'possible': likely or possible; 'any': no filter. */
   sponsor_likely?: 'any' | 'likely' | 'possible'
   everify_only?: boolean
+  /** Leave out consultancies and staffing firms (off by default: they get a badge instead). */
+  hide_consultancies?: boolean
   /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
   fresh_counts?: boolean
   hide_no_sponsor?: boolean

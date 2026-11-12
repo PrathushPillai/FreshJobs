@@ -20,7 +20,7 @@ from sqlalchemy.orm.util import identity_key
 
 from app.config import settings
 from app.db import SessionLocal, init_db
-from app.h1b import sponsor_index
+from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.discovery import discover
@@ -62,6 +62,8 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.sponsors_text = not job.no_sponsor and says_sponsors(job.description)
     job.everify = everify_status(session, job.company_name or "")
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
+    job.employer_kind = job_employer_kind(job.company_name or "", job.company.ats if job.company else "",
+                                          sponsor_index(session))
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
 

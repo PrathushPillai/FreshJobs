@@ -444,3 +444,31 @@ def test_h1b_sponsors_filter_does_not_start_from_the_sponsor_index(session):
            "ORDER BY jobs.first_seen_at DESC, jobs.id DESC LIMIT 50")
     plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
     assert "ix_jobs_by_found_v2" in plan and "TEMP B-TREE FOR ORDER BY" not in plan, plan
+
+
+def test_consultancies_get_a_badge_and_are_hidden_only_when_asked(client, session):
+    from app.models import Job
+
+    for job in session.query(Job):
+        job.employer_kind = {"Data Analyst": "consultancy", "Senior Software Engineer": "staffing"}.get(job.title, "")
+    session.commit()
+    everything = client.get("/api/jobs", params={"countries": [], "hide_no_sponsor": False}).json()["items"]
+    kinds = {j["title"]: j["employer_kind"] for j in everything}
+    assert kinds["Data Analyst"] == "consultancy" and kinds["Senior Software Engineer"] == "staffing"
+    assert "Data Analyst" in kinds  # shown by default: a badge, never hidden unasked
+    hidden = titles(client.get("/api/jobs", params={"countries": [], "hide_no_sponsor": False, "hide_consultancies": True}))
+    assert "Data Analyst" not in hidden and "Senior Software Engineer" not in hidden and "Data Engineer" in hidden
+
+
+def test_job_employer_kind_rules():
+    from app.h1b import SponsorIndex, job_employer_kind
+
+    idx = SponsorIndex([("yash technologies", 68, "consultancy"), ("google", 9000, ""), ("mix", 10, "consultancy"),
+                        ("mix holdings", 30, "")])
+    assert job_employer_kind("Yash Technologies, Inc", "successfactors", idx) == "consultancy"
+    assert job_employer_kind("Google", "greenhouse", idx) == ""
+    assert job_employer_kind("Mix", "lever", idx) == ""  # a minority of its filings: hires mostly for itself
+    assert job_employer_kind("Talent Software Services", "jobdiva", idx) == "staffing"  # a staffing agency's system
+    assert job_employer_kind("Blue Ridge Consulting Group", "lever", idx) == "consultancy"  # the name says so
+    assert job_employer_kind("TekPro Staffing", "ashby", idx) == "staffing"
+    assert job_employer_kind("Stripe", "greenhouse", idx) == ""

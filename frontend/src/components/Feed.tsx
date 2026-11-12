@@ -5,7 +5,7 @@ import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
 import RolesBar from './RolesBar'
-import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, Choice, CompanyAvatar, EXP_LABELS, EmployerKindBadge, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
 
 const PAGE = 50
 // "Date posted" uses the company's own posting date; "Found" uses when we first saw the job.
@@ -42,7 +42,7 @@ const SPONSOR_CHOICES = [
   { value: 'possible', label: 'Likely or may sponsor', hint: 'Also employers with a few H-1Bs, or E-Verify (STEM OPT)' },
 ] as const
 
-type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
+type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_consultancies' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
   Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
@@ -58,6 +58,7 @@ const DEFAULT_FILTERS: Filters = {
   sponsors_only: false,
   sponsor_likely: 'any',  // 'likely' / 'possible': the Visa pill's sponsorship choice
   everify_only: false,
+  hide_consultancies: false,  // shown with a badge by default; More can hide them
   // Shown by default: some employers that say they don't sponsor can still be persuaded. Each such job
   // carries a red "No sponsorship" badge, and the Visa pill can hide them.
   hide_no_sponsor: false,
@@ -205,6 +206,7 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
             <SponsorLikelyBadge job={job} />
             <SponsorBadge filings={job.h1b_filings} />
             <VisaSignalBadges job={job} />
+            <EmployerKindBadge kind={job.employer_kind} />
             {isNew(job) && <Badge tone="green" dot>Found {timeAgo(job.first_seen_at)}</Badge>}
             <RepeatBadge job={job} />
             {job.no_sponsor && <Badge tone="red" dot>No sponsorship</Badge>}
@@ -469,7 +471,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const expLabel = filters.exp_levels.length
     ? filters.exp_levels.map((l) => EXP_LABELS[l].split(' ')[0]).join(', ')
     : filters.max_years !== undefined ? `≤ ${filters.max_years} yrs` : 'Experience'
-  const moreActive = filters.show_reposts || filters.tracked !== 'any'
+  const moreActive = filters.show_reposts || filters.tracked !== 'any' || filters.hide_consultancies
 
   return (
     <div className="space-y-4">
@@ -689,8 +691,13 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             ))}
           </FilterPill>
 
-          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any' })}>
+          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any', hide_consultancies: false })}>
             <div className="space-y-2">
+              <Toggle
+                label="Hide consultancies & staffing firms"
+                checked={f.hide_consultancies}
+                onChange={(v) => stage({ hide_consultancies: v })}
+              />
               <Toggle
                 label="Show repeated jobs (hidden by default)"
                 checked={f.show_reposts}

@@ -71,22 +71,36 @@ class SponsorIndex:
     since prefixes like that match unrelated firms.
     """
 
-    def __init__(self, rows: list[tuple[str, int]]):
-        self.by_first: dict[str, list[tuple[tuple[str, ...], int]]] = defaultdict(list)
-        for key, filings in rows:
+    def __init__(self, rows: list[tuple]):
+        """rows: (name_key, filings) or (name_key, filings, kind)."""
+        self.by_first: dict[str, list[tuple[tuple[str, ...], int, str]]] = defaultdict(list)
+        for key, filings, *rest in rows:
             tokens = tuple(key.split())
             if tokens:
-                self.by_first[tokens[0]].append((tokens, filings))
+                self.by_first[tokens[0]].append((tokens, filings, (rest[0] if rest else "") or ""))
 
-    def matches(self, company_name: str) -> list[tuple[str, int]]:
-        """(normalized DOL employer name, filings) for every employer entity that matches."""
+    def _matching(self, company_name: str) -> list[tuple[tuple[str, ...], int, str]]:
         tokens = name_tokens(company_name)
         if not tokens:
             return []
-        return [(" ".join(cand), n) for cand, n in self.by_first.get(tokens[0], []) if names_match(tokens, cand)]
+        return [c for c in self.by_first.get(tokens[0], []) if names_match(tokens, c[0])]
+
+    def matches(self, company_name: str) -> list[tuple[str, int]]:
+        """(normalized DOL employer name, filings) for every employer entity that matches."""
+        return [(" ".join(cand), n) for cand, n, _ in self._matching(company_name)]
 
     def filings(self, company_name: str) -> int:
         return sum(n for _, n in self.matches(company_name))
+
+    def kind(self, company_name: str) -> str:
+        """"consultancy", "staffing" or "": the kind (h1b.employer_kind) of the matching DOL employers that filed at
+        least half of their combined filings; "" when the company hires mostly for itself or isn't found."""
+        by_kind: dict[str, int] = defaultdict(int)
+        for _, n, kind in self._matching(company_name):
+            by_kind[kind] += n
+        total = sum(by_kind.values())
+        best = max(("consultancy", "staffing"), key=lambda k: by_kind[k])
+        return best if total and by_kind[best] * 2 >= total else ""
 
 
 _index: SponsorIndex | None = None
@@ -95,7 +109,7 @@ _index: SponsorIndex | None = None
 def sponsor_index(session: Session) -> SponsorIndex:
     global _index
     if _index is None:
-        _index = SponsorIndex(list(session.execute(select(H1BSponsor.name_key, H1BSponsor.filings))))
+        _index = SponsorIndex(list(session.execute(select(H1BSponsor.name_key, H1BSponsor.filings, H1BSponsor.kind))))
     return _index
 
 
@@ -241,6 +255,26 @@ _ACCOUNTING_NAICS = ("5412",)
 _STAFFING_NAICS = ("5613",)
 SERVICES_NAME = re.compile(r"\b(consult\w*|staffing|outsourc\w*|infotech|it services|recruit\w*|manpower|"
                             r"talent solutions|workforce solutions)\b", re.I)
+
+
+# Job sources used almost only by staffing agencies: their jobs are posted by the agency, not the employer.
+STAFFING_SOURCES = {"jobdiva", "bullhorn"}
+_STAFFING_WORDS = re.compile(r"(?<![a-z])(staffing|recruit\w*|manpower|talent solutions|workforce solutions)(?![a-z])", re.I)
+
+
+def job_employer_kind(company_name: str, source_ats: str, index: SponsorIndex) -> str:
+    """"consultancy", "staffing" or "" for a job's employer, shown as a badge and used by the opt-in "Hide
+    consultancies & staffing" filter (2026-11-12). From the employer's own H-1B filings (SponsorIndex.kind) when it
+    has any; else a staffing agency's job system (STAFFING_SOURCES), or a name that says so (SERVICES_NAME:
+    "... Consulting", "... Staffing")."""
+    kind = index.kind(company_name)
+    if kind:
+        return kind
+    if source_ats in STAFFING_SOURCES:
+        return "staffing"
+    if SERVICES_NAME.search(company_name or ""):
+        return "staffing" if _STAFFING_WORDS.search(company_name) else "consultancy"
+    return ""
 
 
 def employer_kind(name: str, naics: str, client_site_share: float | None, dependent_share: float | None) -> str:
