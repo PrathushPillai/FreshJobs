@@ -172,7 +172,34 @@ function FreshnessBadge({ job }: { job: Job }) {
 
 const PIN = 'M10 2a6 6 0 0 0-6 6c0 4.5 6 10 6 10s6-5.5 6-10a6 6 0 0 0-6-6Zm0 8.5A2.5 2.5 0 1 1 10 5.5a2.5 2.5 0 0 1 0 5Z'
 
-function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boolean; onSelect: () => void; index: number }) {
+/** One card per role: the same title at the same employer in several places (a chain hiring in three cities posts
+ * three jobs) is one card with links to each place, as in the alert emails (backend alerts.group_jobs). Each place is
+ * still its own job with its own apply link; only the page's own jobs are grouped, in their order. */
+function groupSameRole(items: Job[]): { job: Job; others: Job[] }[] {
+  const groups = new Map<string, { job: Job; others: Job[] }>()
+  for (const job of items) {
+    const key = `${job.company.trim().toLowerCase()}|${job.title.trim().toLowerCase()}`
+    const group = groups.get(key)
+    if (group) group.others.push(job)
+    else groups.set(key, { job, others: [] })
+  }
+  return [...groups.values()]
+}
+
+/** "Los Angeles, California, United States" -> "Los Angeles, California": enough to tell the places apart. */
+function shortPlace(job: Job): string {
+  const parts = (job.location || 'Location not listed').split(',').map((p) => p.trim()).filter(Boolean)
+  return parts.length > 2 && /^(united states|usa|us)$/i.test(parts[parts.length - 1]) ? parts.slice(0, -1).join(', ') : parts.join(', ')
+}
+
+function JobCard({ job: first, others = [], selectedId, onPick, index }: {
+  job: Job; others?: Job[]; selectedId: number | null; onPick: (id: number) => void; index: number
+}) {
+  // The card shows the place that's open (or the first one); the other places are links.
+  const job = others.find((o) => o.id === selectedId) ?? first
+  const selected = selectedId === job.id
+  const onSelect = () => onPick(job.id)
+  const places = [first, ...others]
   return (
     <li
       onClick={onSelect}
@@ -201,6 +228,24 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
             <span className="truncate">{job.location || 'Location not listed'}</span>
             {job.remote && <span className="ml-1 shrink-0 rounded-full bg-violet-50 px-2 text-[11px] font-semibold text-violet-700 ring-1 ring-inset ring-violet-200">Remote</span>}
           </p>
+          {others.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[12px] text-slate-500">
+              <span className="font-semibold text-slate-600">{places.length} places:</span>
+              {places.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onPick(p.id) }}
+                  title={`Open the ${shortPlace(p)} posting`}
+                  className={`rounded-full px-2 py-0.5 ring-1 ring-inset transition ${
+                    p.id === job.id ? 'bg-brand-50 font-semibold text-brand-700 ring-brand-300' : 'bg-white text-slate-600 ring-slate-200 hover:text-brand-700 hover:ring-brand-300'
+                  }`}
+                >
+                  {shortPlace(p)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-2.5 flex flex-wrap items-center gap-1">
             <ExperienceBadge job={job} />
             <SponsorLikelyBadge job={job} />
@@ -838,8 +883,9 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
         <div className="min-w-0 space-y-3">
           <ul className="space-y-2.5">
             {!items && jobs.isLoading && Array.from({ length: 6 }, (_, i) => <CardSkeleton key={i} />)}
-            {items?.map((job, i) => (
-              <JobCard key={job.id} index={i} job={job} selected={wide && job.id === selected} onSelect={() => { setSelected(job.id); setOpenedOutside(false) }} />
+            {items && groupSameRole(items).map(({ job, others }, i) => (
+              <JobCard key={job.id} index={i} job={job} others={others} selectedId={wide ? selected : null}
+                       onPick={(id) => { setSelected(id); setOpenedOutside(false) }} />
             ))}
             {items?.length === 0 && (
               <li className="rounded-3xl border-2 border-dashed border-slate-200 bg-white/70 px-6 py-14 text-center">
