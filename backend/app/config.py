@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     harvest_per_poll: int = 200
     # Minutes between polls of a board that had no open jobs, or failed, last time.
     idle_poll_minutes: int = 180
+    # Check boards that posted nothing lately less often (poller.activity_factor: x2 after a day, x4 after a week).
+    # Off: every board at its normal pace. It was on while the server had 2 vCPUs, which couldn't check every
+    # board every 5 minutes; switch it on again only if fast polls start cutting boards short (cut_short).
+    activity_pacing: bool = False
     # A job found more than this long after the source's previous successful check gets a
     # "posted between" window instead of "posted when we found it" (date-only and undated sources).
     listed_exact_gap_minutes: int = 45

@@ -488,6 +488,7 @@ def test_quiet_boards_are_checked_less_often(now, monkeypatch):
     from app.pipeline import poller
     from app.pipeline.poller import _due, activity_factor
 
+    monkeypatch.setattr(poller.settings, "activity_pacing", True)
     monkeypatch.setitem(poller._activity, "cuts", {1: 1000, 7: 500})
     monkeypatch.setitem(poller._activity, "max_id", {1: 1200, 2: 800, 3: 100})  # posted today / this week / long ago
     boards = [Company(id=i, name=f"B{i}", ats="greenhouse", slug=f"b{i}", last_status="ok (5 open)") for i in (1, 2, 3, 4)]
@@ -499,15 +500,27 @@ def test_quiet_boards_are_checked_less_often(now, monkeypatch):
     assert activity_factor(boards[2]) == 1
 
 
+def test_pacing_is_off_by_default_so_every_board_keeps_its_pace(now, monkeypatch):
+    from app.pipeline import poller
+
+    assert poller.settings.activity_pacing is False
+    monkeypatch.setitem(poller._activity, "cuts", {1: 1000, 7: 500})
+    monkeypatch.setitem(poller._activity, "max_id", {3: 100})  # posted long ago
+    board = Company(id=3, name="B3", ats="greenhouse", slug="b3", last_status="ok (5 open)")
+    board.last_polled_at = now - timedelta(minutes=6)
+    assert poller.activity_factor(board) == 1 and poller._due(board, now)
+
+
 def test_a_young_database_keeps_every_board_at_full_pace(monkeypatch):
     from app.pipeline import poller
 
+    monkeypatch.setattr(poller.settings, "activity_pacing", True)
     monkeypatch.setitem(poller._activity, "cuts", {1: 0, 7: 0})  # no history older than a day yet
     monkeypatch.setitem(poller._activity, "max_id", {})
     assert poller.activity_factor(Company(id=9, name="New", ats="greenhouse", slug="n")) == 1
 
 
-def test_board_activity_loads_from_the_database(session):
+def test_board_activity_loads_from_the_database(session, monkeypatch):
     from datetime import datetime, timezone
 
     from app.models import Job, JobEvent
@@ -524,6 +537,7 @@ def test_board_activity_loads_from_the_database(session):
         session.flush()
         session.add(JobEvent(job_id=job_id, kind="seen", at=now - timedelta(days=age)))
     session.commit()
+    monkeypatch.setattr(poller.settings, "activity_pacing", True)
     poller.refresh_activity.__globals__["_activity"].update(at=None, max_id={}, cuts={})
     poller.refresh_activity(wait=True)
     assert poller._activity["max_id"] == {old.id: 1, fresh.id: 2}

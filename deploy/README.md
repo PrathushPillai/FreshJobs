@@ -13,8 +13,10 @@ In the Google Cloud console (the user does these):
 1. Start the free trial (a card is needed for identity; the trial never charges it unless you upgrade).
 2. Compute Engine → VM instances → Create instance:
    - Region `us-central1` (Iowa) or `us-east1` (South Carolina), any zone.
-   - Machine `e2-standard-2` (2 vCPU, 8 GB), about $49/month. `e2-medium` (4 GB, about $25) also works but
-     leaves less memory for caching the database.
+   - Machine `e2-standard-4` (4 vCPU, 16 GB), about $98/month. The first server was `e2-standard-2` (2 vCPU,
+     8 GB, about $49), and its CPU was the limit during the US daytime: polls saved only part of the due boards,
+     so boards had to be checked less often. It was upgraded on 2026-11-12 (stop the VM, Edit → Machine type,
+     start; the static IP and disk stay). It can be downgraded the same way.
    - Boot disk: Ubuntu 24.04 LTS (x86/64), **Balanced persistent disk** (an SSD; the standard HDD disk makes
      SQLite crawl), 100 GB, about $10/month.
    - Firewall: tick "Allow HTTP traffic" and "Allow HTTPS traffic".

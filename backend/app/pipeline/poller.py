@@ -402,7 +402,7 @@ def activity_factor(company: Company) -> int:
     """How many times its normal interval a board waits, from how recently it posted (QUIET_FACTORS). While the
     database holds less than that much history (a boundary of 0) or before the first load, 1."""
     cuts = _activity["cuts"]
-    if not cuts:
+    if not settings.activity_pacing or not cuts:
         return 1
     newest = _activity["max_id"].get(company.id, 0)
     for days, factor in QUIET_FACTORS:
@@ -513,7 +513,8 @@ async def poll_once(lane: str | None = None) -> dict:
         if lane in (None, "fast"):  # one lane adds new companies, so two lanes starting together can't both insert them
             sync_companies(session, settings.companies_file)
         prefs = get_prefs(session)
-        refresh_activity()  # background, hourly: how recently each board posted (activity_factor)
+        if settings.activity_pacing:
+            refresh_activity()  # background, hourly: how recently each board posted (activity_factor)
         companies = [
             c for c in session.scalars(select(Company).where(Company.enabled.is_(True)))
             if _due(c, now) and (lane is None or ADAPTERS[c.ats].lane == lane)
