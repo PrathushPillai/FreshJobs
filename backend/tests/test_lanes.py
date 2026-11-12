@@ -158,3 +158,11 @@ def test_only_the_fast_lane_keeps_normal_cpu_priority(monkeypatch):
     assert lanes.lower_priority("fast") is False
     assert [lanes.lower_priority(lane) for lane in ("slow", "bulk", "discovery")] == [True, True, True]
     assert calls == [lanes.BACKGROUND_NICE] * 3
+
+
+def test_scoring_runs_at_the_lowest_cpu_priority(monkeypatch):
+    from app.pipeline import scoring
+
+    calls = []
+    monkeypatch.setattr(scoring.os, "nice", lambda n: calls.append(n), raising=False)
+    assert scoring.lower_priority() is True and calls == [scoring.SCORING_NICE]

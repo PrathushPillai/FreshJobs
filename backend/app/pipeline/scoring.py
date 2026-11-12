@@ -281,8 +281,28 @@ def repair_resume(session: Session, profile: UserProfile | None = None) -> bool:
     return True
 
 
+SCORING_NICE = 19  # the lowest CPU priority (Unix); on Windows the parent starts it BELOW_NORMAL
+
+
+def lower_priority() -> bool:
+    """Run at the lowest CPU priority, so scoring only uses spare CPU. True if lowered (Unix only).
+
+    On the 2-vCPU cloud server (2026-11-11) the scoring process ran at the fast lane's priority after the
+    slow lane found 6,000 new jobs: it took 98% of a CPU for over an hour (embedding each job), and a fast
+    poll saved only ~660 of ~12,900 due boards.
+    """
+    if not hasattr(os, "nice"):
+        return False
+    try:
+        os.nice(SCORING_NICE)
+        return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    lower_priority()
     lock = _try_lock()
     if lock is None:
         return  # another scoring process is running
