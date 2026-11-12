@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import logging
 import re
 
@@ -220,6 +221,31 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_me
 # 1.6M jobs. Cleared after every poll and by any change the user makes (tracking a job, editing prefs).
 JOBS_CACHE_SECONDS = 60
 _jobs_cache: dict[str, tuple[float, bytes]] = {}
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    """At most settings.api_requests_per_minute API requests a minute per visitor (app/ratelimit.py).
+
+    A visitor is their login cookie, else their address (behind Caddy, the real one via --proxy-headers). A
+    person clicking around makes a few dozen a minute; a script could keep the 2-vCPU server's CPUs busy and the
+    pollers would fall behind. /api/status is exempt: every open tab asks for it every 10 seconds.
+    """
+    from fastapi.responses import JSONResponse
+
+    from app.ratelimit import limits
+
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/status" and settings.api_requests_per_minute > 0:
+        cookie = request.cookies.get(COOKIE)
+        if cookie:
+            key = "api:s:" + hashlib.sha256(cookie.encode()).hexdigest()[:24]
+        else:
+            key = "api:ip:" + (request.client.host if request.client else "?")
+        if not limits.allow(key, settings.api_requests_per_minute, 60):
+            return JSONResponse({"detail": "Too many requests. Please wait a minute and try again."}, status_code=429,
+                                headers={"Retry-After": str(limits.retry_after(key, 60))})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -702,7 +728,10 @@ def list_jobs(
         if remote_only:
             stmt = stmt.where(Job.remote.is_(True))
         if sponsors_only:
-            stmt = stmt.where(Job.h1b_filings > 0)
+            # "+jobs.h1b_filings" except when sorting by filings: as a plain range SQLite started from
+            # ix_jobs_by_sponsor, read every sponsored open job and sorted them all by date (5 s warm,
+            # 32 s while polls loaded the disk, 2026-11-11) instead of walking the sort index for one page.
+            stmt = stmt.where(Job.h1b_filings > 0 if sort == "sponsor" else text("+jobs.h1b_filings > 0"))
         if sponsor_likely in ("likely", "possible"):  # the same rules as sponsor_likelihood(), in SQL
             signs = [Job.sponsors_text.is_(True), Job.h1b_filings >= LIKELY_FILINGS]
             if sponsor_likely == "possible":

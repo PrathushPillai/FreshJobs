@@ -421,3 +421,26 @@ def test_status_counts_are_served_at_once_and_recounted_in_the_background(sessio
         _time.sleep(0.05)
     assert _time.monotonic() - main._status_counts["at"] < 60
     main._status_counts.clear()
+
+
+def test_h1b_sponsors_filter_in_every_sort(client, session):
+    from app.models import Job
+
+    for job in session.query(Job):
+        job.h1b_filings = 25 if job.title in ("Data Analyst", "Senior Software Engineer") else 0
+    session.commit()
+    for sort in ("newest", "posted", "company", "sponsor"):
+        got = titles(client.get("/api/jobs", params={"sponsors_only": True, "sort": sort, "countries": []}))
+        assert got == ["Data Analyst", "Senior Software Engineer"], sort
+
+
+def test_h1b_sponsors_filter_does_not_start_from_the_sponsor_index(session):
+    # As a plain range, SQLite read every sponsored open job through ix_jobs_by_sponsor and sorted them by
+    # date (5-32 s on 1.8M jobs). Written as +jobs.h1b_filings it walks the date index for one page.
+    from sqlalchemy import text
+
+    # The statement list_jobs sends for "All jobs, newest found, H-1B sponsors only" (traced 2026-11-11).
+    sql = ("SELECT jobs.id FROM jobs WHERE jobs.closed_at IS NULL AND jobs.is_repost IS 0 AND +jobs.h1b_filings > 0 "
+           "ORDER BY jobs.first_seen_at DESC, jobs.id DESC LIMIT 50")
+    plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
+    assert "ix_jobs_by_found_v2" in plan and "TEMP B-TREE FOR ORDER BY" not in plan, plan

@@ -5,6 +5,8 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
+
 from app.main import app
 from tests.conftest import sign_up
 
@@ -57,7 +59,7 @@ def test_overview_and_user_list(session, sent):
         sign_up(admin, "admin@example.test")
         sign_up(user, "user@example.test", name="Uma User")
         o = admin.get("/api/admin/overview").json()
-        assert o["users"] == 2 and o["signups_7d"] == 2 and o["emails_24h"] == 2 and o["email_daily_limit"] == 500
+        assert o["users"] == 2 and o["signups_7d"] == 2 and o["emails_24h"] == 2 and o["email_daily_limit"] == settings.email_daily_limit
         users = admin.get("/api/admin/users").json()
         uma = next(u for u in users if u["email"] == "user@example.test")
         assert uma["name"] == "Uma User" and not uma["is_admin"] and not uma["has_resume"] and uma["tracked"] == 0

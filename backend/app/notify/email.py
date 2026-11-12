@@ -44,12 +44,31 @@ def _sender() -> str:
     return formataddr(("FreshJobs", settings.alert_from or settings.smtp_user or "alerts@freshjobs.local"))
 
 
+def emails_sent_last_24h() -> int:
+    """Emails sent in the last 24 hours, from the activity log (ix_activity_kind_at)."""
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Activity
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    with SessionLocal() as session:
+        return session.scalar(select(func.count(Activity.id)).where(Activity.kind == "email_sent", Activity.at >= since)) or 0
+
+
 def send_email(to: str, subject: str, text: str, html: str, headers: dict | None = None,
                user_id: int | None = None) -> tuple[bool, str]:
     """Send one email. Returns (sent, error message). Every attempt goes in the admin's activity log."""
     from app.activity import record
     if not smtp_configured():
         return False, "Email isn't set up: add the SMTP settings to .env and restart the backend."
+    if settings.email_daily_limit > 0 and emails_sent_last_24h() >= settings.email_daily_limit:
+        # Past it, Gmail starts refusing and may lock the account; better to refuse here and say so.
+        log.warning("Email to %s not sent: %d emails in 24 h is the limit", to, settings.email_daily_limit)
+        record("email_failed", user_id, f"{subject[:120]} | daily email limit reached")
+        return False, f"The site has sent its {settings.email_daily_limit} emails for today. Try again tomorrow."
     msg = EmailMessage()
     msg["Subject"] = subject[:180]
     msg["From"] = _sender()

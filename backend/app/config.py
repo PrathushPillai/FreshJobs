@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     session_days: int = 30
     support_email: str = ""  # where Contact & support messages go; empty = ADMIN_EMAIL
     api_docs: bool = False  # serve /docs and /openapi.json (handy locally; off on the shared server)
+    # Limits for a shared site (app/ratelimit.py); 0 turns one off (the tests do).
+    api_requests_per_minute: int = 300  # per visitor (login cookie, else client address); /api/status is exempt
+    signups_per_hour_per_client: int = 5
+    signups_per_hour: int = 50  # all sign-ups together: each one sends a welcome email from the site's account
+    verification_emails_per_hour: int = 3  # "Resend confirmation", per account
+    email_daily_limit: int = 450  # emails sent in 24 h; Gmail allows 500 a day for a personal account
 
 
 settings = Settings()

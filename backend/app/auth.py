@@ -245,6 +245,14 @@ def signup(body: SignupIn, request: Request, response: Response, db: Session = D
     from app.notify.email import send_welcome
     from app.prefs import get_prefs
 
+    from app.ratelimit import limits
+
+    # Every sign-up sends a welcome email from the site's mail account: a script signing up in a loop would
+    # get that account flagged for spam. Per client address, then all sign-ups together.
+    if not (limits.allow("signup:" + _client(request), settings.signups_per_hour_per_client, 3600)
+            and limits.allow("signup:all", settings.signups_per_hour, 3600)):
+        record("signup_limited", None, _client(request), request)
+        raise HTTPException(429, "Too many sign-ups right now. Please try again in an hour.")
     email = body.email.strip().lower()
     if not _EMAIL.match(email):
         raise HTTPException(400, "That doesn't look like an email address.")
@@ -378,8 +386,13 @@ def verify_email(body: TokenIn, db: Session = Depends(get_session)):
 def resend_verification(user: User = Depends(current_user), db: Session = Depends(get_session)):
     from app.notify.email import send_welcome
 
+    from app.ratelimit import limits
+
     if user.email_verified_at:
         return {"sent": False, "already_verified": True}
+    if not limits.allow(f"verify:{user.id}", settings.verification_emails_per_hour, 3600):
+        raise HTTPException(429, "We've sent a few confirmation emails already. Check your inbox and spam folder, "
+                                 "or try again in an hour.")
     link = f"{settings.public_url.rstrip('/')}/?verify={make_token(db, user, 'verify', VERIFY_HOURS)}"
     sent = send_welcome(user, link)
     if not sent:

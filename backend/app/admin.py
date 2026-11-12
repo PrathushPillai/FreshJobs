@@ -22,7 +22,6 @@ from app.db import get_session
 from app.models import Activity, Application, AuthSession, JobMatch, User, UserPrefs, UserProfile
 
 router = APIRouter(prefix="/api/admin")
-EMAIL_DAILY_LIMIT = 500  # Gmail's limit for a personal account; an email service allows far more
 PROBLEMS = ("email_failed", "alert_failed", "login_locked")
 
 
@@ -69,7 +68,7 @@ def overview(db: Session = Depends(get_session), _: User = Depends(admin_user)):
         "signups_7d": db.scalar(select(func.count()).select_from(User).where(User.created_at >= _since(24 * 7))) or 0,
         "active_24h": active,
         "emails_24h": _count(db, "email_sent", 24), "emails_failed_24h": _count(db, "email_failed", 24),
-        "email_daily_limit": EMAIL_DAILY_LIMIT, "email_mode": email_mode(),
+        "email_daily_limit": settings.email_daily_limit, "email_mode": email_mode(),
         "email_sender": settings.alert_from or settings.smtp_user,
         "alerts_24h": _count(db, "alert_sent", 24),
         "failed_logins_24h": _count(db, ("login_failed", "login_locked"), 24),
