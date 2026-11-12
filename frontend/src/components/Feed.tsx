@@ -459,10 +459,17 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
     resultsTop.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  // Two-pane view: keep a job open on the right, defaulting to the first result.
+  // Two-pane view: keep a job open on the right, defaulting to the first result. A job opened from outside the
+  // list (the top-matches strip) stays open: it's usually not on this page, and it used to be replaced at once by
+  // the first result (2026-11-12). A new search or filter goes back to the list's first job.
+  const [openedOutside, setOpenedOutside] = useState(false)
+  const listKey = JSON.stringify(query)
   useEffect(() => {
-    if (wide && items?.length && !items.some((j) => j.id === selected)) setSelected(items[0].id)
-  }, [wide, items, selected])
+    setOpenedOutside(false)
+  }, [listKey])
+  useEffect(() => {
+    if (wide && items?.length && !openedOutside && !items.some((j) => j.id === selected)) setSelected(items[0].id)
+  }, [wide, items, selected, openedOutside])
 
   const postedLabel = POSTED_WINDOWS.find((w) => w.hours === filters.posted_within_hours)?.label
   const foundLabel = FOUND_WINDOWS.find((w) => w.hours === filters.since_hours)?.label
@@ -744,7 +751,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
 
       <FreshnessStrip base={{ ...query, limit: 1, offset: 0 }} active={filters.posted_within_hours} onPick={(hours) => set({ posted_within_hours: hours })} />
 
-      {forYou && hasResume && <TopMatches base={{ ...query, limit: 8, offset: 0 }} onOpen={(id) => setSelected(id)} />}
+      {forYou && hasResume && <TopMatches base={{ ...query, limit: 8, offset: 0 }} onOpen={(id) => { setSelected(id); setOpenedOutside(true) }} />}
       {forYou && profile.data && !hasResume && (
         <button
           onClick={onOpenProfile}
@@ -832,7 +839,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
           <ul className="space-y-2.5">
             {!items && jobs.isLoading && Array.from({ length: 6 }, (_, i) => <CardSkeleton key={i} />)}
             {items?.map((job, i) => (
-              <JobCard key={job.id} index={i} job={job} selected={wide && job.id === selected} onSelect={() => setSelected(job.id)} />
+              <JobCard key={job.id} index={i} job={job} selected={wide && job.id === selected} onSelect={() => { setSelected(job.id); setOpenedOutside(false) }} />
             ))}
             {items?.length === 0 && (
               <li className="rounded-3xl border-2 border-dashed border-slate-200 bg-white/70 px-6 py-14 text-center">
