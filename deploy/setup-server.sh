@@ -51,6 +51,6 @@ sudo systemctl reload caddy || sudo systemctl restart caddy
 
 echo "== nightly database backup (keeps 3)"
 sudo cp "$APP/deploy/freshjobs-backup.sh" /usr/local/bin/freshjobs-backup && sudo chmod +x /usr/local/bin/freshjobs-backup
-echo "15 4 * * * ubuntu /usr/local/bin/freshjobs-backup" | sudo tee /etc/cron.d/freshjobs-backup >/dev/null
+echo "15 4 * * * ubuntu /usr/local/bin/freshjobs-backup 2>&1 | logger -t freshjobs-backup" | sudo tee /etc/cron.d/freshjobs-backup >/dev/null
 
 echo "Done. Next, from the laptop: deploy/deploy.sh (code), then copy the database (deploy/README.md)."

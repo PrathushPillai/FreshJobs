@@ -36,7 +36,7 @@ security list.
 | `/home/ubuntu/freshjobs` | the code (sent by `deploy.sh`) and its `.env` |
 | `/home/ubuntu/freshjobs-data/jobs.db` | the database |
 | `/home/ubuntu/freshjobs-data/models` | the resume-match model, downloaded on first use |
-| `/home/ubuntu/freshjobs-data/backups` | nightly compressed copies, the newest 3 |
+| `/home/ubuntu/freshjobs-data/backups` | nightly compressed copies (04:15 UTC, lowest CPU and disk priority, each checked with `PRAGMA quick_check` before it's kept), the newest 3; output in `journalctl -t freshjobs-backup` |
 | `freshjobs-backend` (systemd) | the API, pollers and alerts; restarts by itself |
 | `caddy` (systemd) | HTTPS, the frontend and `/api` |
 
@@ -44,11 +44,19 @@ security list.
 
 1. Create the VM (see above), with ports 80 and 443 open in the cloud's firewall, and point a DNS name at its
    public IP (DuckDNS works, for free). Check SSH: `ssh -i ~/.ssh/freshjobs_oracle ubuntu@<ip>`.
-2. From the laptop: `FRESHJOBS_HOST=ubuntu@<ip> deploy/deploy.sh` (it copies the code; the restart at the end
-   fails the first time because the service isn't installed yet, which is fine).
-3. On the server: `bash ~/freshjobs/deploy/setup-server.sh <domain>`.
-4. Put the server's `.env` in `~/freshjobs/.env` (the laptop's, changed as below), then copy the database
-   (below) and `sudo systemctl start freshjobs-backend`.
+2. From the laptop: `FRESHJOBS_HOST=ubuntu@<ip> deploy/deploy.sh`. On a fresh VM only the copying part works:
+   `python3-venv` isn't installed yet, so it stops at "pip: No such file or directory". That's fine.
+3. On the server: `rm -rf ~/freshjobs/backend/.venv && bash ~/freshjobs/deploy/setup-server.sh <domain>`.
+4. Put the server's `.env` in `~/freshjobs/.env` (the laptop's, changed as below; `chmod 600`). Set
+   `SCHEDULER_ENABLED=false` at first, so the server polls nothing until you switch over.
+5. Build the venv on the server **without starting the service**: `cd ~/freshjobs/backend && python3 -m venv .venv
+   && .venv/bin/pip install -r requirements.txt`. Don't run `deploy.sh` again yet: its restart would start the
+   backend before the database is there, and it would create an empty `jobs.db` whose `-wal`/`-shm` files could
+   damage the real one when it's copied in.
+6. Copy the database (below), check it, then `sudo systemctl start freshjobs-backend`. It answers within a few
+   minutes; run `scripts/check_portal.py --base https://<domain> --frontend https://<domain>` from the laptop.
+7. To switch over: set `SCHEDULER_ENABLED=true` in the server's `.env`, `sudo systemctl restart freshjobs-backend`,
+   and stop the laptop's backend (close its window). Only one copy may poll.
 
 Server `.env` differences from the laptop's:
 
@@ -62,17 +70,23 @@ CORS_ORIGINS=["https://<domain>"]
 
 ## Copying the database
 
-Make a consistent copy on the laptop with SQLite's online backup (safe while the backend runs), then stream it
-compressed over SSH:
+Make a consistent copy on the laptop with SQLite's online backup (safe while the backend runs; 8 minutes for
+15 GB), then stream it compressed over SSH, checksumming both ends, into a temporary name:
 
 ```
-backend/.venv/Scripts/python.exe -c "import sqlite3; s=sqlite3.connect(r'C:/Users/prath/FreshJobs/jobs.db'); d=sqlite3.connect(r'C:/Users/prath/FreshJobs/jobs-copy.db'); s.backup(d); d.close()"
-ssh -C -i ~/.ssh/freshjobs_oracle ubuntu@<ip> 'cat > ~/freshjobs-data/jobs.db' < C:/Users/prath/FreshJobs/jobs-copy.db
+backend/.venv/Scripts/python.exe -c "import sqlite3; s=sqlite3.connect('file:C:/Users/prath/FreshJobs/jobs.db?mode=ro', uri=True); d=sqlite3.connect('C:/Users/prath/FreshJobs/jobs-copy.db'); s.backup(d); d.execute('PRAGMA journal_mode=DELETE'); d.close()"
+cat C:/Users/prath/FreshJobs/jobs-copy.db | tee >(sha256sum) | gzip -1 | ssh -i ~/.ssh/freshjobs_oracle ubuntu@<ip> 'bash -c "gunzip | tee >(sha256sum >&2) > ~/freshjobs-data/jobs.db.part"'
 ```
 
-Then delete `jobs-copy.db` on the laptop, and stop the laptop's backend so two copies don't both poll.
+The two checksums must match. On the server, `sqlite3 -readonly ~/freshjobs-data/jobs.db.part "PRAGMA quick_check"`
+must print `ok` (25 minutes on Google Cloud's 100 GB balanced disk); then `mv jobs.db.part jobs.db`. Copy
+`workday_state.json` and `autodiscover.json` from `C:/Users/prath/FreshJobs` to `~/freshjobs-data/` too: without the
+first, every Workday board's next scan is a full one. Delete `jobs-copy.db` on the laptop afterwards.
+
+On 2026-11-11 the 15.1 GB copy uploaded in 17 minutes (about 15 MB/s compressed).
 
 ## Updating
 
-Run the tests and the build, then `FRESHJOBS_HOST=ubuntu@<ip> deploy/deploy.sh`. Logs: `journalctl -u
+Run the tests and the build, then `FRESHJOBS_HOST=ubuntu@<ip> deploy/deploy.sh`. On the server the tests need no
+changes: `tests/conftest.py` overrides the server-only settings (`SECURE_COOKIES`, `PUBLIC_URL`, `CORS_ORIGINS`). Logs: `journalctl -u
 freshjobs-backend -f` on the server.

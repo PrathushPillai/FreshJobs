@@ -6,6 +6,14 @@ os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["SMTP_HOST"] = ""
 os.environ["ADMIN_EMAIL"] = ""  # tests don't use the real .env's admin: the first account is the admin
+os.environ["SECURE_COOKIES"] = "false"  # the server's .env sets it; the test client speaks plain http
+os.environ["PUBLIC_URL"] = "http://localhost:5173"
+os.environ["CORS_ORIGINS"] = '["http://localhost:5173"]'
+# Request and sign-up limits off (tests make many requests and accounts from one client); test_ratelimit turns them on.
+os.environ["API_REQUESTS_PER_MINUTE"] = "0"
+os.environ["SIGNUPS_PER_HOUR_PER_CLIENT"] = "0"
+os.environ["SIGNUPS_PER_HOUR"] = "0"
+os.environ["VERIFICATION_EMAILS_PER_HOUR"] = "0"
 
 import pytest
 from sqlalchemy.pool import StaticPool

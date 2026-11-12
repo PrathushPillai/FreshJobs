@@ -22,6 +22,10 @@ tar -czf - --exclude=.git --exclude=.env --exclude='backend/.venv' --exclude='fr
 
 echo "== installing packages and restarting"
 $SSH "$HOST" 'set -e
+# Unix line endings for everything that runs on the server: the laptop checks files out with Windows ones
+# (core.autocrlf), and a script with them fails ("bash\r: No such file or directory", 2026-11-11).
+find ~/freshjobs/deploy ~/freshjobs/scripts -type f -exec sed -i "s/\r$//" {} + 2>/dev/null || true
+find ~/freshjobs -name "*.sh" -not -path "*/node_modules/*" -exec sed -i "s/\r$//" {} +
 cd ~/freshjobs/backend
 [ -d .venv ] || python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip

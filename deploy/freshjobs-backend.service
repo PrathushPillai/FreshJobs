@@ -6,8 +6,12 @@ Wants=network-online.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/freshjobs/backend
-# One worker: the pollers and the scheduler live in this process. Caddy in front handles HTTPS; the proxy
-# headers give the backend the real client address (login limits, activity log) and the https scheme.
+# One API process; it starts the polling lanes and discovery as its own worker processes (app/lanes.py), which
+# systemd stops with it (same control group). Caddy in front handles HTTPS; the proxy headers give the backend
+# the real client address (login limits, activity log) and the https scheme.
+Environment=PYTHONUNBUFFERED=1
+# The lanes keep hundreds of connections open at once (25 per ATS for Greenhouse, Lever and Ashby).
+LimitNOFILE=65536
 ExecStart=/home/ubuntu/freshjobs/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=always
 RestartSec=5
