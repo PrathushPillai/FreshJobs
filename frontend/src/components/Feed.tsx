@@ -230,18 +230,22 @@ function JobCard({ job: first, others = [], selectedId, onPick, index }: {
           </p>
           {others.length > 0 && (
             <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[12px] text-slate-500">
-              <span className="font-semibold text-slate-600">{places.length} places:</span>
+              <span className="font-semibold text-slate-600">Open in ({places.length} places):</span>
+              {/* Buttons have no hand cursor by default in Tailwind v4, so these read as plain tags (2026-11-12). */}
               {places.map((p) => (
                 <button
                   key={p.id}
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onPick(p.id) }}
-                  title={`Open the ${shortPlace(p)} posting`}
-                  className={`rounded-full px-2 py-0.5 ring-1 ring-inset transition ${
-                    p.id === job.id ? 'bg-brand-50 font-semibold text-brand-700 ring-brand-300' : 'bg-white text-slate-600 ring-slate-200 hover:text-brand-700 hover:ring-brand-300'
+                  title={p.id === job.id ? `Showing the ${shortPlace(p)} posting` : `Open the ${shortPlace(p)} posting`}
+                  aria-pressed={p.id === job.id}
+                  className={`cursor-pointer rounded-full px-2.5 py-0.5 ring-1 ring-inset transition ${
+                    p.id === job.id
+                      ? 'bg-brand-600 font-semibold text-white ring-brand-600'
+                      : 'bg-white text-brand-700 ring-brand-200 hover:bg-brand-50 hover:ring-brand-400'
                   }`}
                 >
-                  {shortPlace(p)}
+                  📍 {shortPlace(p)}
                 </button>
               ))}
             </div>
@@ -390,6 +394,11 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const setView = (forYouView: boolean) => setViews((v) => ({ ...v, view: forYouView ? 'forYou' : 'all' }))
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
+  // The two-pane view's detail panel starts from its top for every job it shows.
+  const detailPane = useRef<HTMLElement>(null)
+  useEffect(() => {
+    detailPane.current?.scrollTo({ top: 0 })
+  }, [selected])
   const wide = useWideScreen()
   useEffect(() => {
     if (!hasResume) return
@@ -918,8 +927,12 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
         </div>
 
         {wide && (
-          <aside className="thin-scroll sticky top-24 h-[calc(100vh-7rem)] overflow-y-auto rounded-3xl bg-white p-6 shadow-xl shadow-slate-900/[0.06] ring-1 ring-slate-200/80">
-            {selected !== null ? <JobDetailContent id={selected} /> : <p className="text-sm text-slate-500">Select a job to see the details.</p>}
+          <aside ref={detailPane} className="thin-scroll sticky top-24 h-[calc(100vh-7rem)] overflow-y-auto rounded-3xl bg-white p-6 shadow-xl shadow-slate-900/[0.06] ring-1 ring-slate-200/80">
+            {/* Keyed by job: switching jobs (e.g. another place of the same role, whose title and company are the
+                same) re-mounts the panel with its rise-in animation, so the change is visible. */}
+            {selected !== null
+              ? <div key={selected} className="animate-rise"><JobDetailContent id={selected} /></div>
+              : <p className="text-sm text-slate-500">Select a job to see the details.</p>}
           </aside>
         )}
       </div>
