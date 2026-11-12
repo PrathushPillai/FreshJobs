@@ -107,7 +107,7 @@ async def _boards_behind(client: httpx.AsyncClient, sites: list[tuple[str, str]]
                     return
 
     await asyncio.gather(*(one(n, s) for n, s in sites))
-    links = [link for link in links if link[1]]
+    links = await _with_us_jobs(client, [link for link in links if link[1]])
     if dry_run:
         found = {board_key(*b) for b in (detect_board_url(u) for _, u in links) if b}
         log.info("%s (dry run): %d sites, %d untracked boards found, nothing saved", label, len(sites), len(found))
@@ -206,10 +206,19 @@ NICHE_PAGES = {
         "https://techcrunch.com/2024/04/12/these-75-robotics-companies-are-hiring/",
         "https://techcrunch.com/2024/11/09/these-60-robotics-companies-are-hiring/",
         "https://playground.global/portfolio/",
+        # Added 2026-11-12: MassRobotics' resident startups (Boston).
+        "https://www.massrobotics.org/startups/massrobotics-resident-startups/",
     ],
     "health": [
         "https://www.optumventures.com/portfolio",
         "https://kpventures.com/portfolio/",
+        # Added 2026-11-12: biotech (BIO's member directory, 64 pages; ARCH Venture Partners) and medtech
+        # (AdvaMed's member directories), each page linking members' own websites; robots.txt allows them.
+        *[f"https://www.bio.org/bio-member-directory?page={n}" for n in range(64)],
+        "https://www.archventure.com/portfolio/",
+        "https://www.advamed.org/membership-join/membership-directory/",
+        "https://www.advamed.org/membership-join/associate-membership-directory/",
+        "https://www.advamed.org/advameddx/members/",
     ],
 }
 # Employer names that place an H-1B sponsor in the sector (DOL legal names: "Cerner Corporation", "Medtronic Inc").
@@ -227,14 +236,27 @@ async def _robots_allow(client: httpx.AsyncClient, url: str) -> bool:
     from urllib.robotparser import RobotFileParser
 
     parts = urlparse(url)
-    rp = RobotFileParser()
-    try:
-        r = await client.get(f"{parts.scheme}://{parts.netloc}/robots.txt")
-        rp.parse(r.text.splitlines() if r.status_code == 200 else [])
-    except httpx.HTTPError:
-        return True
     agent = str(client.headers.get("User-Agent", "*"))
+    rp = _ROBOTS.get(parts.netloc)
+    if rp is None:
+        rp = RobotFileParser()
+        try:
+            r = await client.get(f"{parts.scheme}://{parts.netloc}/robots.txt")
+            rp.parse(r.text.splitlines() if r.status_code == 200 else [])
+        except httpx.HTTPError:
+            return True
+        _ROBOTS[parts.netloc] = rp
     return rp.can_fetch(agent, url) and rp.can_fetch("*", url)
+
+
+_ROBOTS: dict = {}  # host -> parsed robots.txt, for one run
+
+
+async def _pause(client: httpx.AsyncClient, url: str) -> None:
+    """Wait between list pages of one site: its robots.txt Crawl-delay (Antler, Greycroft: 10 s), else 1 s."""
+    rp = _ROBOTS.get(urlparse(url).netloc)
+    delay = (rp.crawl_delay(str(client.headers.get("User-Agent", "*"))) or rp.crawl_delay("*")) if rp else None
+    await asyncio.sleep(float(delay or 1))
 
 
 async def niche_sites(client: httpx.AsyncClient, sector: str) -> list[tuple[str, str]]:
@@ -256,6 +278,7 @@ async def niche_sites(client: httpx.AsyncClient, sector: str) -> list[tuple[str,
         log.info("%s: %d company websites", page, len(found))
         for site in found:
             sites.setdefault(site, (urlparse(site).hostname.split(".")[0].title(), site))
+        await _pause(client, page)
     return list(sites.values())
 
 
@@ -441,6 +464,29 @@ async def _workday_for(client: httpx.AsyncClient, names: list[str]) -> int:
     return added
 
 
+async def _with_us_jobs(client: httpx.AsyncClient, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The (name, board URL) links whose board lists at least one US job. Lists cover companies worldwide (an AI
+    startup in Paris, a biotech in Basel), and a board with no US job would only cost polls. Boards of platforms
+    the check can't read in one request (board_lists.SUPPORTED) are kept."""
+    from app.pipeline.board_lists import SUPPORTED, vet
+
+    sem = asyncio.Semaphore(8)
+
+    async def keep(link: tuple[str, str]) -> bool:
+        board = detect_board_url(link[1])
+        if not board or board[0] not in SUPPORTED:
+            return True
+        async with sem:
+            result = await vet(client, *board)
+        return bool(result and result[1])
+
+    verdicts = await asyncio.gather(*(keep(link) for link in links))
+    kept = [link for link, ok in zip(links, verdicts) if ok]
+    if len(kept) < len(links):
+        log.info("%d of %d boards found have no US job (or can't be read): not added", len(links) - len(kept), len(links))
+    return kept
+
+
 def _board_url(ats: str, slug: str) -> str:
     return {
         "greenhouse": f"https://boards.greenhouse.io/{slug}",
@@ -524,6 +570,10 @@ def main() -> None:
     products = sub.add_parser("products", help="product companies from VC portfolios and curated GitHub lists")
     products.add_argument("--only", choices=["vc", "pages", "lists"])
     products.add_argument("--dry-run", action="store_true", help="find the boards, save nothing")
+    bl = sub.add_parser("board-lists", help="ATS board slugs from public GitHub lists, each checked for US jobs")
+    bl.add_argument("--ats", nargs="*", help="only these ATSs (default: every supported one)")
+    bl.add_argument("--dry-run", action="store_true", help="check the boards and keep the verdicts, add nothing")
+    bl.add_argument("--limit", type=int, help="check at most this many slugs")
     cc = sub.add_parser("commoncrawl")
     cc.add_argument("--indexes", type=int, default=3, help="how many recent monthly crawls to search")
     cc.add_argument("--patterns", nargs="*", help="URL patterns to search (default: every CC_PATTERNS entry)")
@@ -553,6 +603,10 @@ def main() -> None:
                 from app.pipeline.product_lists import from_products
 
                 return await from_products(client, args.only, args.dry_run)
+            if args.cmd == "board-lists":
+                from app.pipeline.board_lists import from_board_lists
+
+                return await from_board_lists(client, args.ats, args.dry_run, args.limit)
             return await from_commoncrawl(client, args.indexes, args.patterns)
 
     n = asyncio.run(run())

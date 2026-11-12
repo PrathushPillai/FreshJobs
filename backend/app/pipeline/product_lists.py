@@ -42,11 +42,19 @@ VC_SITEMAPS = {
     "https://greylock.com/portfolio-sitemap.xml": "portfolio",
 }
 PORTFOLIO_PAGES = ["https://initialized.com/companies", "https://www.crv.com/companies",
-                   "https://svangel.com/portfolio", "https://www.sparkcapital.com/companies"]
+                   "https://svangel.com/portfolio", "https://www.sparkcapital.com/companies",
+                   # Added 2026-11-12 (static pages linking each company's website; robots.txt allows them):
+                   "https://www.greycroft.com/portfolio/", "https://www.signalfire.com/portfolio",
+                   "https://www.lererhippeau.com/portfolio", "https://www.unusual.vc/portfolio",
+                   "https://www.work-bench.com/portfolio", "https://boldstart.vc/portfolio/",
+                   *[f"https://www.antler.co/portfolio?0b933bfd_page={n}" for n in range(1, 22)]]
 GITHUB_RAW = "https://raw.githubusercontent.com"
 GITHUB_LISTS = {
     "hiring-without-whiteboards": f"{GITHUB_RAW}/poteto/hiring-without-whiteboards/main/README.md",
     "established-remote": f"{GITHUB_RAW}/yanirs/established-remote/master/README.md",
+    # ~2,200 AI/ML startups by city, each linking its website (updated weekly; no licence file: only the
+    # companies' names and websites are used, and every board found is checked for US jobs before it's added).
+    "awesome-machine-learning-startups": f"{GITHUB_RAW}/gmberton/awesome-machine-learning-startups/HEAD/README.md",
     "awesome-oss-alternatives": f"{GITHUB_RAW}/RunaCapital/awesome-oss-alternatives/main/README.md",
     "easy-application": f"{GITHUB_RAW}/j-delaney/easy-application/master/README.md",
 }
@@ -189,7 +197,7 @@ async def vc_sites(client: httpx.AsyncClient, concurrency: int = 4) -> list[tupl
 
 
 async def page_sites(client: httpx.AsyncClient) -> list[tuple[str, str]]:
-    from app.pipeline.bulk_discovery import company_sites
+    from app.pipeline.bulk_discovery import _pause, company_sites
 
     out = []
     for page in PORTFOLIO_PAGES:
@@ -198,6 +206,7 @@ async def page_sites(client: httpx.AsyncClient) -> list[tuple[str, str]]:
             found = [s for s in company_sites(r.text, str(r.url)) if not _NOT_SITE.search(urlparse(s).hostname or "")]
             log.info("%s: %d company websites", page, len(found))
             out += [(_label(urlparse(s).hostname).title(), s) for s in found]
+            await _pause(client, page)
     return out
 
 
