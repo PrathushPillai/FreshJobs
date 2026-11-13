@@ -109,3 +109,31 @@ def test_only_boards_with_us_jobs_are_added_and_verdicts_are_kept(session, monke
     assert checked == []
     session.expire_all()
     assert sorted(c.slug for c in session.query(Company)) == ["tracked", "usco"]
+
+
+def test_max_add_adds_the_biggest_boards_first_and_leaves_the_rest_for_later(session, monkeypatch):
+    checked = []
+
+    async def fake_lists(client):
+        return [("greenhouse", "small"), ("lever", "big"), ("ashby", "mid")]
+
+    async def fake_vet(client, ats, slug):
+        checked.append(slug)
+        return {"small": (3, 1), "big": (90, 40), "mid": (10, 7)}[slug]
+
+    monkeypatch.setattr(board_lists, "fetch_lists", fake_lists)
+    monkeypatch.setattr(board_lists, "vet", fake_vet)
+
+    async def run(**kw):
+        async with httpx.AsyncClient() as client:
+            return await board_lists.from_board_lists(client, **kw)
+
+    assert asyncio.run(run(max_add=1)) == 1
+    assert [c.slug for c in session.query(Company)] == ["big"]
+    assert asyncio.run(run(max_add=1)) == 1  # the next batch comes from the saved verdicts
+    session.expire_all()
+    assert sorted(c.slug for c in session.query(Company)) == ["big", "mid"]
+    assert sorted(checked) == ["big", "mid", "small"]  # each board was checked once
+    assert asyncio.run(run(max_add=5)) == 1
+    session.expire_all()
+    assert session.query(Company).count() == 3

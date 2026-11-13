@@ -146,9 +146,20 @@ async def vet(client: httpx.AsyncClient, ats: str, slug: str) -> tuple[int, int]
     return len(places), sum(1 for text, remote in places if is_us_location(text, remote))
 
 
+def _us_jobs(found: str | None) -> int:
+    try:
+        return int((found or "").removeprefix("us:"))
+    except ValueError:
+        return 0
+
+
 async def from_board_lists(client: httpx.AsyncClient, only: list[str] | None = None, dry_run: bool = False,
-                           limit: int | None = None) -> int:
-    """Check every untracked slug on the lists and add the boards with US jobs."""
+                           limit: int | None = None, max_add: int | None = None) -> int:
+    """Check every untracked slug on the lists and add the boards with US jobs.
+
+    `max_add` adds only that many (the most US jobs first): a new board's first scan saves its whole list, and
+    2,459 at once (2026-11-13) left the fast lane saving first scans for about an hour while existing boards
+    waited. The rest keep their verdicts, so the next run adds the next batch without checking again."""
     candidates = await fetch_lists(client)
     since = datetime.now(timezone.utc) - timedelta(days=RECHECK_DAYS)
     with SessionLocal() as session:
@@ -159,7 +170,8 @@ async def from_board_lists(client: httpx.AsyncClient, only: list[str] | None = N
     untracked = [(a, s) for a, s in candidates
                  if a in SUPPORTED and (not only or a in only) and board_key(a, s) not in tracked]
     # Checked recently (a dry run, or a run cut short): its verdict stands, and a board with US jobs is added.
-    cached = [(a, s) for a, s in untracked if (recent.get(f"bl:{a}:{s.lower()}") or "").startswith("us:")]
+    cached = [(a, s, _us_jobs(recent.get(f"bl:{a}:{s.lower()}"))) for a, s in untracked
+              if (recent.get(f"bl:{a}:{s.lower()}") or "").startswith("us:")]
     todo = [(a, s) for a, s in untracked if f"bl:{a}:{s.lower()}" not in recent]
     if limit:
         todo = todo[:limit]
@@ -180,7 +192,10 @@ async def from_board_lists(client: httpx.AsyncClient, only: list[str] | None = N
                      sum(1 for *_, r in verdicts if r and r[1]))
 
     await asyncio.gather(*(one(a, s) for a, s in todo))
-    good = [(a, s) for a, s, r in verdicts if r and r[1] > 0] + cached
+    good = sorted([(a, s, r[1]) for a, s, r in verdicts if r and r[1] > 0] + cached, key=lambda g: -g[2])
+    waiting = 0
+    if max_add is not None and len(good) > max_add:
+        good, waiting = good[:max_add], len(good) - max_add
     by_ats: dict[str, list[int]] = {}
     for a, s, r in verdicts:
         row = by_ats.setdefault(a, [0, 0, 0, 0])  # checked, readable, with US jobs, US jobs
@@ -199,9 +214,10 @@ async def from_board_lists(client: httpx.AsyncClient, only: list[str] | None = N
             session.merge(ProbeCache(company_key=f"bl:{a}:{s.lower()}"[:200], probed_at=now,
                                      found=f"us:{r[1]}" if r and r[1] else "no"))
         if not dry_run:
-            for a, s in good:
+            for a, s, _ in good:
                 session.add(Company(name=name_from_slug(s.split("|")[0].removesuffix(".icims.com")), ats=a, slug=s,
                                     enabled=True))
         session.commit()
-    log.info("board lists: %d boards with US jobs (%d from earlier checks)%s", len(good), len(cached), " (dry run: not added)" if dry_run else " added")
+    log.info("board lists: %d boards with US jobs (%d from earlier checks)%s%s", len(good), len(cached),
+             " (dry run: not added)" if dry_run else " added", f"; {waiting} more wait for the next run" if waiting else "")
     return len(good)

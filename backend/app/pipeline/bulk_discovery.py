@@ -574,6 +574,7 @@ def main() -> None:
     bl.add_argument("--ats", nargs="*", help="only these ATSs (default: every supported one)")
     bl.add_argument("--dry-run", action="store_true", help="check the boards and keep the verdicts, add nothing")
     bl.add_argument("--limit", type=int, help="check at most this many slugs")
+    bl.add_argument("--max-add", type=int, help="add at most this many boards (most US jobs first); run again for the next batch")
     sb = sub.add_parser("sbir", help="small businesses with recent SBIR/STTR awards (also re-read when SBIR.gov updates)")
     sb.add_argument("--since-year", type=int, default=2023)
     sb.add_argument("--min-employees", type=int, default=5)
@@ -614,7 +615,7 @@ def main() -> None:
             if args.cmd == "board-lists":
                 from app.pipeline.board_lists import from_board_lists
 
-                return await from_board_lists(client, args.ats, args.dry_run, args.limit)
+                return await from_board_lists(client, args.ats, args.dry_run, args.limit, args.max_add)
             return await from_commoncrawl(client, args.indexes, args.patterns)
 
     n = asyncio.run(run())
