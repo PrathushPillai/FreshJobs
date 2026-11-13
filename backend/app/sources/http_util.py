@@ -51,6 +51,18 @@ def client(**kwargs) -> httpx.AsyncClient:
     return httpx.AsyncClient(cookies=BoundedCookieJar(), **kwargs)
 
 
+def platform_limits(concurrency: int) -> httpx.Limits:
+    """A pool for one platform's fetches: as many connections as it runs requests at once, plus a few for
+    redirects and side requests. httpcore checks every pooled connection on each request, so a small pool per
+    platform stays cheap where one big shared pool (POOL_LIMITS) didn't once thousands of hosts were in it."""
+    return httpx.Limits(max_connections=concurrency + 5, max_keepalive_connections=concurrency, keepalive_expiry=60)
+
+
+def platform_client(concurrency: int, **kwargs) -> httpx.AsyncClient:
+    kwargs.setdefault("limits", platform_limits(concurrency))
+    return client(**kwargs)
+
+
 def _retry_after(resp: httpx.Response, attempt: int) -> float:
     value = resp.headers.get("Retry-After", "")
     try:

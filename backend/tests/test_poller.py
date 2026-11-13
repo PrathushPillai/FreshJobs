@@ -543,3 +543,48 @@ def test_board_activity_loads_from_the_database(session, monkeypatch):
     assert poller._activity["max_id"] == {old.id: 1, fresh.id: 2}
     assert poller.activity_factor(fresh) == 1 and poller.activity_factor(old) == 4
     poller._activity.update(at=None, max_id={}, cuts={})
+
+
+@pytest.mark.asyncio
+async def test_each_platform_gets_its_own_small_connection_pool(session, monkeypatch, tmp_path):
+    """One big shared pool slowed every request once thousands of one-off hosts were in it (2026-11-13)."""
+    import asyncio
+
+    from app.config import settings
+    from app.pipeline import poller
+    from app.sources import ADAPTERS
+    from app.sources.base import Adapter
+
+    seen = {}
+
+    def make(name, slots):
+        class A(Adapter):
+            ats = name
+            max_concurrency = slots
+
+            async def fetch(self, client, slug, **_):
+                seen.setdefault(name, set()).add(id(client))
+                pool = client._transport._pool
+                seen[name + ":limit"] = pool._max_connections
+                return []
+        return A()
+
+    monkeypatch.setitem(ADAPTERS, "shared", make("shared", 25))
+    monkeypatch.setitem(ADAPTERS, "perhost", make("perhost", 6))
+    empty = tmp_path / "companies.yaml"
+    empty.write_text("[]")
+    monkeypatch.setattr(settings, "companies_file", empty)
+
+    async def nothing(*a, **k):
+        return []
+
+    monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
+    monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
+    session.add_all([Company(name="A", ats="shared", slug="a"), Company(name="B", ats="shared", slug="b"),
+                     Company(name="C", ats="perhost", slug="c")])
+    session.commit()
+
+    await poller.poll_once("fast")
+    assert len(seen["shared"]) == 1 and len(seen["perhost"]) == 1 and seen["shared"] != seen["perhost"]
+    assert seen["shared:limit"] == 30 and seen["perhost:limit"] == 11  # its fetch slots, plus 5

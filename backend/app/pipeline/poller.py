@@ -5,6 +5,7 @@ Run one poll by hand:  python -m app.pipeline.poller --once
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import re
 import socket
@@ -545,14 +546,22 @@ async def poll_once(lane: str | None = None) -> dict:
 
         # One pool of fetch slots per ATS, so a few slow Workday boards can't hold every slot.
         lap("prepare")
-        sems = {
-            ats: asyncio.Semaphore(ADAPTERS[ats].max_concurrency or settings.poll_concurrency)
-            for ats in {c.ats for c in companies}
-        }
-        # A bounded cookie jar: httpx copies the whole jar on every request (see http_util.BoundedCookieJar).
-        async with http_util.client(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+        sems_size = {ats: ADAPTERS[ats].max_concurrency or settings.poll_concurrency for ats in {c.ats for c in companies}}
+        sems = {ats: asyncio.Semaphore(n) for ats, n in sems_size.items()}
+        # One client per ATS, its pool sized to that ATS's fetch slots (http_util.platform_client). With one shared
+        # 300-connection pool, httpcore checked every pooled connection on each request; platforms that give each
+        # employer its own host (BambooHR, Breezy, Recruitee) filled it with one-off connections, and on 2026-11-13
+        # the fast lane's event loop spent ~65% of its CPU there and saved ~450 of ~15,900 boards a poll.
+        async with contextlib.AsyncExitStack() as stack:
+            clients = {ats: await stack.enter_async_context(http_util.platform_client(
+                sems_size[ats], timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True))
+                for ats in sems}
+            # Harvest, YC/list syncs, liveness checks and discovery: many hosts, a few requests each.
+            client = await stack.enter_async_context(http_util.platform_client(
+                settings.poll_concurrency, timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True))
             # Each fetch gets its source's details now, before any save can expire them (see _fetch).
-            fetches = [asyncio.ensure_future(_fetch(client, sems[c.ats], c, known.get(c.id, set()), _source_info(c)))
+            fetches = [asyncio.ensure_future(_fetch(clients[c.ats], sems[c.ats], c, known.get(c.id, set()),
+                                                    _source_info(c)))
                        for c in companies]
             # A poll ends by its deadline so the next one starts on time: one slow batch of boards
             # mustn't keep every other board from being checked again for an hour. Sources not
