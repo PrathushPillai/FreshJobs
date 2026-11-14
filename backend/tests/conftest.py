@@ -31,6 +31,8 @@ def session():
     from app import everify, main
 
     main._facets.update(at=None, rows=[])  # the location counts snapshot would outlive the test's data
+    from app.pipeline import liveness
+    liveness._checked.clear()  # job ids are reused by the next test's data
     everify._status_cache.clear()  # employer -> E-Verify status, cached per process
     main._jobs_cache.clear()  # cached /api/jobs pages and header counts would outlive the test's data
     main._status_counts.clear()

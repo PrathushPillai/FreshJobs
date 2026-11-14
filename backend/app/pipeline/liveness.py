@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models import Company, Job, JobEvent
@@ -91,19 +91,77 @@ def close(session: Session, job: Job, why: str, now: datetime) -> None:
     session.add(JobEvent(job=job, kind="closed", at=now, detail=why))
 
 
+# Job id -> when this process last checked it, so picking the next jobs doesn't re-read the rows just checked.
+_checked: dict[int, datetime] = {}
+_CHUNK = 500
+
+
+def _chunks(ids: list[int]):
+    for i in range(0, len(ids), _CHUNK):
+        yield ids[i : i + _CHUNK]
+
+
+def due_jobs(session: Session, limit: int, now: datetime) -> list[Job]:
+    """The `limit` newest open jobs that can't close on their own and weren't checked in the last day.
+
+    The old query walked every open job by date (ix_jobs_by_listed_v2) and read each one's row to see its
+    source and checked_at: 100-460 s per fast poll on the cloud server (2026-11-13), growing through the day as
+    the newest candidates got checked. Now the candidates' ids come first, index-only from their sources
+    (ix_jobs_company_sync; ~140k, JazzHR alone 108k), then the date index is walked newest first reading ids
+    only, and rows are read just for candidates this process hasn't checked today, stopping at `limit`.
+    (Looking up each candidate's date by id instead was random reads: over 10 minutes on the server.)"""
+    aggregators = [ats for ats, a in ADAPTERS.items() if a.aggregator]
+    stale_source = or_(Company.last_ok_at.is_(None), Company.last_ok_at < now - CHECK_EVERY)
+    company_ids = list(session.scalars(select(Company.id).where(or_(Company.ats.in_(aggregators), stale_source))))
+    since = now - CHECK_EVERY
+    for k in [k for k, at in _checked.items() if at < since]:
+        del _checked[k]
+    # Raw SQL: SQLAlchemy's with_hint() renders nothing on SQLite. Left alone, SQLite answered the first query
+    # from ix_jobs_by_sponsor, reading every open job's row.
+    hint = (lambda ix: f"INDEXED BY {ix} ") if session.get_bind().dialect.name == "sqlite" else (lambda ix: "")
+    candidates: set[int] = set()
+    for chunk in _chunks(company_ids):
+        candidates.update(i for (i,) in session.execute(text(
+            f"SELECT id FROM jobs {hint('ix_jobs_company_sync')}WHERE closed_at IS NULL AND company_id IN "
+            f"({','.join(str(int(c)) for c in chunk)})")))
+    candidates.difference_update(_checked)
+    if not candidates:
+        return []
+    walk = text(f"SELECT id FROM jobs {hint('ix_jobs_by_listed_v2')}WHERE closed_at IS NULL AND is_repost = :no "
+                "ORDER BY listed_at DESC").bindparams(no=False)
+    jobs: list[Job] = []
+    pending: list[int] = []
+
+    def take(ids: list[int]) -> bool:
+        rows = {j.id: j for j in session.scalars(select(Job).where(Job.id.in_(ids)))}
+        for i in ids:
+            j = rows.get(i)
+            if j is None or not j.us_eligible:
+                continue
+            if j.checked_at and j.checked_at >= since:
+                _checked[i] = j.checked_at  # checked by another process (the job panel's verify)
+                continue
+            jobs.append(j)
+            if len(jobs) >= limit:
+                return True
+        return False
+
+    for part in session.execute(walk.execution_options(yield_per=5000)).scalars().partitions():
+        pending += [i for i in part if i in candidates]
+        while len(pending) >= limit:
+            if take(pending[:limit]):
+                return jobs
+            pending = pending[limit:]
+    if pending:
+        take(pending)
+    return jobs
+
+
 async def verify_due(session: Session, client: httpx.AsyncClient, limit: int, now: datetime) -> int:
     """Check up to `limit` jobs that can't close on their own; returns how many were closed."""
     if limit <= 0:
         return 0
-    aggregators = [ats for ats, a in ADAPTERS.items() if a.aggregator]
-    stale_source = or_(Company.last_ok_at.is_(None), Company.last_ok_at < now - CHECK_EVERY)
-    jobs = list(session.scalars(
-        select(Job).join(Company, Job.company_id == Company.id)
-        .where(Job.closed_at.is_(None), Job.is_repost.is_(False), Job.us_eligible.is_(True))
-        .where(or_(Company.ats.in_(aggregators), stale_source))
-        .where(or_(Job.checked_at.is_(None), Job.checked_at < now - CHECK_EVERY))
-        .order_by(Job.listed_at.desc()).limit(limit)
-    ))
+    jobs = due_jobs(session, limit, now)
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def one(job: Job):
@@ -113,6 +171,7 @@ async def verify_due(session: Session, client: httpx.AsyncClient, limit: int, no
     closed = 0
     for job, (is_open, why) in await asyncio.gather(*(one(j) for j in jobs)):
         job.checked_at = now
+        _checked[job.id] = now
         if is_open is False:
             close(session, job, why, now)
             closed += 1
