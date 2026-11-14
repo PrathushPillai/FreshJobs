@@ -18,6 +18,7 @@ from collections.abc import Set
 import httpx
 
 from app.sources.base import Adapter, NormalizedJob, parse_iso
+from app.sources import http_util
 from app.sources.http_util import json_ld_job
 
 BASE = "https://www.ycombinator.com"
@@ -63,12 +64,14 @@ def _description(listing: dict, job: dict) -> str:
 class YCAdapter(Adapter):
     ats = "yc"
     min_interval_minutes = 120
+    # ycombinator.com answers 429 to bursts: after a restart every due company page went out 25 at a time, and
+    # ~600 failed in 7 minutes (2026-11-14); single requests were fine. 4 at a time, and 429s wait and retry.
+    max_concurrency = 4
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
-        resp = await client.get(f"{BASE}/companies/{slug}/jobs")
-        resp.raise_for_status()
+        resp = await http_util.get(client, f"{BASE}/companies/{slug}/jobs")
         listed = [j for j in page_props(resp.text).get("jobPostings") or [] if isinstance(j, dict) and j.get("id")]
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 

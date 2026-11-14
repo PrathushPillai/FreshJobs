@@ -6,6 +6,7 @@ slug: the subdomain, e.g. "hardrockdigital".
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 
@@ -15,10 +16,11 @@ def _place(loc: dict) -> str:
 
 class RecruiteeAdapter(Adapter):
     ats = "recruitee"
+    # One shared backend behind every subdomain: 74 boards got 429 at 25 at a time (2026-11-14).
+    max_concurrency = 6
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
-        resp = await client.get(f"https://{slug}.recruitee.com/api/offers/")
-        resp.raise_for_status()
+        resp = await http_util.get(client, f"https://{slug}.recruitee.com/api/offers/")
         jobs = []
         for j in resp.json().get("offers") or []:
             if not isinstance(j, dict) or not j.get("id"):

@@ -12,6 +12,7 @@ from collections.abc import Set
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
@@ -20,13 +21,14 @@ DETAIL_CONCURRENCY = 4
 
 class RipplingAdapter(Adapter):
     ats = "rippling"
-    max_concurrency = 15
+    # Every board is on api.rippling.com (Cloudflare). On 2026-11-14 all ~1,190 boards got 403 from 13:34 UTC for a few
+    # hours at 15 at a time; fewer at once, and 429s wait and retry.
+    max_concurrency = 8
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
-        resp = await client.get(API.format(slug=slug))
-        resp.raise_for_status()
+        resp = await http_util.get(client, API.format(slug=slug))
         listed = [j for j in resp.json() if isinstance(j, dict) and j.get("uuid")]
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
