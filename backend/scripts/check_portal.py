@@ -313,7 +313,12 @@ def _log_in(client: httpx.Client) -> None:
         else:
             email, password = "portal-check@freshjobs.local", secrets.token_urlsafe(18)
             r = client.post("/api/auth/signup", json={"name": "Portal check", "email": email, "password": password})
-            if r.status_code not in (200, 409):
+            if r.status_code == 409:
+                # The account exists but its password isn't saved here (a database copied from another machine,
+                # 2026-11-14): saving a new random password would only make every later run fail to log in.
+                sys.exit(f"{email} already exists but {path} is missing: copy that file from the machine that "
+                         "created it, or set FRESHJOBS_CHECK_EMAIL and FRESHJOBS_CHECK_PASSWORD.")
+            if r.status_code != 200:
                 sys.exit(f"Couldn't create the check account: HTTP {r.status_code} {r.text[:200]}")
             json.dump({"email": email, "password": password}, open(path, "w", encoding="utf-8"))
     r = client.post("/api/auth/login", json={"email": email, "password": password})
