@@ -7,8 +7,6 @@ included) in one request, so no per-job calls are needed. Workable rate-limits h
 roughly 100 quick requests from one IP), hence the long poll interval.
 """
 
-import asyncio
-import time
 
 import httpx
 
@@ -34,26 +32,10 @@ class WorkableAdapter(Adapter):
     # Requests are spaced out instead of sent two at a time as fast as possible: bursts got HTTP 429 for 3,254
     # of the 4,424 boards. One every 2 s is a full pass in about 2.5 h, inside the 3-hour interval above.
     REQUEST_SPACING = 2.0
-    # One lock per event loop: each poll runs in its own asyncio.run(), and a lock made in an earlier poll's
-    # loop raises "bound to a different event loop" (2,361 boards failed that way from 2026-11-04 to 11-09).
-    _spacing_locks: dict[int, asyncio.Lock] = {}
-    _last_request = 0.0
-
-    async def _wait_turn(self) -> None:
-        cls = type(self)
-        loop = asyncio.get_running_loop()
-        lock = cls._spacing_locks.get(id(loop))
-        if lock is None:
-            cls._spacing_locks = {id(loop): asyncio.Lock()}  # drop the old loops' locks
-            lock = cls._spacing_locks[id(loop)]
-        async with lock:
-            wait = cls._last_request + self.REQUEST_SPACING - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)
-            cls._last_request = time.monotonic()
+    _spacer = http_util.Spacer(REQUEST_SPACING)
 
     async def fetch(self, client: httpx.AsyncClient, slug: str, **_) -> list[NormalizedJob]:
-        await self._wait_turn()
+        await self._spacer.wait()
         # Retries 429s with backoff (Retry-After honoured).
         resp = await http_util.get(client, f"https://apply.workable.com/api/v1/widget/accounts/{slug}", params={"details": "true"})
         jobs = []

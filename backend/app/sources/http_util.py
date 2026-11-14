@@ -4,6 +4,7 @@ import asyncio
 import http.cookiejar
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -112,6 +113,37 @@ async def get(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
 
 async def post(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
     return await request(client, "POST", url, **kwargs)
+
+
+class Spacer:
+    """Spaces one platform's requests at least `seconds` apart, and holds them all during a pause (after a 429).
+
+    One lock per event loop: each poll runs in its own asyncio.run(), and a lock made in an earlier poll's loop
+    raises "bound to a different event loop" (2,361 Workable boards failed that way from 2026-11-04 to 11-09).
+    The lanes are separate processes, so this paces one lane's requests, which is where a platform's boards are.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._last = 0.0
+        self._paused_until = 0.0
+
+    def pause(self, seconds: float) -> None:
+        """Send nothing for `seconds` (a 429 from a platform that blocks a whole address for a while)."""
+        self._paused_until = max(self._paused_until, time.monotonic() + seconds)
+
+    async def wait(self) -> None:
+        loop = id(asyncio.get_running_loop())
+        lock = self._locks.get(loop)
+        if lock is None:
+            self._locks = {loop: asyncio.Lock()}  # drop the old loops' locks
+            lock = self._locks[loop]
+        async with lock:
+            wait = max(self._last + self.seconds, self._paused_until) - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = time.monotonic()
 
 
 def midnight_utc(year: int, month: int, day: int) -> datetime:
