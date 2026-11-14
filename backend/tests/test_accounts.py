@@ -212,6 +212,9 @@ def test_alerts_are_opt_in_need_a_confirmed_email_and_unsubscribe_in_one_click(s
     assert sent[-1][2] == ["Data Analyst II"]  # their role, new, not senior; nurse isn't theirs
     assert deliver_alerts(later + timedelta(minutes=10)) == 0  # nothing new, and "instant" is at most hourly
     with TestClient(app) as anon:
+        r = anon.get("/api/alerts/unsubscribe", params={"token": "not-a-real-token"})
+        assert r.status_code == 400 and "That unsubscribe link" in r.text  # was a 500
+        assert get_prefs(session, user.id).email_alerts is True
         r = anon.get("/api/alerts/unsubscribe", params={"token": user.unsubscribe_token})
         assert r.status_code == 200 and "unsubscribed" in r.text
     session.expire_all()

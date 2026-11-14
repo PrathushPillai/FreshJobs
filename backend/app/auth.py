@@ -479,7 +479,9 @@ def unsubscribe(token: str = "", db: Session = Depends(get_session)):
     """One click from an alert email turns alerts off, without logging in."""
     user = db.scalar(select(User).where(User.unsubscribe_token == token)) if token else None
     if user is None:
-        return HTMLResponse(_page("That unsubscribe link isn't valid.", "Log in and switch alerts off in My profile."), 400)
+        # _page is already a response: wrapping it in another HTMLResponse answered 500 (2026-11-14, links opened by
+        # a mail scanner a few seconds after each alert, with a token that matches no account).
+        return _page("That unsubscribe link isn't valid.", "Log in and switch alerts off in My profile.", 400)
     db.execute(update(UserPrefs).where(UserPrefs.user_id == user.id).values(email_alerts=False))
     db.commit()
     record("unsubscribed", user.id, "one-click link")
@@ -494,7 +496,7 @@ def unsubscribe_one_click(token: str = "", db: Session = Depends(get_session)):
     return {"ok": True}
 
 
-def _page(title: str, body: str) -> HTMLResponse:
+def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
     from html import escape
 
     return HTMLResponse(
@@ -505,4 +507,4 @@ def _page(title: str, body: str) -> HTMLResponse:
         f"⚡ FreshJobs</p><h1 style='margin:0 0 8px;font-size:22px;color:#0c0a1d'>{escape(title)}</h1>"
         f"<p style='margin:0;color:#475569;line-height:1.5'>{escape(body)}</p>"
         f"<p style='margin:20px 0 0'><a href='{escape(settings.public_url)}' style='color:#6d28d9'>Open FreshJobs →</a></p>"
-        "</div></body>")
+        "</div></body>", status)
