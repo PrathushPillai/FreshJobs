@@ -216,7 +216,30 @@ def test_alerts_are_opt_in_need_a_confirmed_email_and_unsubscribe_in_one_click(s
         assert r.status_code == 400 and "That unsubscribe link" in r.text  # was a 500
         assert get_prefs(session, user.id).email_alerts is True
         r = anon.get("/api/alerts/unsubscribe", params={"token": user.unsubscribe_token})
+        assert r.status_code == 200 and "Stop FreshJobs alerts?" in r.text and "confirm=1" in r.text
+        session.expire_all()
+        assert get_prefs(session, user.id).email_alerts is True  # opening the link (a mail scanner) changes nothing
+        r = anon.post("/api/alerts/unsubscribe", params={"token": "not-a-real-token", "confirm": 1})
+        assert r.status_code == 400 and "That unsubscribe link" in r.text
+        r = anon.post("/api/alerts/unsubscribe", params={"token": user.unsubscribe_token, "confirm": 1})
         assert r.status_code == 200 and "unsubscribed" in r.text
+    session.expire_all()
+    assert get_prefs(session, user.id).email_alerts is False
+
+
+def test_mail_apps_one_click_unsubscribe_posts_without_confirm(session):
+    from app.models import User
+
+    user = User(email="a@example.test", name="A", password_hash="x", is_admin=False, unsubscribe_token="tok-1")
+    session.add(user)
+    session.flush()
+    get_prefs(session, user.id).email_alerts = True
+    session.commit()
+    with TestClient(app) as anon:
+        assert anon.post("/api/alerts/unsubscribe", params={"token": "nope"}).status_code == 400
+        r = anon.post("/api/alerts/unsubscribe", params={"token": "tok-1"},
+                      content="List-Unsubscribe=One-Click", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 200 and r.json() == {"ok": True}
     session.expire_all()
     assert get_prefs(session, user.id).email_alerts is False
 

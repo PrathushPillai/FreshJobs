@@ -474,29 +474,49 @@ def delete_my_account(body: DeleteAccountIn, request: Request, response: Respons
     return {"ok": True}
 
 
+def _unsubscriber(db: Session, token: str) -> User | None:
+    return db.scalar(select(User).where(User.unsubscribe_token == token)) if token else None
+
+
+_BAD_LINK = ("That unsubscribe link isn't valid.", "Log in and switch alerts off in My profile.")
+
+
 @router.get("/api/alerts/unsubscribe", response_class=HTMLResponse)
-def unsubscribe(token: str = "", db: Session = Depends(get_session)):
-    """One click from an alert email turns alerts off, without logging in."""
-    user = db.scalar(select(User).where(User.unsubscribe_token == token)) if token else None
+def unsubscribe_page(token: str = "", db: Session = Depends(get_session)):
+    """The link in an alert email asks first and changes nothing: mail scanners open every link in a message (Microsoft
+    cloud addresses fetched it seconds after each alert, 2026-11-14), and a GET that unsubscribed would switch alerts
+    off behind the reader's back. The button POSTs back here with confirm=1."""
+    if _unsubscriber(db, token) is None:
+        # _page is already a response: wrapping it in another HTMLResponse answered 500 (2026-11-14).
+        return _page(*_BAD_LINK, status=400)
+    from html import escape
+    from urllib.parse import quote
+
+    action = escape(f"/api/alerts/unsubscribe?token={quote(token, safe='')}&confirm=1")
+    button = (f"<form method='post' action='{action}' style='margin:20px 0 0'><button type='submit' "
+              "style='background:#6d28d9;color:#fff;border:0;border-radius:10px;padding:10px 18px;font-size:15px;"
+              "font-weight:700;cursor:pointer'>Unsubscribe</button></form>")
+    return _page("Stop FreshJobs alerts?", "You'll get no more job alert emails. You can switch them back on in My profile.",
+                 extra_html=button)
+
+
+@router.post("/api/alerts/unsubscribe")
+def unsubscribe(token: str = "", confirm: bool = False, db: Session = Depends(get_session)):
+    """Turns alerts off: the confirm page's button (confirm=1, answers with a page), or a mail app's RFC 8058 one-click
+    POST to the List-Unsubscribe link (answers JSON)."""
+    user = _unsubscriber(db, token)
     if user is None:
-        # _page is already a response: wrapping it in another HTMLResponse answered 500 (2026-11-14, links opened by
-        # a mail scanner a few seconds after each alert, with a token that matches no account).
-        return _page("That unsubscribe link isn't valid.", "Log in and switch alerts off in My profile.", 400)
+        return _page(*_BAD_LINK, status=400) if confirm else Response(status_code=400)
     db.execute(update(UserPrefs).where(UserPrefs.user_id == user.id).values(email_alerts=False))
     db.commit()
-    record("unsubscribed", user.id, "one-click link")
+    record("unsubscribed", user.id, "confirm button" if confirm else "one-click (mail app)")
+    if not confirm:
+        return {"ok": True}
     return _page("You're unsubscribed.", f"{user.email} won't get FreshJobs alerts any more. "
                  f"You can switch them back on in My profile.")
 
 
-@router.post("/api/alerts/unsubscribe")
-def unsubscribe_one_click(token: str = "", db: Session = Depends(get_session)):
-    """RFC 8058 one-click unsubscribe (mail apps POST to the List-Unsubscribe link)."""
-    unsubscribe(token, db)
-    return {"ok": True}
-
-
-def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
+def _page(title: str, body: str, status: int = 200, extra_html: str = "") -> HTMLResponse:
     from html import escape
 
     return HTMLResponse(
@@ -506,5 +526,6 @@ def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
         "box-shadow:0 10px 30px rgba(76,29,149,.12)'><p style='margin:0 0 8px;font-weight:800;color:#5b21b6'>"
         f"⚡ FreshJobs</p><h1 style='margin:0 0 8px;font-size:22px;color:#0c0a1d'>{escape(title)}</h1>"
         f"<p style='margin:0;color:#475569;line-height:1.5'>{escape(body)}</p>"
+        f"{extra_html}"
         f"<p style='margin:20px 0 0'><a href='{escape(settings.public_url)}' style='color:#6d28d9'>Open FreshJobs →</a></p>"
         "</div></body>", status)
