@@ -134,6 +134,8 @@ def _clean(token: str) -> str:
     token = token.replace("(", " ").replace(")", " ")
     token = _NOISE.sub(" ", token)
     token = re.sub(r"\s+", " ", token).strip(" .:-–—/&").strip()
+    # A state with its ZIP code: "Paris, TX 75460", "Dublin, OH 0755", "New Brunswick, NJ 08903".
+    token = re.sub(r"^([A-Z]{2})\s+\d{3,5}(?:-\d{4})?$", r"\1", token)
     # "Remote in USA" leaves "in USA", which read as Indiana; "in" in lower case is never the state's code.
     return re.sub(r"^(in|within|across|from) ", "", token)
 
@@ -171,6 +173,9 @@ def _from_code_form(part: str) -> Place | None:
     country = COUNTRY_CODES[m.group(1)]
     sub = (m.group(2) or "").rstrip("-").upper() or None
     rest = _clean(m.group(3).replace("-", " - "))
+    us_city = CITIES.get(rest.lower())
+    if not sub and m.group(1) in US_STATES and us_city and us_city[1] == "United States":
+        return Place(_canonical_city(rest), m.group(1), "United States")  # "IL-Chicago": Illinois, not Israel
     state = sub if (country == "United States" and sub in US_STATES) or country == "Canada" else None
     if sub and state is None and sub in CITY_ABBREVIATIONS:  # "US-SF-HQ"
         return _city_place(sub, None, country)
