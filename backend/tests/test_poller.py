@@ -644,3 +644,22 @@ async def test_each_platform_gets_its_own_small_connection_pool(session, monkeyp
     await poller.poll_once("fast")
     assert len(seen["shared"]) == 1 and len(seen["perhost"]) == 1 and seen["shared"] != seen["perhost"]
     assert seen["shared:limit"] == 30 and seen["perhost:limit"] == 11  # its fetch slots, plus 5
+
+
+@pytest.mark.parametrize("ats,error,days,streak,gone", [
+    ("greenhouse", "HTTP 404", 4, 12, True),    # moved to Ashby
+    ("greenhouse", "HTTP 404", 1, 30, False),   # only a day: may come back
+    ("greenhouse", "HTTP 404", 5, 3, False),    # too few tries
+    ("workday", "HTTP 401", 4, 12, True),       # career site unpublished ("outage" page)
+    ("workday", "HTTP 403", 4, 12, True),       # Workday's "permission denied"
+    ("rippling", "HTTP 403", 4, 12, False),     # elsewhere a 403 is usually a temporary block
+    ("workday", "HTTP 429", 9, 50, False),      # rate limits never switch a board off
+])
+def test_gone_board_rules(ats, error, days, streak, gone):
+    from datetime import datetime, timedelta, timezone
+
+    from app.pipeline.poller import is_gone_board
+
+    now = datetime.now(timezone.utc)
+    company = Company(name="X", ats=ats, slug="x", fail_streak=streak, last_ok_at=now - timedelta(days=days))
+    assert is_gone_board(company, error, now) is gone

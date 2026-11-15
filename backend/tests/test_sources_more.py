@@ -209,6 +209,45 @@ async def test_workday_list_error_raises():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_workday_keeps_the_pages_it_read_when_rate_limited_part_way(monkeypatch):
+    """A 429 that outlasts the retries part way through a scan keeps the newest pages and marks the scan
+    incomplete (so nothing is closed); a 429 on the very first page is still a failed fetch."""
+    from app.sources import http_util, workday
+
+    waits = []
+
+    async def no_wait(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(http_util.asyncio, "sleep", no_wait)
+    postings = [wd_posting(i) for i in range(60)]
+    handler, calls = wd_pages(postings)
+    respx.post(f"{WD_API}/jobs").mock(side_effect=lambda req: (
+        httpx.Response(429, text="slow down") if json.loads(req.content)["offset"] == 40 else handler(req)))
+    known = {job_id(p["externalPath"]) for p in postings}
+    adapter = WorkdayAdapter()
+    async with httpx.AsyncClient() as client:
+        jobs = await adapter.fetch(client, WD_SLUG, full=True, known_ids=known)
+        assert len(jobs) == 40 and not adapter.last_fetch_complete(WD_SLUG)
+        # patient retries on list pages: 5, 10, 20, 40, 60 s
+        assert waits == [5.0, 10.0, 20.0, 40.0, 60.0]
+        assert workday.LIST_RETRIES == 5
+        # a partial scan keeps the pages it read too (all new here, so it reads on until the 429 at offset 40)
+        new = [wd_posting(i, "Posted Today") for i in range(60)]
+        new_handler, _ = wd_pages(new)
+        respx.post(f"{WD_API}/jobs").mock(side_effect=lambda req: (
+            httpx.Response(429, text="slow down") if json.loads(req.content)["offset"] == 40 else new_handler(req)))
+        jobs = await adapter.fetch(client, WD_SLUG, full=False, known_ids={job_id(p["externalPath"]) for p in new})
+        assert len(jobs) == 40
+
+    respx.post(f"{WD_API}/jobs").mock(return_value=httpx.Response(429, text="slow down"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=known)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_workday_host_without_a_wd_number():
     # NXP's wd3 host shows Workday's maintenance page; the tenant answers at nxp.myworkdayjobs.com.
     handler, _ = wd_pages([wd_posting(1)])

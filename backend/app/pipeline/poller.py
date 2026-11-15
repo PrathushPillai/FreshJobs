@@ -156,16 +156,22 @@ def is_dead_board(company: Company, error: str) -> bool:
 # it was retried every 3 hours. After MOVED_BOARD_DAYS of nothing but "not found" (at least MOVED_BOARD_FAILS
 # tries, so a short outage never counts), it's switched off and its open jobs are closed. Discovery and
 # harvesting add the new board when they meet it.
+# 401 too ("Unable to verify": a Workday career site the employer unpublished, whose page redirects to Workday's
+# "outage" page: BDO, Magellan Health, Mount Holyoke), and Workday's own 403 ("permission denied", 23andMe,
+# Marmon). A 403 from other platforms is more often a temporary block (Rippling's Cloudflare, 2026-11-14), so it
+# doesn't count there; Workday's blocks come as 429.
 MOVED_BOARD_DAYS = 3
 MOVED_BOARD_FAILS = 10
-GONE_ERRORS = ("HTTP 404", "HTTP 410")
+GONE_ERRORS = ("HTTP 404", "HTTP 410", "HTTP 401")
+GONE_ERRORS_BY_ATS = {"workday": ("HTTP 403",)}
 
 
 def is_gone_board(company: Company, error: str, now: datetime) -> bool:
     if company.last_ok_at is None:
         return False
     code = " ".join(str(error).split()[:2])
-    return (code in GONE_ERRORS and (company.fail_streak or 0) >= MOVED_BOARD_FAILS
+    gone = code in GONE_ERRORS or code in GONE_ERRORS_BY_ATS.get(company.ats, ())
+    return (gone and (company.fail_streak or 0) >= MOVED_BOARD_FAILS
             and company.last_ok_at <= now - timedelta(days=MOVED_BOARD_DAYS))
 
 
@@ -652,7 +658,7 @@ async def poll_once(lane: str | None = None) -> dict:
                     elif is_gone_board(company, error, now):
                         # Awaited here like a save, so the session is never used by two threads at once.
                         closed = await asyncio.to_thread(close_gone_board, session, company, now)
-                        company.last_status = (f"error: {error} (switched off: not found for "
+                        company.last_status = (f"error: {error} (switched off: gone for "
                                                f"{MOVED_BOARD_DAYS}+ days; {closed} open jobs closed)")
                         log.warning("%s (%s/%s) is gone: switched off, %d open jobs closed",
                                     company.name, company.ats, company.slug, closed)

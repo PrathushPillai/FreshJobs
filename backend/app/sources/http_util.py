@@ -64,12 +64,12 @@ def platform_client(concurrency: int, **kwargs) -> httpx.AsyncClient:
     return client(**kwargs)
 
 
-def _retry_after(resp: httpx.Response, attempt: int) -> float:
+def _retry_after(resp: httpx.Response, attempt: int, backoff: float = 2.0) -> float:
     value = resp.headers.get("Retry-After", "")
     try:
         return min(float(value), MAX_BACKOFF_SECONDS)
     except ValueError:
-        return min(2.0 * 2**attempt, MAX_BACKOFF_SECONDS)
+        return min(backoff * 2**attempt, MAX_BACKOFF_SECONDS)
 
 
 RETRY_STATUSES = (429, 503)
@@ -84,14 +84,16 @@ TRANSIENT_BACKOFF_SECONDS = 2.0
 
 
 async def request(client: httpx.AsyncClient, method: str, url: str, *, retry_statuses: tuple[int, ...] = RETRY_STATUSES,
-                  **kwargs) -> httpx.Response:
+                  retries: int = MAX_RETRIES, backoff: float = 2.0, **kwargs) -> httpx.Response:
     """client.request(), retried with backoff on 429 and 503 (Retry-After is honoured, capped at a minute), and
     on a dropped or refused connection (TRANSIENT_ERRORS, twice). Every caller only reads, so a retry is safe.
 
     retry_statuses: more answers that mean "slow down" for a given platform (Avature's 406).
+    retries, backoff: how many times a "slow down" answer is retried, and the first wait (doubled each time, at
+    most a minute) when the answer has no Retry-After.
     The final response is returned as is (with its status raised), so callers decide what an error means.
     """
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(retries + 1):
         for tries in range(TRANSIENT_RETRIES + 1):
             try:
                 resp = await client.request(method, url, **kwargs)
@@ -100,10 +102,10 @@ async def request(client: httpx.AsyncClient, method: str, url: str, *, retry_sta
                 if tries == TRANSIENT_RETRIES:
                     raise
                 await asyncio.sleep(TRANSIENT_BACKOFF_SECONDS * (tries + 1))
-        if resp.status_code not in retry_statuses or attempt == MAX_RETRIES:
+        if resp.status_code not in retry_statuses or attempt == retries:
             resp.raise_for_status()
             return resp
-        await asyncio.sleep(_retry_after(resp, attempt))
+        await asyncio.sleep(_retry_after(resp, attempt, backoff))
     raise AssertionError("unreachable")
 
 

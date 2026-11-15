@@ -34,6 +34,17 @@ PAGE_SIZE = 20  # the API's maximum
 RESULT_CAP = 2000
 MAX_PARTIAL_PAGES = 15
 DETAIL_CONCURRENCY = 4
+# Workday's Cloudflare answers 429 to bursts, with no Retry-After. Three quick retries (2, 4 and 8 s) weren't
+# enough: on 2026-11-15, 729 of ~4,900 boards failed a check in 6 hours (CVS Health, Dollar Tree, O'Reilly,
+# Micron, Northrop Grumman...), while the same requests a minute later answered 200. List pages now wait
+# 5, 10, 20, 40 and 60 s, and a scan that still gets a 429 part way keeps the pages it read (see _keep_partial).
+LIST_RETRIES = 5
+LIST_BACKOFF_SECONDS = 5.0
+SLOW_DOWN = (429, 503)
+
+
+def _slow_down(e: Exception) -> bool:
+    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code in SLOW_DOWN
 # A board's first scan fetches details only for jobs posted in the last few days:
 # a big tenant has thousands of old jobs, and a detail call for each would hold the slow lane for hours.
 BASELINE_DETAIL_DAYS = 7
@@ -167,7 +178,8 @@ class WorkdayAdapter(Adapter):
         # Retried with backoff on 429/503: tenants rate-limit bursts, and one 429 used to fail the whole board
         # (149 boards, Kraft Heinz, Lowe's, Lilly, CVS Health, GEICO, Wells Fargo..., from 2026-11-06 on).
         resp = await http_util.post(
-            client, f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""}
+            client, f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""},
+            retries=LIST_RETRIES, backoff=LIST_BACKOFF_SECONDS,
         )
         return resp.json()
 
@@ -178,7 +190,14 @@ class WorkdayAdapter(Adapter):
         total = None
         offset = 0
         while True:
-            data = await self._page(client, api, offset)
+            try:
+                data = await self._page(client, api, offset)
+            except httpx.HTTPError as e:
+                # Rate-limited part way through a big board: the pages read so far hold the newest jobs, so
+                # keep them. The scan counts as incomplete, so no job is closed for missing from it.
+                if postings and _slow_down(e):
+                    return postings, False
+                raise
             if total is None:
                 total = data.get("total") or 0
             page = [p for p in data.get("jobPostings") or [] if p.get("externalPath")]
@@ -207,7 +226,12 @@ class WorkdayAdapter(Adapter):
             add((await self._page(client, api, 0)).get("jobPostings") or [])
         offset = start
         for _ in range(MAX_PARTIAL_PAGES):
-            data = await self._page(client, api, offset)
+            try:
+                data = await self._page(client, api, offset)
+            except httpx.HTTPError as e:
+                if postings and _slow_down(e):
+                    break  # keep the newest pages (a partial scan never closes jobs)
+                raise
             fresh = add(data.get("jobPostings") or [])
             if not fresh:
                 break
