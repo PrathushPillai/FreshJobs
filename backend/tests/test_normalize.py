@@ -9,3 +9,11 @@ def test_clean_title():
     assert clean_title(".NET Developer") == ".NET Developer"
     assert clean_title("C++  Developer") == "C++ Developer"
     assert clean_title("---") == "---"  # never empty
+
+
+def test_mojibake_titles_are_repaired():
+    from app.pipeline.normalize import clean_title
+
+    assert clean_title("Python Data Analyst â€“ Entry Level") == "Python Data Analyst – Entry Level"
+    assert clean_title("CafÃ© Manager") == "Café Manager"
+    assert clean_title("Café Manager – Lead") == "Café Manager – Lead"  # already right: unchanged

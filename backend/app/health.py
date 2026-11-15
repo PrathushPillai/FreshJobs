@@ -365,7 +365,7 @@ def check_feed_content(session) -> list[Check]:
     from app.pipeline.dedupe import same_posting
     from app.pipeline.filters import is_us_location
     from app.pipeline.harvest import name_from_slug
-    from app.pipeline.normalize import normalize_title
+    from app.pipeline.normalize import fix_mojibake, normalize_title
 
     rows = _feed_sample(session)
     _MULTI_EMPLOYER = _multi_employer()
@@ -374,7 +374,8 @@ def check_feed_content(session) -> list[Check]:
     n = len(rows)
     out = []
 
-    junk = [(r.id, r.title) for r in rows if not r.title or _JUNK_TITLE.search(r.title) or not (r.url or "").startswith("http")]
+    junk = [(r.id, r.title) for r in rows if not r.title or _JUNK_TITLE.search(r.title) or fix_mojibake(r.title) != r.title
+            or not (r.url or "").startswith("http")]
     out.append(Check("feed titles", "warn" if len(junk) > 5 else "ok",
                      f"{len(junk)} of the newest {n} jobs have junk titles or no link"
                      + (f", e.g. {junk[0][1]!r} (job {junk[0][0]})" if junk else ""), {"examples": junk[:10]}))

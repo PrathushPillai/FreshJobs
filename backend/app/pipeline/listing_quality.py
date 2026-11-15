@@ -66,7 +66,7 @@ def listing_flag(title: str, description: str) -> str | None:
 
 
 def backfill(days: int, batch: int = 2000) -> dict:
-    """Set listing_flag on open jobs found in the last `days` days. Short transactions, retried while locked."""
+    """Set listing_flag, and repair garbled titles, on open jobs found in the last `days` days. Short transactions, retried while locked."""
     from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import text as sql
@@ -78,7 +78,9 @@ def backfill(days: int, batch: int = 2000) -> dict:
     with SessionLocal() as s:
         ids = [i for (i,) in s.execute(sql("SELECT id FROM jobs INDEXED BY ix_jobs_by_found_v2 WHERE closed_at IS NULL "
                                            "AND is_repost = 0 AND first_seen_at >= :s"), {"s": since})]
-    counts = {"read": 0, "scam": 0, "mlm": 0}
+    from app.pipeline.normalize import fix_mojibake
+
+    counts = {"read": 0, "scam": 0, "mlm": 0, "titles_fixed": 0}
     for start in range(0, len(ids), batch):
         chunk = ids[start:start + batch]
         for attempt in range(10):
@@ -87,6 +89,9 @@ def backfill(days: int, batch: int = 2000) -> dict:
                     rows = s.execute(sql(f"SELECT id, title, description, listing_flag FROM jobs WHERE id IN "
                                          f"({','.join(map(str, chunk))})")).all()
                     for jid, title, desc, old in rows:
+                        if (fixed := fix_mojibake(title or "")) != title:  # "Analyst â€“ Entry Level"
+                            s.execute(sql("UPDATE jobs SET title = :t WHERE id = :i"), {"t": fixed, "i": jid})
+                            counts["titles_fixed"] += 1
                         new = listing_flag(title, desc)
                         if new:
                             counts[new] += 1
