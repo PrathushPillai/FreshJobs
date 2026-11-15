@@ -149,6 +149,44 @@ def is_dead_board(company: Company, error: str) -> bool:
     code = " ".join(str(error).split()[:2])  # "HTTP 404"
     return company.fail_streak >= DEAD_BOARD_RULES.get(code, 10**9)
 
+
+# A board that worked before but now says "not found" has usually moved: the employer switched ATS (Parloa,
+# Mindbody, Kayak and ClassPass went from Greenhouse to Ashby) or took its board down. Failed fetches close no
+# jobs, so its open jobs stayed in the Feed for good (ClassPass: 51, from a board gone since 2026-11-12), and
+# it was retried every 3 hours. After MOVED_BOARD_DAYS of nothing but "not found" (at least MOVED_BOARD_FAILS
+# tries, so a short outage never counts), it's switched off and its open jobs are closed. Discovery and
+# harvesting add the new board when they meet it.
+MOVED_BOARD_DAYS = 3
+MOVED_BOARD_FAILS = 10
+GONE_ERRORS = ("HTTP 404", "HTTP 410")
+
+
+def is_gone_board(company: Company, error: str, now: datetime) -> bool:
+    if company.last_ok_at is None:
+        return False
+    code = " ".join(str(error).split()[:2])
+    return (code in GONE_ERRORS and (company.fail_streak or 0) >= MOVED_BOARD_FAILS
+            and company.last_ok_at <= now - timedelta(days=MOVED_BOARD_DAYS))
+
+
+def close_gone_board(session: Session, company: Company, now: datetime) -> int:
+    """Switch off a board that's gone and close its open jobs (one 'closed' event each). Commits."""
+    ids = list(session.scalars(select(Job.id).where(Job.company_id == company.id, Job.closed_at.is_(None))))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        session.execute(update(Job).where(Job.id.in_(chunk)).values(closed_at=now)
+                        .execution_options(synchronize_session=False))
+        session.add_all(JobEvent(job_id=j, kind="closed", at=now, detail="its board is gone (not found for days)")
+                        for j in chunk)
+    closed = set(ids)
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, Job) and obj.id in closed:
+            session.expire(obj)
+    company.enabled = False
+    session.commit()
+    return len(ids)
+
+
 # A failed name lookup ("getaddrinfo failed") is either a dead host or this machine being offline (Wi-Fi not
 # back after sleep). On 2026-11-10 one poll right after waking failed 15,973 boards that way, and the idle
 # rule then left them unchecked for 3 hours. So a lookup failure is first checked against a few hosts that
@@ -611,6 +649,13 @@ async def poll_once(lane: str | None = None) -> dict:
                         # discovery or a list (2,078 of them were retried every 3 hours): switch it off.
                         company.enabled = False
                         company.last_status = f"error: {error} (switched off: this board never worked)"
+                    elif is_gone_board(company, error, now):
+                        # Awaited here like a save, so the session is never used by two threads at once.
+                        closed = await asyncio.to_thread(close_gone_board, session, company, now)
+                        company.last_status = (f"error: {error} (switched off: not found for "
+                                               f"{MOVED_BOARD_DAYS}+ days; {closed} open jobs closed)")
+                        log.warning("%s (%s/%s) is gone: switched off, %d open jobs closed",
+                                    company.name, company.ats, company.slug, closed)
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
                     continue
                 # Read before saving: after a failed save, touching the board's attributes would flush it.

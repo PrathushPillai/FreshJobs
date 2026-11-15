@@ -267,6 +267,62 @@ async def test_dead_boards_are_switched_off_after_three_404s(session, monkeypatc
     assert fine.enabled and fine.fail_streak == 3  # it worked before: a 404 may be temporary
 
 
+
+@pytest.mark.asyncio
+async def test_a_board_gone_for_days_is_switched_off_and_its_jobs_closed(session, monkeypatch, tmp_path):
+    """A board that worked but has said "not found" for MOVED_BOARD_DAYS (the employer moved to another ATS)
+    is switched off and its open jobs are closed; a board that only just started failing is left alone."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+
+    from app.models import Job, JobEvent
+    from app.pipeline import poller
+    from app.sources import ADAPTERS
+
+    from app.config import settings
+    from app.sources.base import Adapter
+
+    class Gone(Adapter):
+        ats = "gone"
+
+        async def fetch(self, client, slug, **_):
+            request = httpx.Request("GET", f"https://example.com/{slug}")
+            raise httpx.HTTPStatusError("not found", request=request, response=httpx.Response(404, request=request))
+
+    monkeypatch.setitem(ADAPTERS, "gone", Gone())
+    empty = tmp_path / "companies.yaml"
+    empty.write_text("[]")
+    monkeypatch.setattr(settings, "companies_file", empty)
+
+    async def nothing(*a, **k):
+        return []
+
+    monkeypatch.setattr(poller, "maybe_sync_yc", nothing)
+    monkeypatch.setattr(poller, "maybe_sync_lists", nothing)
+    monkeypatch.setattr(poller, "verify_due", lambda *a, **k: asyncio.sleep(0, 0))
+    now = datetime.now(timezone.utc)
+    moved = Company(name="Moved", ats="gone", slug="moved", last_ok_at=now - timedelta(days=4),
+                    fail_streak=poller.MOVED_BOARD_FAILS - 1)
+    blip = Company(name="Blip", ats="gone", slug="blip", last_ok_at=now - timedelta(hours=6),
+                   fail_streak=poller.MOVED_BOARD_FAILS + 5)
+    session.add_all([moved, blip])
+    session.flush()
+    for c in (moved, blip):
+        session.add(Job(company=c, external_id="1", title="Engineer", url="https://example.com/1", fingerprint=f"fp-{c.slug}",
+                        first_seen_at=now, last_seen_at=now))
+    session.commit()
+    await poller.poll_once("fast")
+    session.expire_all()
+    moved, blip = (session.query(Company).filter_by(slug=s).one() for s in ("moved", "blip"))
+    assert not moved.enabled and "1 open jobs closed" in moved.last_status
+    gone_job = session.query(Job).filter_by(company_id=moved.id).one()
+    assert gone_job.closed_at is not None
+    assert session.query(JobEvent).filter_by(job_id=gone_job.id, kind="closed").count() == 1
+    assert blip.enabled and session.query(Job).filter_by(company_id=blip.id).one().closed_at is None
+
+
 @pytest.mark.asyncio
 async def test_network_down_does_not_count_as_a_failing_board(session, monkeypatch, tmp_path):
     """A poll while the laptop is offline (Wi-Fi not back after sleep) leaves boards due for the next poll;
