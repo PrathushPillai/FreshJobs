@@ -15,6 +15,7 @@ def monitor(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "health_file", lambda: tmp_path / "health.json")
     monkeypatch.setattr(health, "run_checks", lambda previous, force: list(state["checks"]))
     monkeypatch.setattr(health, "_email", lambda subject, lines, footer: state["sent"].append((subject, lines)) or True)
+    monkeypatch.setattr(health, "FAIL_GRACE_MINUTES", 0)
     return state
 
 
@@ -105,3 +106,10 @@ def _check_admin_route(client):
     sign_up(client)  # the first account is the admin
     r = client.get("/api/admin/health")
     assert r.status_code == 200 and "checks" in r.json()
+
+
+def test_a_failure_during_a_restart_waits_for_the_next_run(monitor, monkeypatch):
+    monkeypatch.setattr(health, "FAIL_GRACE_MINUTES", 10)
+    monitor["checks"] = [Check("backend", "fail", "down")]
+    health.run()
+    assert monitor["sent"] == []  # a deploy restarts the backend for minutes

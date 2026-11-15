@@ -36,6 +36,9 @@ from sqlalchemy import text
 from app.config import settings
 
 WARN_GRACE_MINUTES = 60
+# A failure must still be there on the next run (15 min later): a deploy or reboot restarts the backend for up to
+# ~13 minutes, and that is no reason to email.
+FAIL_GRACE_MINUTES = 10
 REMIND_HOURS = 12
 PORTAL_CHECK_HOURS = 24  # how often check_portal.py runs (it signs in and sends ~40 GET requests)
 
@@ -496,10 +499,11 @@ def run_checks(previous: dict | None = None, force_portal: bool = False) -> list
 
 
 def _problems(checks: list[Check], since: dict, now: datetime) -> list[Check]:
-    """Checks worth an email now: failures at once, warnings once they've lasted WARN_GRACE_MINUTES."""
+    """Checks worth an email now: failures once they've lasted FAIL_GRACE_MINUTES, warnings WARN_GRACE_MINUTES."""
     out = []
     for c in checks:
-        if c.level == "fail":
+        age = _age_minutes(since.get(c.name), now) or 0
+        if c.level == "fail" and age >= FAIL_GRACE_MINUTES:
             out.append(c)
         elif c.level == "warn" and (_age_minutes(since.get(c.name), now) or 0) >= WARN_GRACE_MINUTES:
             out.append(c)
