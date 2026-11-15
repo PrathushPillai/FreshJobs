@@ -88,6 +88,10 @@ async def test_taleo_reads_portal_pages_and_details_for_new_jobs():
     assert dev.description.count("without sponsorship") == 1 and "2+ years of C#" in dev.description
     assert "D.R. Horton’s" in dev.description
     assert analyst.locations == ["Tampa, Florida, US"] and analyst.description == ""
+    # Taleo's own User-Agent on every request: with the poller's, Zions' section listed empty columns.
+    from app.sources.taleo import USER_AGENT
+    assert {c.request.headers["User-Agent"] for c in respx.calls} == {USER_AGENT}
+    assert "job-portal-personal" not in USER_AGENT
 
     # The portal number is cached, and a slug can carry it.
     await run(TaleoAdapter(), "drhorton|2", known_ids={"2605503", "2605746"})

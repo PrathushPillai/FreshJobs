@@ -43,7 +43,11 @@ from app.sources.hr_common import outside_us, parse_day
 MAX_PAGES = 200  # 5,000 jobs
 MAX_PARTIAL_PAGES = 3
 DETAIL_CONCURRENCY = 3
-HEADERS = {"Accept": "application/json", "tz": "GMT-05:00", "tzname": "America/New_York"}
+# Our own name, not the poller's: with "job-portal-personal/0.1" in the User-Agent, some sections (Zions,
+# 2026-11-15) answer every search with empty columns, while "FreshJobs/1.0" (or httpx's default) gets the full
+# rows. Taleo seems to guess a device type from the header. Still an honest name, never a browser's.
+USER_AGENT = "FreshJobs/1.0 (personal job search tool)"
+HEADERS = {"Accept": "application/json", "tz": "GMT-05:00", "tzname": "America/New_York", "User-Agent": USER_AGENT}
 
 _PORTAL = re.compile(r"portalNo:\s*'(\d+)'")
 _URL = re.compile(
@@ -167,7 +171,7 @@ class TaleoAdapter(Adapter):
             # Some tenants send a corrupt gzip body on this page, so ask for it uncompressed.
             resp = await http_util.get(
                 client, f"https://{host}/careersection/{section}/jobsearch.ftl", params={"lang": "en"},
-                headers={"Accept-Encoding": "identity"}, follow_redirects=True,
+                headers={"Accept-Encoding": "identity", "User-Agent": USER_AGENT}, follow_redirects=True,
             )
             m = _PORTAL.search(resp.text)
             if not m:
@@ -215,7 +219,7 @@ class TaleoAdapter(Adapter):
             if r["id"] not in known_ids:
                 async with sem:
                     try:
-                        resp = await http_util.get(client, url)
+                        resp = await http_util.get(client, url, headers={"User-Agent": USER_AGENT})
                         job.description = parse_description(resp.text)
                     except httpx.HTTPError:
                         pass  # listed without a description; enrichment retries later
