@@ -76,6 +76,9 @@ def test_remote_in_usa_and_walmart_store_places(text, places):
     ("Dublin, OH", True), ("Melbourne, Florida, US", True), ("Deming, New Mexico", True), ("Paris, TX", True),
     ("Ontario, CA", True), ("Ontario, California", True), ("Remote - North America", True),
     ("New York, NY | London, UK", True), ("(USA) OH ONTARIO 06407 SAM'S CLUB", True), ("Remote", True),
+    ("Canada (Remote), United States (Remote), United Kingdom (Remote)", True), ("Remote (US, Canada & UK)", True),
+    ("NY-New York, TX-Frisco, DE-Greenville", True),  # state-first: DE is Delaware here
+    ("DE-Munich-MSO", False), ("Remote, South Korea", False), ("Ontario - Remote", False), ("Remote-EU", False),
 ])
 def test_us_feed_keeps_only_us_places(text, us):
     from app.pipeline.filters import is_us_location

@@ -182,8 +182,13 @@ def _from_code_form(part: str) -> Place | None:
 def _parse_part(part: str) -> list[Place]:
     if (m := _STORE_FORM.match(part.strip())) and m.group(1) in US_STATES:
         return [Place(_canonical_city(m.group(2)), m.group(1), "United States")]
-    pieces = [p for p in re.split(r",\s*", part) if p.strip()]
+    pieces = [p for p in re.split(r",\s*|\.\s+(?=[A-Z]{2}-)", part) if p.strip()]
     if pieces and all(_CODE_FORM.match(p.strip()) for p in pieces):  # "US-SF-HQ, US-SEA"
+        codes = [_CODE_FORM.match(p.strip()).group(1) for p in pieces]
+        if any(c in US_STATES and c not in COUNTRY_CODES for c in codes):
+            # State-first: "NY-New York, TX-Frisco, DE-Greenville" (DE is Delaware here, not Germany).
+            return [Place(_canonical_city(_clean(m.group(3))), m.group(1), "United States")
+                    for p in pieces if (m := _CODE_FORM.match(p.strip())) and m.group(1) in US_STATES and _clean(m.group(3))]
         return [pl for p in pieces if (pl := _from_code_form(p))]
     is_remote = "remote" in part.lower()
     tokens = [_clean(t) for t in re.split(r",|\s[-–—]\s|\s/\s|:|\s&\s", part)]

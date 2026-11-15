@@ -7,8 +7,10 @@ Big job sites refuse these; we show them with a warning (shown, never hidden una
   (indeed.com/hire/resources/howtohub/indeeds-job-posting-rules-and-policies-for-employers).
 
 "scam": a single strong sign is enough (pay to start, deposit our check, reship packages, interview on Telegram).
-"mlm": commission-only sales recruiting dressed as a job; two signs needed, since one ("commission") is common in
-honest sales jobs.
+"mlm": sales recruiting dressed as a job: one sign that is MLM's own (network marketing, be your own boss, residual
+income, financial freedom, unlimited earning potential) plus one more. Commission-only pay alone is common in honest
+jobs (bank mortgage advisors, investment advisors at RBC and CIBC were flagged by a first draft), so it never counts
+on its own.
 
     python -m app.pipeline.listing_quality --days 30   # re-read open jobs found in the last 30 days
 """
@@ -25,7 +27,8 @@ _SCAM = [re.compile(p, re.I) for p in (
     r"(?:registration|application|training|onboarding|processing)\s+fee\s+(?:of|is|required)",
     r"we\s+will\s+(?:send|mail)\s+you\s+a\s+(?:check|cheque)\s+(?:to|for)\s+(?:purchase|buy)",
     r"(?:deposit|cash)\s+(?:the|a)\s+(?:check|cheque)\s+and\s+(?:send|transfer|wire)",
-    r"\b(?:reship(?:ping)?|package\s+forwarding|parcel\s+forwarding)\b",
+    # Reshipping from home (a warehouse "Reshipping Clerk" is an honest job): packages sent to you to forward.
+    r"\b(?:package|parcel)\s+(?:forwarding|reshipping)\b|\breship(?:ping)?\s+(?:packages|parcels|items)\s+from\s+(?:your\s+)?home\b",
     r"payment\s+processing\s+(?:agent|assistant)",
     r"(?:pay|paid)\s+(?:in|with|via)\s+(?:gift\s+cards?|bitcoin|crypto(?:currency)?)",
     r"(?:interview|contact\s+(?:us|me|the\s+hiring\s+manager)|text|message)\s+(?:\w+\s+){0,3}(?:on|via|through)\s+"
@@ -48,12 +51,16 @@ _MLM = [re.compile(p, re.I) for p in (
 )]
 
 
+_MLM_OWN = {0, 3, 4, 5, 6}  # network marketing, be your own boss, unlimited earnings, residual income, financial freedom
+
+
 def listing_flag(title: str, description: str) -> str | None:
     """"scam", "mlm" or None."""
     text = f"{title or ''}\n{description or ''}"
     if any(p.search(text) for p in _SCAM):
         return "scam"
-    if sum(1 for p in _MLM if p.search(text)) >= 2:
+    hits = [i for i, p in enumerate(_MLM) if p.search(text)]
+    if len(hits) >= 2 and any(i in _MLM_OWN for i in hits):
         return "mlm"
     return None
 

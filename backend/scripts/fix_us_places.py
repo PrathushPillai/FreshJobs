@@ -53,7 +53,7 @@ def main(dry_run: bool) -> None:
         for jid, location, remote in rows:
             if not is_us_location(location or "", bool(remote)):
                 abroad.append(jid)
-                if len(examples) < 30:
+                if len(abroad) % 400 == 1:  # a sample spread over the whole table, not just its start
                     examples.append(location)
             elif location and REPARSE.search(location):
                 reparse.append(jid)

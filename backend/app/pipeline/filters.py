@@ -105,6 +105,8 @@ _CITY_CODE = re.compile(r"(?:^|[-–—/(]\s*)([^,\-–—/()]+?)\s*,\s*([A-Za-z
 # "America" alone was here too, so "Latin America" counted as the US. North America and the Americas still do (a
 # remote role open across them takes US candidates).
 _US_WORDS = re.compile(r"\b(united states|usa|u\.s\.a?\.?|us|north america|americas)\b", re.I)
+# The country spelled out (not "US", which is also a word): enough on its own, whatever else the part lists.
+_US_NAMED = re.compile(r"(?i:\b(?:united states|u\.s\.a\.?|usa)\b)|(?<![A-Za-z])US(?![A-Za-z])")  # "US" in capitals only
 # Regions that never include the US: a part naming only one of these is abroad.
 _FOREIGN_REGIONS = re.compile(r"\b(latin america|latam|south america|central america|emea|apac|asia|europe|eu|"
                               r"middle east|africa|oceania|anz|caribbean|nordics|dach|benelux|uk ?& ?i)\b", re.I)
@@ -131,8 +133,8 @@ def is_us_location(location: str, remote: bool) -> bool:
         # The parsed places first: a country found there settles it. Codes alone misled the checks below:
         # "Madrid, MD, Spain" (Maryland), "Cork, CO, Ireland", "Lagos, LA, Nigeria", "Bangalore, KA, IN".
         countries = {p.country for p in parse_locations(part) if p.country}
-        if "United States" in countries:
-            return True
+        if "United States" in countries or _US_NAMED.search(part):
+            return True  # a list naming the US among others: "Canada (Remote), United States (Remote), UK (Remote)"
         if countries:
             continue  # only places abroad
         if _FOREIGN_REGIONS.search(part) and not _US_WORDS.search(part):
