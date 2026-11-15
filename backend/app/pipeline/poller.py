@@ -143,11 +143,25 @@ DEAD_BOARD_RULES = {"HTTP 404": DEAD_BOARD_FAILS, "HTTP 410": DEAD_BOARD_FAILS, 
                     "HTTP 504": SERVER_ERROR_FAILS}
 
 
+# Any other error on a board that has never worked, after this many tries in a row (about 30 hours at one try
+# every 3 hours). Adapters say "this isn't a board" with a ValueError ("no Avature job sitemap for ...", "no Taleo
+# REST career section at ..."), and a host that no longer exists fails to resolve. On 2026-11-15, 15 Avature and
+# Taleo "boards" from discovery had failed 7 to 37 times each and were still retried: loan and IT-support
+# sign-in portals taken for Avature, sites behind a bot challenge, and front ends of boards tracked already.
+# Timeouts and rate limits are left out: those boards may well work.
+NEVER_WORKED_FAILS = 10
+TEMPORARY_ERRORS = ("ReadTimeout", "ConnectTimeout", "PoolTimeout", "WriteTimeout", "HTTP 429")
+
+
 def is_dead_board(company: Company, error: str) -> bool:
     if company.last_ok_at is not None:
         return False
     code = " ".join(str(error).split()[:2])  # "HTTP 404"
-    return company.fail_streak >= DEAD_BOARD_RULES.get(code, 10**9)
+    if code in DEAD_BOARD_RULES:
+        return company.fail_streak >= DEAD_BOARD_RULES[code]
+    if str(error).startswith(TEMPORARY_ERRORS) or code.startswith("HTTP"):
+        return False
+    return company.fail_streak >= NEVER_WORKED_FAILS
 
 
 # A board that worked before but now says "not found" has usually moved: the employer switched ATS (Parloa,

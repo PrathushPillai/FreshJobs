@@ -461,6 +461,11 @@ def test_save_reads_existing_jobs_from_the_covering_index(session):
     ("HTTP 502", 20, False, True),    # Whole Foods' Workday sites: 502 every time since they were found
     ("HTTP 500", 50, True, False),    # it worked before: never switched off this way
     ("ReadTimeout: ", 50, False, False),
+    ("HTTP 429", 50, False, False),          # rate limits: the board may well work
+    ("ValueError: no Avature job sitemap for secure.republicfinance.com/applyv2", 10, False, True),  # not a board
+    ("ValueError: no Avature job sitemap for x.avature.net/careers", 9, False, False),
+    ("ConnectError: [Errno -2] Name or service not known", 10, False, True),  # the host is gone
+    ("ValueError: no Avature job sitemap for x.avature.net/careers", 50, True, False),  # worked before
 ])
 def test_dead_board_rules(error, streak, worked, dead):
     from datetime import datetime, timezone
