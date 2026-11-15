@@ -408,8 +408,11 @@ def check_feed_content(session) -> list[Check]:
     out.append(Check("one source flooding", "warn" if flood else "ok",
                      f"the busiest source, {top_name}, has {top} of the newest {n} jobs ({top / n:.0%})", {"source": top_id}))
 
+    # Boards still named after their slug that source_names hasn't asked for a real name yet ("Viatris" may be the
+    # real name: once asked, a board counts as named either way).
+    asked = {k for (k,) in session.execute(text("SELECT company_key FROM probe_cache WHERE company_key LIKE 'name:%'"))}
     slug_named = [r for r in rows if r.ats not in _MULTI_EMPLOYER and r.company_name == r.name == name_from_slug(r.slug)
-                  and r.name.replace(" ", "").isalpha() and r.name.lower().replace(" ", "") == r.slug.split("|")[0].split(".")[0].replace("-", "").lower()]
+                  and f"name:{r.company_id}" not in asked]
     share = len(slug_named) / n
     out.append(Check("employer names", "warn" if n >= 200 and share > SLUG_NAME_SHARE else "ok",
                      f"{len(slug_named)} of the newest {n} jobs show the employer by a board's code name ({share:.0%})"
@@ -447,7 +450,8 @@ def check_log_errors() -> Check:
 def check_portal(previous: dict, now: datetime, force: bool) -> Check | None:
     """scripts/check_portal.py against the public site: every screen's API, sorts, filters and searches."""
     last = previous.get("portal") or {}
-    if not force and (_age_minutes(last.get("at"), now) or 1e9) < PORTAL_CHECK_HOURS * 60:
+    # Daily while it passes; every run while it fails, so a fixed problem clears within 15 minutes.
+    if not force and last.get("level") == "ok" and (_age_minutes(last.get("at"), now) or 1e9) < PORTAL_CHECK_HOURS * 60:
         return Check("portal check", last.get("level", "ok"), last.get("detail", ""), {"at": last.get("at")})
     if not settings.public_url.startswith("https://") and not force:
         return None
