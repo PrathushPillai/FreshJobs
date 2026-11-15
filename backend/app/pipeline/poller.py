@@ -26,6 +26,7 @@ from app.db import SessionLocal, init_db
 from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.pipeline.dedupe import find_original, fingerprint
+from app.pipeline.listing_quality import listing_flag
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
 from app.pipeline.liveness import verify_due
@@ -33,7 +34,7 @@ from app.pipeline.startup_lists import maybe_sync_lists
 from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
-from app.pipeline.normalize import company_key, experience_level, experience_years, listed_window, seniority
+from app.pipeline.normalize import clean_title, company_key, experience_level, experience_years, listed_window, seniority
 from app.everify import status_for as everify_status
 from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, says_sponsors, student_visa_signal
 from app.prefs import get_prefs, sync_companies
@@ -67,6 +68,7 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.employer_kind = job_employer_kind(job.company_name or "", job.company.ats if job.company else "",
                                           sponsor_index(session))
+    job.listing_flag = listing_flag(job.title, job.description)
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
 
@@ -207,6 +209,26 @@ def close_gone_board(session: Session, company: Company, now: datetime) -> int:
     return len(ids)
 
 
+def close_stale_of_disabled(session: Session, now: datetime) -> int:
+    """Close open jobs of switched-off sources not seen for stale_days. A source that's off is never polled, so
+    its jobs never closed: The Muse's 1,275 and Adzuna's 640 stayed in the Feed for good (2026-11-15). Commits."""
+    cutoff = now - timedelta(days=settings.stale_days)
+    off = list(session.scalars(select(Company.id).where(Company.enabled.is_(False))))
+    ids: list[int] = []
+    for i in range(0, len(off), 500):
+        ids += session.scalars(select(Job.id).where(Job.company_id.in_(off[i:i + 500]), Job.closed_at.is_(None),
+                                                    Job.last_seen_at < cutoff))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        session.execute(update(Job).where(Job.id.in_(chunk)).values(closed_at=now)
+                        .execution_options(synchronize_session=False))
+        session.add_all(JobEvent(job_id=j, kind="closed", at=now,
+                                 detail=f"its source is switched off and it wasn't seen for {settings.stale_days} days")
+                        for j in chunk)
+    session.commit()
+    return len(ids)
+
+
 # A failed name lookup ("getaddrinfo failed") is either a dead host or this machine being offline (Wi-Fi not
 # back after sleep). On 2026-11-10 one poll right after waking failed 15,973 boards that way, and the idle
 # rule then left them unchecked for 3 hours. So a lookup failure is first checked against a few hosts that
@@ -250,6 +272,10 @@ def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
     )
 
 
+def _is_aggregator(company: Company) -> bool:
+    return bool(getattr(ADAPTERS.get(company.ats), "aggregator", False))
+
+
 def process_company(
     session: Session, company: Company, fetched: list[NormalizedJob], prefs: UserPrefs, now: datetime,
     *, complete: bool = True, commit_every: int | None = None,
@@ -277,6 +303,8 @@ def process_company(
     new_jobs: list[Job] = []
     same_poll_ids: set[int] = set()
     titles: dict = {}  # dedupe.find_original's per-employer title index, built once per save
+    aggregator = _is_aggregator(company)
+    flip_later: list[tuple[int, Job, str]] = []  # (aggregator copy's id, the board's new job, board name)
     pending: deque[Job] = deque()  # new jobs whose ids haven't been moved into same_poll_ids yet
 
     for nj in fetched:
@@ -309,7 +337,7 @@ def process_company(
         job = Job(
             company=company,
             external_id=nj.external_id,
-            title=nj.title[:400],
+            title=clean_title(nj.title)[:400],
             company_name=(nj.company_name or company.name)[:200],
             location=nj.location[:400],
             remote=nj.remote,
@@ -335,9 +363,15 @@ def process_company(
             original = find_original(
                 session, job.company_key, nj.title, nj.location, nj.description, now,
                 settings.repost_window_days, same_poll_ids, company.id, titles,
+                url=nj.url, aggregator=aggregator,
             )
         kind, detail = "seen", ""
-        if original is not None:
+        if (original is not None and original.closed_at is None and original.company_id != company.id
+                and not aggregator and _is_aggregator(original.company)):
+            # The employer's own board has the job an aggregator listed first (SimplifyJobs, Google Jobs): keep
+            # this copy, with its full description and direct link, and mark the aggregator's as the duplicate.
+            flip_later.append((original.id, job, company.name))
+        elif original is not None:
             job.is_repost = True
             job.repost_of_id = original.id
             if original.closed_at is None and original.company_id != company.id:
@@ -396,6 +430,17 @@ def process_company(
         obj = session.identity_map.get(identity_key(Job, job_id))
         if obj is not None:
             session.expire(obj, ["last_seen_at", "missed_polls", "closed_at"])
+
+    if flip_later:
+        session.flush()  # the board's new jobs need their ids
+        for copy_id, job, board_name in flip_later:
+            session.execute(update(Job).where(Job.id == copy_id).values(is_repost=True, repost_of_id=job.id)
+                            .execution_options(synchronize_session=False))
+            obj = session.identity_map.get(identity_key(Job, copy_id))
+            if obj is not None:
+                session.expire(obj, ["is_repost", "repost_of_id"])
+            session.add(JobEvent(job_id=copy_id, kind="duplicate", at=now,
+                                 detail=f"also listed on {board_name}'s own board (job {job.id})"))
 
     company.poll_count += 1
     company.last_polled_at = now

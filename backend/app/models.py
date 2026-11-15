@@ -140,6 +140,8 @@ class Job(Base):
     # Certified H-1B filings by this employer in the imported DOL data (None = not computed yet).
     # "consultancy", "staffing" or ""/NULL (h1b.job_employer_kind): a badge, and the opt-in hide filter.
     employer_kind: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    # "scam" or "mlm" (pipeline/listing_quality.listing_flag): a red badge, and the opt-in hide filter.
+    listing_flag: Mapped[str | None] = mapped_column(String(12), nullable=True)
     h1b_filings: Mapped[int | None] = mapped_column(Integer, index=True)
     # Found on the very first scan of a company, so it isn't "fresh" and doesn't trigger alerts.
     baseline: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -117,6 +117,18 @@ export function EmployerKindBadge({ kind }: { kind: Job['employer_kind'] }) {
   return null
 }
 
+/** A listing big job sites would refuse: a possible scam (pay to start, deposit our check, interview on Telegram)
+ * or commission-only sales recruiting (MLM). Shown with a warning, never hidden unasked; More can hide them. */
+export function ListingFlagBadge({ flag }: { flag?: 'scam' | 'mlm' | null }) {
+  if (flag === 'scam') {
+    return <Badge tone="red" dot title="This posting has a common scam sign: paying to start, depositing a check and sending money on, reshipping packages, or an interview over Telegram or WhatsApp. Honest employers never ask you for money. More → Hide possible scams leaves these out.">Possible scam</Badge>
+  }
+  if (flag === 'mlm') {
+    return <Badge tone="red" dot title="This reads like commission-only sales recruiting (network marketing, 'be your own boss', unlimited income) rather than a salaried job. More → Hide possible scams leaves these out.">Sales recruiting (MLM)</Badge>
+  }
+  return null
+}
+
 export function SponsorBadge({ filings }: { filings: number | null }) {
   if (!filings) return null
   const label = filings >= 1000 ? `${(filings / 1000).toFixed(filings >= 10_000 ? 0 : 1)}k` : String(filings)

@@ -142,12 +142,30 @@ def run_discovery() -> dict:
         from app.pipeline import sbir
 
         summary["sbir_added"] = asyncio.run(sbir.maybe_import())  # only when SBIR.gov publishes a new award file
+        summary.update(_upkeep())
         return summary
     except Exception:
         log.exception("Board discovery failed")
         return {"error": "discovery failed, see server logs"}
     finally:
         _discovery_lock.release()
+
+
+def _upkeep() -> dict:
+    """Hourly clean-up beside discovery: real names for boards still named after their slug, and closing jobs of
+    switched-off sources that nobody can check any more. Each part fails on its own."""
+    from app.pipeline import source_names
+    from app.pipeline.poller import close_stale_of_disabled
+
+    out: dict = {}
+    for key, fn in (("named", lambda s: source_names.name_some(s, limit=300)),
+                    ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc)))):
+        try:
+            with SessionLocal() as session:
+                out[key] = fn(session)
+        except Exception:
+            log.exception("upkeep step %s failed", key)
+    return out
 
 
 def _backfill_until_done(wait_seconds: int = 60) -> None:
@@ -321,6 +339,7 @@ class JobOut(BaseModel):
     baseline: bool
     h1b_filings: int | None
     employer_kind: str | None = None  # "consultancy", "staffing" or empty (h1b.job_employer_kind): a badge
+    listing_flag: str | None = None  # "scam" or "mlm" (pipeline/listing_quality): a red badge
     application: TrackedOut | None
     # How likely the employer is to sponsor (pipeline/sponsorship.sponsor_likelihood): likely, possible,
     # unlikely or ruled_out. Derived from the fields above, so it never disagrees with them.
@@ -651,6 +670,7 @@ def list_jobs(
     sponsor_likely: str | None = None,  # "likely": likely only; "possible": likely or possible (sponsor_likelihood)
     everify_only: bool = False,  # employers in USCIS's E-Verify list, or whose posting says they use it
     hide_consultancies: bool = False,  # opt-in: leave out consultancies and staffing firms (Job.employer_kind)
+    hide_flagged: bool = False,  # opt-in: leave out possible scams and MLM recruiting (Job.listing_flag)
     hide_no_sponsor: bool = True,
     show_reposts: bool = False,
     repeat_kinds: list[str] = Query([]),  # with show_reposts: which repeats to show (empty = all of REPEAT_KINDS)
@@ -735,6 +755,8 @@ def list_jobs(
         if hide_consultancies:
             # Opt-in, so it may read job rows (employer_kind isn't in the sort indexes): the walk stops after a page.
             stmt = stmt.where(or_(Job.employer_kind.is_(None), Job.employer_kind == ""))
+        if hide_flagged:
+            stmt = stmt.where(Job.listing_flag.is_(None))
         if sponsors_only:
             # "+jobs.h1b_filings" except when sorting by filings: as a plain range SQLite started from
             # ix_jobs_by_sponsor, read every sponsored open job and sorted them all by date (5 s warm,

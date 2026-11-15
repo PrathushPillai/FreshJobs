@@ -292,6 +292,50 @@ function SupportInbox() {
   )
 }
 
+const HEALTH_STYLE = {
+  ok: { dot: 'bg-emerald-500', text: 'text-emerald-800', ring: 'ring-emerald-200 bg-emerald-50/60', label: 'All checks pass' },
+  warn: { dot: 'bg-amber-500', text: 'text-amber-800', ring: 'ring-amber-200 bg-amber-50/60', label: 'Warnings' },
+  fail: { dot: 'bg-rose-500', text: 'text-rose-800', ring: 'ring-rose-200 bg-rose-50/60', label: 'Something is broken' },
+  unknown: { dot: 'bg-slate-400', text: 'text-slate-700', ring: 'ring-slate-200 bg-white', label: 'No result yet' },
+} as const
+
+/** The server's health monitor: every check, problems first. Emails the admin by itself; this is the detail. */
+function HealthPanel() {
+  const q = useQuery({ queryKey: ['admin-health'], queryFn: api.adminHealth, refetchInterval: 60_000 })
+  const [all, setAll] = useState(false)
+  const h = q.data
+  if (!h) return null
+  const style = HEALTH_STYLE[h.stale && h.level === 'ok' ? 'unknown' : h.level]
+  const order = { fail: 0, warn: 1, ok: 2 } as const
+  const checks = [...h.checks].sort((a, b) => order[a.level] - order[b.level])
+  const shown = all ? checks : checks.filter((c) => c.level !== 'ok')
+  return (
+    <section className={`rounded-2xl px-4 py-3 ring-1 ${style.ring}`} aria-label="Portal health">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`h-2.5 w-2.5 rounded-full ${style.dot}`} />
+        <h3 className={`font-display text-sm font-bold ${style.text}`}>Portal health: {style.label}</h3>
+        <span className="text-xs text-slate-500">
+          {h.checked_at ? `checked ${timeAgo(h.checked_at)}` : 'the monitor hasn’t run yet'}
+          {h.stale && h.checked_at ? ' · the monitor has stopped running' : ''}
+        </span>
+        <button onClick={() => setAll((v) => !v)} className="ml-auto text-xs font-semibold text-brand-700 hover:underline">
+          {all ? 'Only problems' : `Show all ${checks.length} checks`}
+        </button>
+      </div>
+      {shown.length > 0 && (
+        <ul className="mt-2 space-y-1 text-sm">
+          {shown.map((c) => (
+            <li key={c.name} className="flex gap-2">
+              <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${HEALTH_STYLE[c.level].dot}`} />
+              <span><b className="text-slate-800">{c.name}</b> <span className="text-slate-600">{c.detail}</span></span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 /** The admin dashboard: users, activity, support, and the portal's health. */
 export default function Admin() {
   const overview = useQuery({ queryKey: ['admin-overview'], queryFn: api.adminOverview, refetchInterval: 60_000 })
@@ -304,6 +348,7 @@ export default function Admin() {
       <PageHeader icon="🛡️" title="Admin">
         Everyone using FreshJobs, what’s happening, and anything that needs you. Opening an account is recorded; resumes stay private.
       </PageHeader>
+      <HealthPanel />
       {o && (
         <>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-6">

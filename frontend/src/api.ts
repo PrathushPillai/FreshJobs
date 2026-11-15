@@ -48,6 +48,8 @@ export interface Job {
   h1b_filings: number | null
   /** A consultancy or staffing firm (backend h1b.job_employer_kind): a badge, and the opt-in hide filter. */
   employer_kind: 'consultancy' | 'staffing' | '' | null
+  /** "scam" or "mlm" (backend pipeline/listing_quality): a red badge, and the opt-in hide filter. */
+  listing_flag?: 'scam' | 'mlm' | null
   /** How likely the employer is to sponsor (backend sponsorship.sponsor_likelihood). */
   sponsor_likely: SponsorLikely
   application: { id: number; status: AppStatus } | null
@@ -195,6 +197,20 @@ export interface AdminEvent {
   user_id: number | null
   user_email: string | null
   actor_email: string | null
+}
+
+export interface HealthCheck {
+  name: string
+  level: 'ok' | 'warn' | 'fail'
+  detail: string
+}
+
+/** The server's health monitor (backend app/health.py), run every 15 minutes. */
+export interface HealthReport {
+  checked_at: string | null
+  level: 'ok' | 'warn' | 'fail' | 'unknown'
+  stale: boolean
+  checks: HealthCheck[]
 }
 
 export interface AdminOverview {
@@ -351,6 +367,7 @@ export interface JobQuery {
   everify_only?: boolean
   /** Leave out consultancies and staffing firms (off by default: they get a badge instead). */
   hide_consultancies?: boolean
+  hide_flagged?: boolean
   /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
   fresh_counts?: boolean
   hide_no_sponsor?: boolean
@@ -461,6 +478,7 @@ export const api = {
   sendSupport: (body: { topic: SupportTopic; message: string; email?: string; name?: string; page?: string }) =>
     request<{ ok: boolean; id: number }>('/api/support', { method: 'POST', body: JSON.stringify(body) }),
   adminOverview: () => request<AdminOverview>('/api/admin/overview'),
+  adminHealth: () => request<HealthReport>('/api/admin/health'),
   adminUsers: (q: string) => request<AdminUser[]>(`/api/admin/users?${toParams({ q })}`),
   adminActivity: (p: { user_id?: number; kind?: string; problems?: boolean; limit?: number }) =>
     request<AdminEvent[]>(`/api/admin/activity?${toParams(p)}`),

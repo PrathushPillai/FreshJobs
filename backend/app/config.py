@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     session_days: int = 30
     support_email: str = ""  # where Contact & support messages go; empty = ADMIN_EMAIL
     api_docs: bool = False  # serve /docs and /openapi.json (handy locally; off on the shared server)
+    health_api_url: str = "http://127.0.0.1:8000"  # where the health monitor (app/health.py) finds the backend
     # Limits for a shared site (app/ratelimit.py); 0 turns one off (the tests do).
     api_requests_per_minute: int = 300  # per visitor (login cookie, else client address); /api/status is exempt
     signups_per_hour_per_client: int = 5

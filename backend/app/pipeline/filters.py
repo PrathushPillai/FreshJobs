@@ -102,7 +102,12 @@ def foreign_country(city: str, code: str) -> str | None:
 _PROVINCE_THEN_CA = re.compile(r"(?:,|\s[-–]\s)\s*(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT|alberta|british columbia|manitoba|new brunswick|newfoundland(?: and labrador)?|nova scotia|ontario|prince edward island|qu[eé]bec|saskatchewan)\s*(?:,|\s[-–]\s)\s*CA(?![A-Za-z])", re.I)
 _CITY_CODE = re.compile(r"(?:^|[-–—/(]\s*)([^,\-–—/()]+?)\s*,\s*([A-Za-z]{2})\s*(?:[,)]|$)")
 
-_US_WORDS = re.compile(r"\b(united states|usa|u\.s\.a?\.?|us|america)\b", re.I)
+# "America" alone was here too, so "Latin America" counted as the US. North America and the Americas still do (a
+# remote role open across them takes US candidates).
+_US_WORDS = re.compile(r"\b(united states|usa|u\.s\.a?\.?|us|north america|americas)\b", re.I)
+# Regions that never include the US: a part naming only one of these is abroad.
+_FOREIGN_REGIONS = re.compile(r"\b(latin america|latam|south america|central america|emea|apac|asia|europe|eu|"
+                              r"middle east|africa|oceania|anz|caribbean|nordics|dach|benelux|uk ?& ?i)\b", re.I)
 _STATE_CODE = re.compile(r",\s*(" + "|".join(US_STATES) + r")\b")
 # "Baja California" is in Mexico, not the US state inside its name.
 _STATE_NAME = re.compile(r"(?<!baja )\b(" +"|".join(US_STATES.values()) + r")\b", re.I)
@@ -120,7 +125,18 @@ def is_us_location(location: str, remote: bool) -> bool:
     """True if at least one of the job's locations is in the US (or remote without a non-US region)."""
     if not location:
         return remote
+    from app.pipeline.locations import parse_locations
+
     for part in re.split(r"\s*\|\s*|;", location):
+        # The parsed places first: a country found there settles it. Codes alone misled the checks below:
+        # "Madrid, MD, Spain" (Maryland), "Cork, CO, Ireland", "Lagos, LA, Nigeria", "Bangalore, KA, IN".
+        countries = {p.country for p in parse_locations(part) if p.country}
+        if "United States" in countries:
+            return True
+        if countries:
+            continue  # only places abroad
+        if _FOREIGN_REGIONS.search(part) and not _US_WORDS.search(part):
+            continue  # "Latin America", "EMEA (Remote)"
         if (m := _CITY_CODE.search(part)) and foreign_country(m.group(1), m.group(2)) and not _US_WORDS.search(part):
             continue  # "Hyderabad, IN" is India, not Indiana
         if _PROVINCE_THEN_CA.search(part) and not _US_WORDS.search(part):

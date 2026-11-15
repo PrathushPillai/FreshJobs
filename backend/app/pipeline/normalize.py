@@ -56,6 +56,16 @@ def seniority(title: str) -> str:
     return "unknown"
 
 
+_TITLE_PREFIX = re.compile(r"^(?:\((?:USA|US|U\.S\.)\)\s*|[\s:;,\-–—•*|>]+)+")
+
+
+def clean_title(title: str) -> str:
+    """A title as shown: without a country tag every title of a board carries ("(USA) Produce Lead": Walmart),
+    leading punctuation (":Line Cook", "- Admissions Counselor") or runs of spaces."""
+    cleaned = re.sub(r"\s+", " ", _TITLE_PREFIX.sub("", title or "")).strip()
+    return cleaned or (title or "").strip()
+
+
 def normalize_title(title: str) -> str:
     """Lowercased title with noise (punctuation, req codes, location suffixes) removed, for fingerprinting."""
     t = title.lower()

@@ -52,3 +52,32 @@ def test_ontario_california_is_still_us():
     from app.pipeline.filters import is_us_location
 
     assert is_us_location("Ontario, CA", False) and not is_us_location("Toronto, Ontario, CA", False)
+
+
+@pytest.mark.parametrize("text,places", [
+    ("Remote in USA", [(None, None, "United States")]),  # was Indiana: "in USA" read as IN
+    ("Remote - IN", [(None, "IN", "United States")]),
+    ("(USA) SC ROCK HILL 06236 SAM'S CLUB", [("Rock Hill", "SC", "United States")]),  # Walmart's stores
+    ("(USA) CA PERRIS 08799 ECOMM WHSE LOGISTICS", [("Perris", "CA", "United States")]),
+])
+def test_remote_in_usa_and_walmart_store_places(text, places):
+    assert [(p.city, p.state, p.country) for p in parse_locations(text)] == places
+
+
+@pytest.mark.parametrize("text,us", [
+    # Abroad, though a part looks like a US state code or name (found in the US feed, 2026-11-15).
+    ("Bangalore, KA, IN", False), ("Chennai, Chennai-MRV, IN", False), ("Hyderabad, TG, IN", False),
+    ("Madrid, MD, Spain", False), ("Cork, CO, Ireland", False), ("Lagos, LA, Nigeria", False),
+    ("Rozenburg, NH, Netherlands", False), ("Washington, England, United Kingdom", False),
+    ("Remote - Colombia", False), ("Saudi Arabia - Remote", False), ("Latin America", False),
+    ("Mexico - Remote | Colombia - Remote", False), ("Cambridge, Ontario", False), ("Remote (EMEA)", False),
+    # US, including US places named like foreign ones.
+    ("LATAM (Remote), US (Remote)", True), ("United States or Ontario, Canada", True), ("Remote in USA", True),
+    ("Dublin, OH", True), ("Melbourne, Florida, US", True), ("Deming, New Mexico", True), ("Paris, TX", True),
+    ("Ontario, CA", True), ("Ontario, California", True), ("Remote - North America", True),
+    ("New York, NY | London, UK", True), ("(USA) OH ONTARIO 06407 SAM'S CLUB", True), ("Remote", True),
+])
+def test_us_feed_keeps_only_us_places(text, us):
+    from app.pipeline.filters import is_us_location
+
+    assert is_us_location(text, False) is us

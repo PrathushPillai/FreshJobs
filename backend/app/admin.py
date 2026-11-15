@@ -79,6 +79,14 @@ def overview(db: Session = Depends(get_session), _: User = Depends(admin_user)):
     }
 
 
+@router.get("/health")
+def health(_: User = Depends(admin_user)):
+    """The health monitor's last result (app/health.py, run every 15 minutes on the server)."""
+    from app.health import last_result
+
+    return last_result()
+
+
 @router.get("/users")
 def list_users(q: str = "", limit: int = Query(200, ge=1, le=1000), db: Session = Depends(get_session),
                _: User = Depends(admin_user)):

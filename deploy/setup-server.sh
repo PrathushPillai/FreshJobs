@@ -49,6 +49,11 @@ sudo chmod o+x /home/ubuntu  # Caddy serves the built frontend from the app fold
 sudo systemctl enable caddy
 sudo systemctl reload caddy || sudo systemctl restart caddy
 
+echo "== health monitor every 15 minutes (app/health.py; emails ADMIN_EMAIL about problems)"
+sudo cp "$APP/deploy/freshjobs-health.service" "$APP/deploy/freshjobs-health.timer" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now freshjobs-health.timer
+
 echo "== nightly database backup (keeps 3), 09:15 UTC: the quietest hour for US job postings"
 sudo cp "$APP/deploy/freshjobs-backup.sh" /usr/local/bin/freshjobs-backup && sudo chmod +x /usr/local/bin/freshjobs-backup
 echo "15 9 * * * ubuntu /usr/local/bin/freshjobs-backup 2>&1 | logger -t freshjobs-backup" | sudo tee /etc/cron.d/freshjobs-backup >/dev/null

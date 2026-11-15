@@ -31,4 +31,8 @@ cd ~/freshjobs/backend
 .venv/bin/pip install -q --upgrade pip
 .venv/bin/pip install -q -r requirements.txt
 sudo systemctl restart freshjobs-backend
+# The health monitor (app/health.py), every 15 minutes; installed or updated with each deploy.
+sudo cp ~/freshjobs/deploy/freshjobs-health.service ~/freshjobs/deploy/freshjobs-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now freshjobs-health.timer >/dev/null
 echo "restarted; the backend takes a few minutes to open the database"'
