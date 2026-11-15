@@ -23,10 +23,12 @@ import asyncio
 import html
 import logging
 import re
+import time
 from collections import Counter
 
 import httpx
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.models import Company, Job
@@ -265,15 +267,28 @@ def name_some(session: Session, limit: int = 300, dry_run: bool = False, concurr
     examples = []
     for c in todo:
         new = found.get(c.id) or fallback(c)
-        if new and new != c.name:
-            examples.append(f"{c.name} -> {new}")
-            if not dry_run:
-                jobs += rename(session, c, new)
+        old = c.name
+        if new and new != old:
+            examples.append(f"{old} -> {new}")
             renamed += bool(found.get(c.id))
             capitalised += not found.get(c.id)
-        if not dry_run:
-            session.merge(ProbeCache(company_key=f"name:{c.id}", found=(new or "")[:200]))
-            session.commit()
+        if dry_run:
+            continue
+        # One board per transaction, retried while the pollers hold the write lock ("database is locked" ended
+        # the first full run after 23 boards, 2026-11-15).
+        for attempt in range(10):
+            try:
+                if new and new != old:
+                    jobs += rename(session, c, new)
+                session.merge(ProbeCache(company_key=f"name:{c.id}", found=(new or "")[:200]))
+                session.commit()
+                break
+            except OperationalError as e:
+                session.rollback()
+                if "locked" not in str(e) or attempt == 9:
+                    raise
+                c = session.get(Company, c.id)  # reloaded as it was before the failed try
+                time.sleep(3 * (attempt + 1))
     return {"asked": len(todo), "renamed": renamed, "capitalised": capitalised, "jobs": jobs, "examples": examples[:20]}
 
 
