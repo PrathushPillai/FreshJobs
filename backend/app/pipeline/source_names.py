@@ -68,7 +68,8 @@ def _slug_stem(company: Company) -> str:
                                                                    "careers", "jobs", "us", "en")]
         base = max(parts, key=len) if parts else base
         base = re.sub(r"^(careers|jobs|career)-|-(careers|jobs)$", "", base)
-    return _compact(base)
+    stem = _compact(base)
+    return stem.rstrip("0123456789") or stem  # "aecom2": a second board of AECOM
 
 
 def belongs(name: str, company: Company) -> bool:
@@ -157,8 +158,51 @@ async def find_name(client: httpx.AsyncClient, company: Company, job_url: str | 
             candidates = [_from_page(r.text) or ""]
     except (httpx.HTTPError, ValueError, KeyError) as e:
         log.info("no name for %s (%s): %s", company.name, company.ats, e)
-    for name, _ in Counter(tidy(c) for c in candidates if c and c.strip()).most_common():
-        if 2 <= len(name) <= 80 and name.lower() not in _GENERIC and belongs(name, company):
+    return choose(company, candidates)
+
+
+# Legal entities abroad and store or cost-centre codes: Workday's hiringOrganization is the legal entity of each job
+# ("0704 Thermo Fisher Scientific Australia Pty", "12542 Citicorp Services India Private Limited", "Wal-Mart
+# Canada", "Domino's Assistant Manager(03528)"), never a display name as it is.
+_ABROAD = re.compile(r"\b(canada|brasil|brazil|australia|india|china|chn|uk|united kingdom|germany|deutschland|france|"
+                     r"mexico|méxico|japan|singapore|ireland|netherlands|espa[nñ]a|spain|italia|italy|poland|polska|"
+                     r"philippines|malaysia|korea|pty|ltda|gmbh|s\.?a\.?s?|s\.?r\.?l|b\.?v|private limited|pvt|"
+                     r"limitada|kk|ag|ab|oy|as)\b", re.I)
+_CODES = re.compile(r"^\d+\s+|\s*\(\w*\d\w*\)\s*$")
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’&.\-]*")
+
+
+def _brand_span(name: str, stem: str) -> str | None:
+    """The words of `name` that spell the board's slug: "Thermo Fisher" in "Thermo Fisher Scientific Australia Pty"
+    for "thermofisher", "Wal-Mart" for "walmart", "Circle K" for "circlek"."""
+    words = _WORD.findall(name)
+    for i in range(len(words)):
+        acc = ""
+        for j in range(i, len(words)):
+            acc += _compact(words[j])
+            if acc == stem:
+                return " ".join(words[i:j + 1]).rstrip(".")
+            if not stem.startswith(acc):
+                break
+    return None
+
+
+def choose(company: Company, candidates: list[str]) -> str | None:
+    """The display name from what the board says about itself, or None.
+
+    1. The words that spell the slug, from the commonest answer ("Accenture" from "1500 Accenture do Brasil Ltda").
+    2. Else a whole answer that belongs to the slug (initials: "Northeast Georgia Health System" for nghs), unless it
+       names a legal entity abroad or carries codes.
+    """
+    cleaned = [_CODES.sub("", tidy(c)).strip() for c in candidates if c and c.strip()]
+    ranked = [n for n, _ in Counter(n for n in cleaned if n).most_common()]
+    stem = _slug_stem(company)
+    for name in ranked:
+        if (span := _brand_span(name, stem)) and span.lower() not in _GENERIC:
+            return span.upper() if len(span) <= 4 and span.isalpha() and span == span.capitalize() else span
+    for name in ranked:
+        if (2 <= len(name) <= 60 and name.lower() not in _GENERIC and not _ABROAD.search(name)
+                and not any(ch.isdigit() for ch in name) and belongs(name, company)):
             return name
     return None
 

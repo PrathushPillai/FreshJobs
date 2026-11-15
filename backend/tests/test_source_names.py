@@ -71,3 +71,17 @@ def test_stale_jobs_of_switched_off_sources_close(session):
     closed = {j.external_id for j in session.query(Job).filter(Job.closed_at.is_not(None))}
     assert closed == {"a"}
     assert session.query(JobEvent).filter_by(kind="closed").count() == 1
+
+
+@pytest.mark.parametrize("slug,answers,name", [
+    ("thermofisher|wd5|x", ["0704 Thermo Fisher Scientific Australia Pty"], "Thermo Fisher"),
+    ("accenture|wd3|x", ["1500 Accenture do Brasil Ltda"], "Accenture"),
+    ("dominos|wd1|x", ["Domino's Assistant Manager(03528)"], "Domino's"),
+    ("walmart|wd5|x", ["Wal-Mart Canada"], "Wal-Mart"),
+    ("aecom2|wd1|x", ["AECOM Secure Facilities"], "AECOM"),
+    ("tjx|wd1|x", ["The TJX Companies", "Marshalls of MA"], "TJX"),
+    ("nghs|wd1|x", ["Northeast Georgia Health System"], "Northeast Georgia Health System"),
+    ("citi|wd5|x", ["12542 Citicorp Services India Private Limited"], None),  # a legal entity abroad
+])
+def test_choose_takes_the_brand_not_the_legal_entity(slug, answers, name):
+    assert sn.choose(co("x", "workday", slug), answers) == name
