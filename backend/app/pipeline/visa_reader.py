@@ -153,9 +153,117 @@ def client():
 
 
 def read_now(title: str, company: str, passage: str, model: str | None = None) -> dict | None:
-    """One posting, read at once (the eval, and checking a single job by hand)."""
+    """One posting, read at once by Claude (the eval, and checking a single job by hand)."""
     message = client().messages.create(**request_params(title, company, passage, model))
     return parse_message(message)
+
+
+# ---- Groq (free tier: open models, docs console.groq.com/docs) ----------------------------------------------------
+# The free plan allows 30 requests and 8,000 tokens a minute and 1,000 requests and 200,000 tokens a day per model
+# (console.groq.com/docs/rate-limits, 2026-11-15). There is no batch endpoint, so postings are read one at a time,
+# GROQ_SPACING_SECONDS apart (under the per-minute token limit at ~1,000 tokens each), and the day stops at
+# visa_reader_groq_daily_tokens, below the free 200,000. Structured outputs in strict mode (constrained decoding)
+# are supported on gpt-oss-120b/20b and Qwen3.8 27B (console.groq.com/docs/structured-outputs).
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_SPACING_SECONDS = 8.0
+
+
+def groq_payload(title: str, company: str, passage: str, model: str | None = None) -> dict:
+    model = model or settings.visa_reader_groq_model
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": f"Job title: {title}\nEmployer: {company}\n\nSentences:\n{passage}"},
+        ],
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "visa_verdict", "strict": True, "schema": SCHEMA}},
+        "max_completion_tokens": MAX_TOKENS,
+    }
+    # Reasoning, kept short: it is most of the tokens, and the free plan counts tokens.
+    if "gpt-oss" in model:
+        payload.update(reasoning_effort="low", include_reasoning=False)
+    return payload
+
+
+def groq_read(http, title: str, company: str, passage: str, model: str | None = None) -> tuple[dict | None, int]:
+    """One posting read by a Groq model: (verdict or None, tokens used). Raises httpx.HTTPStatusError on an error
+    answer (429 included, with Retry-After) so the caller can stop for the day."""
+    resp = http.post(GROQ_URL, json=groq_payload(title, company, passage, model),
+                     headers={"Authorization": f"Bearer {settings.groq_api_key}"}, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    tokens = int((data.get("usage") or {}).get("total_tokens") or 0)
+    choice = (data.get("choices") or [{}])[0]
+    if choice.get("finish_reason") not in (None, "stop"):
+        return None, tokens
+    try:
+        verdict = json.loads((choice.get("message") or {}).get("content") or "")
+    except ValueError:
+        return None, tokens
+    if not isinstance(verdict, dict) or verdict.get("sponsorship") not in SCHEMA["properties"]["sponsorship"]["enum"]:
+        return None, tokens
+    verdict["evidence"] = str(verdict.get("evidence") or "")[:300]
+    return verdict, tokens
+
+
+def read_due_with_groq(session: Session, max_jobs: int | None = None, sleep=None) -> dict:
+    """Read due jobs one at a time with Groq, within today's token budget. Run hourly; each run reads at most
+    `visa_reader_groq_per_run` jobs (about 8 seconds each)."""
+    import time
+
+    import httpx
+
+    from app.models import Job, VisaRead
+
+    sleep = sleep or time.sleep
+    state = _state()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    used = state.get("groq_tokens", {}).get(today, 0)
+    budget = settings.visa_reader_groq_daily_tokens - used
+    if budget <= 0:
+        return {"read": 0, "reason": "today's Groq token budget is used up"}
+    jobs = due_jobs(session, max_jobs or settings.visa_reader_groq_per_run)
+    read = failed = changed = 0
+    stop = ""
+    with httpx.Client() as http:
+        for i, (jid, title, company, p) in enumerate(jobs):
+            if used >= settings.visa_reader_groq_daily_tokens:
+                stop = "daily token budget reached"
+                break
+            if i:
+                sleep(GROQ_SPACING_SECONDS)
+            try:
+                verdict, tokens = groq_read(http, title, company, p)
+            except httpx.HTTPStatusError as e:
+                stop = f"Groq answered HTTP {e.response.status_code}"
+                break
+            except httpx.HTTPError as e:
+                stop = f"Groq unreachable: {type(e).__name__}"
+                break
+            used += tokens
+            if verdict is None:
+                failed += 1
+                continue
+            row = VisaRead(job_id=jid, passage_hash=passage_hash(p), model=f"groq:{settings.visa_reader_groq_model}",
+                           verdict=verdict, read_at=datetime.now(timezone.utc))
+            job = session.get(Job, jid)
+            if job is not None:
+                before = (job.no_sponsor, job.sponsors_text, job.student_visa)
+                apply_verdict(job, verdict)
+                row.changed = (job.no_sponsor, job.sponsors_text, job.student_visa) != before
+                changed += row.changed
+            session.merge(row)
+            session.commit()
+            read += 1
+    state.setdefault("groq_tokens", {})[today] = used
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    state["groq_tokens"] = {d: t for d, t in state["groq_tokens"].items() if d >= week_ago}
+    state["last_groq_run"] = {"at": datetime.now(timezone.utc).isoformat(), "read": read, "failed": failed,
+                              "changed": changed, "stopped": stop}
+    _save_state(state)
+    return {"read": read, "failed": failed, "changed": changed, "tokens_today": used, "stopped": stop}
 
 
 # ---- what a verdict changes ---------------------------------------------------------------------------------------
@@ -229,8 +337,17 @@ def _save_state(state: dict) -> None:
     tmp.replace(path)
 
 
+def provider() -> str:
+    """"groq" (free tier) or "anthropic" (Claude, paid): VISA_READER_PROVIDER, else whichever key is set (Groq first)."""
+    chosen = (settings.visa_reader_provider or "").lower()
+    if chosen in ("groq", "anthropic"):
+        return chosen
+    return "groq" if settings.groq_api_key else "anthropic"
+
+
 def enabled() -> bool:
-    return bool(settings.visa_reader_enabled and settings.anthropic_api_key)
+    key = settings.groq_api_key if provider() == "groq" else settings.anthropic_api_key
+    return bool(settings.visa_reader_enabled and key)
 
 
 def due_jobs(session: Session, limit: int) -> list:
@@ -241,6 +358,8 @@ def due_jobs(session: Session, limit: int) -> list:
         "SELECT j.id, j.title, j.company_name, j.description FROM jobs j INDEXED BY ix_jobs_by_found_v2 "
         "WHERE j.closed_at IS NULL AND j.is_repost = 0 AND j.first_seen_at >= :since AND j.us_eligible = 1 "
         "AND j.role_match = 1 AND NOT EXISTS (SELECT 1 FROM visa_reads v WHERE v.job_id = j.id) "
+        # Only jobs the rules didn't settle: when they flag a job they are right 97-98% of the time (eval set).
+        "AND j.no_sponsor = 0 AND j.sponsors_text = 0 "
         "ORDER BY j.first_seen_at DESC LIMIT :n"), {"since": since, "n": limit * 4}).all()
     out = []
     for jid, title, company, description in rows:
@@ -323,7 +442,9 @@ def collect(session: Session) -> dict:
 
 def run_once(session: Session) -> dict:
     if not enabled():
-        return {"skipped": "no ANTHROPIC_API_KEY, or VISA_READER_ENABLED=false"}
+        return {"skipped": "no API key for the visa reader, or VISA_READER_ENABLED=false"}
+    if provider() == "groq":
+        return read_due_with_groq(session)
     out = collect(session)
     out.update(submit(session))
     return out
@@ -331,8 +452,10 @@ def run_once(session: Session) -> dict:
 
 def status() -> dict:
     s = _state()
-    return {"enabled": enabled(), "model": settings.visa_reader_model, "pending_batches": len(s.get("batches", [])),
-            "sent": s.get("sent", {}), "last_collect": s.get("last_collect")}
+    model = settings.visa_reader_groq_model if provider() == "groq" else settings.visa_reader_model
+    return {"enabled": enabled(), "provider": provider(), "model": model, "pending_batches": len(s.get("batches", [])),
+            "sent": s.get("sent", {}), "last_collect": s.get("last_collect"), "groq_tokens": s.get("groq_tokens", {}),
+            "last_groq_run": s.get("last_groq_run")}
 
 
 def main() -> None:

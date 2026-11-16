@@ -123,6 +123,36 @@ _NO_SPONSOR_PATTERNS = [
     r"(must\s+be\s+|be\s+)clearable\b",
     r"\bsci\s+eligib",
     r"\b(dod|doe|dhs|nrc|q|l)\s+(security\s+)?clearance",
+    # Wordings the rules missed in the hand-labelled eval set (data/visa_eval.jsonl, 2026-11-15), each from a real
+    # posting: "not eligible for employment-based visa sponsorship" (Zayo), "ineligible for employment Visa
+    # sponsorship" (Early Warning), "not eligible for employer-sponsored employment authorization" (UChicago).
+    r"(not\s+eligible|ineligible)\s+for\s+([\w-]+\s+){0,3}(sponsorship|employment\s+authori[sz]ation)",
+    # "does not intend to provide sponsorship" (Allegion), "does not offer employment-based visa sponsorship"
+    # (Invitation Homes), "will not pursue visa sponsorship" (Taco Bell).
+    r"(does|do|will)\s+not\s+(intend\s+to\s+)?(provide|offer|pursue|support)\s+([\w-]+\s+){0,4}sponsorship",
+    # "sponsorship for US employment authorization is not available" (podium), "Current and future sponsorship are
+    # not available" (FIS), "Work sponsorship is not supported" (Live Oak Bank).
+    r"sponsorship\b[^.;]{0,60}?\b(is|are)\s+not\s+(available|supported|offered|provided)",
+    r"sponsorship\s+available\s*:?\s*no\b",  # "Sponsorship Available:No" (University of Arkansas)
+    r"does\s+not\s+participate\s+in\s+the\s+h-?1-?b\s+lottery",  # Uline
+    # "without requiring a visa transfer or sponsorship" (Infor), "without employment-based immigration
+    # sponsorship, now or in the future" (Charter).
+    r"without\s+requiring\s+(an?\s+)?([\w-]+\s+){0,3}sponsorship",
+    r"without\s+([\w-]+\s+){0,3}sponsorship,?\s+now\s+or\s+in\s+the\s+future",
+    r"does\s+not\s+sponsor\s+([\w-]+\s+){0,4}(foreign|workers|employees|candidates|applicants)\b",  # PCG
+    r"not\s+offering\s+[^.;]{0,30}\bsponsorship",  # "is not offering relocation, sponsorship" (Avride)
+    r"permanently\s+and\s+without\s+restriction",  # "work in the US permanently and without restriction"
+    # Citizenship and clearance said plainly: "US citizen (required)" (GovEagle), "Be a US Citizen" under
+    # "applicants must:" (Via Logic), "US Citizenship for this position is required" (QTS), "Hold US citizenship"
+    # (Zoom), "Active Secret (or above) US security clearance" (Striveworks), "Clearance: Secret" (JCS),
+    # "able to receive a favorable security clearance" (Oracle).
+    r"\b(us|united states)\s+citizen(ship)?\s*\(required\)",
+    r"(^|[\n|:]\s*|must\s+)be\s+an?\s+(us|united states)\s+citizen\b",
+    r"\b(us|united states)\s+citizenship\s+(for\s+this\s+(position|role)\s+)?is\s+required",
+    r"\bhold\s+(us|united states)\s+citizenship",
+    r"\bactive\s+(top\s+)?secret\b[^.;]{0,30}\bclearance",
+    r"\bclearance\s*:\s*(active\s+)?(top\s+secret|secret|ts)\b",
+    r"(able|eligible)\s+to\s+(receive|obtain)\s+(an?\s+)?(favorable\s+)?(security\s+)?clearance",
 ]
 # "must be legally authorized to work in the United States on a permanent basis" (Latitude AI): OPT and H-1B
 # are temporary, so it rules them out, unless the same posting also says it sponsors (then it's mixed: left
@@ -192,7 +222,16 @@ _SPONSOR_YES = re.compile(
     r"|\b(visa|h-?1b)\s+transfers?\s+(are\s+|is\s+)?(supported|available|welcome)"
     # "Visa Sponsorship & Immigration Support" in a benefits list (Resolve AI)
     r"|\bvisa\s+sponsorship\s*(&|and)\s*immigration\s+support"
-    r"|\bopen\s+to\s+(sponsoring|sponsor)\b",
+    r"|\bopen\s+to\s+(sponsoring|sponsor)\b"
+    # From the eval set (2026-11-15): "happy to sponsor international candidates" (Exa), "H1-B Transfers Allowed",
+    # "Visa sponsorship: Available for this position" (Blue River), "Visa sponsorship: Will sponsor." (Relari,
+    # GhostEye), "will consider sponsoring a new qualified applicant" (GEICO).
+    # (Not "the family is happy to sponsor renewal" of a CPR card: the sponsored thing must be people or a visa.)
+    r"|\b(happy|glad|willing)\s+to\s+sponsor\s+(international|candidates?|applicants?|visas?|h-?1-?bs?|you|work|"
+    r"employees|qualified)\b"
+    r"|\bh-?1-?b\s+transfers?\s+(are\s+|is\s+)?(allowed|accepted|supported|welcome)"
+    r"|\bsponsorship\s*:\s*(available|yes|will\s+sponsor)\b"
+    r"|\bwill\s+consider\s+sponsoring\b",
     re.I,
 )
 _SPONSOR_YES_NEGATED = re.compile(r"\b(not|no|unable|cannot|can ?not|can'?t|won'?t|never|neither|nor)\b", re.I)

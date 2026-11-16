@@ -121,3 +121,53 @@ def test_daily_cap(session, fake_api, monkeypatch):
 def test_without_a_key_nothing_runs(session, monkeypatch):
     monkeypatch.setattr(vr.settings, "anthropic_api_key", "")
     assert "skipped" in vr.run_once(session)
+
+
+def test_groq_reads_due_jobs_within_the_daily_budget(session, monkeypatch, tmp_path, respx_mock):
+    import httpx
+
+    monkeypatch.setattr(vr, "_state_file", lambda: tmp_path / "visa_reader.json")
+    monkeypatch.setattr(vr.settings, "groq_api_key", "test-key")
+    monkeypatch.setattr(vr.settings, "visa_reader_provider", "groq")
+    monkeypatch.setattr(vr.settings, "visa_reader_groq_daily_tokens", 1500)
+    now = datetime.now(timezone.utc)
+    c = Company(name="Acme", ats="greenhouse", slug="acme")
+    session.add(c)
+    session.flush()
+    jobs = [Job(company_id=c.id, external_id=str(i), title="Data Analyst", url=f"https://x/{i}", fingerprint=f"f{i}",
+                description="Work Authorization: Sponsorship Available: No.", first_seen_at=now, last_seen_at=now,
+                role_match=True, us_eligible=True, no_sponsor=False) for i in range(3)]
+    session.add_all(jobs)
+    session.commit()
+    route = respx_mock.post(vr.GROQ_URL).mock(return_value=httpx.Response(200, json={
+        "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(VERDICT_NO)}}],
+        "usage": {"total_tokens": 1000}}))
+
+    out = vr.read_due_with_groq(session, sleep=lambda s: None)
+    assert route.call_count == 2 and out["read"] == 2  # the second read passes the 1,500-token budget: stop
+    assert out["stopped"] == "daily token budget reached"
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["response_format"]["json_schema"]["strict"] is True and sent["reasoning_effort"] == "low"
+    assert "Sponsorship Available" in sent["messages"][1]["content"]
+    flagged = [j for j in jobs if (session.refresh(j) or j.no_sponsor)]
+    assert len(flagged) == 2
+    assert vr.read_due_with_groq(session, sleep=lambda s: None)["reason"].startswith("today's Groq token budget")
+
+
+def test_groq_rate_limit_stops_the_run(session, monkeypatch, tmp_path, respx_mock):
+    import httpx
+
+    monkeypatch.setattr(vr, "_state_file", lambda: tmp_path / "visa_reader.json")
+    monkeypatch.setattr(vr.settings, "groq_api_key", "test-key")
+    now = datetime.now(timezone.utc)
+    c = Company(name="Acme", ats="greenhouse", slug="acme")
+    session.add(c)
+    session.flush()
+    session.add(Job(company_id=c.id, external_id="1", title="Data Analyst", url="https://x/1", fingerprint="f",
+                    description="Must be a US citizen.", first_seen_at=now, last_seen_at=now, role_match=True,
+                    us_eligible=True, no_sponsor=False))
+    session.commit()
+    respx_mock.post(vr.GROQ_URL).mock(return_value=httpx.Response(429, headers={"retry-after": "30"}))
+    out = vr.read_due_with_groq(session, sleep=lambda s: None)
+    assert out["read"] == 0 and out["stopped"] == "Groq answered HTTP 429"
+    assert session.query(VisaRead).count() == 0  # read again next run

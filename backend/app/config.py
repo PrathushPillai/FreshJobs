@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     visa_reader_per_batch: int = 1000  # jobs sent per hourly batch
     visa_reader_daily_jobs: int = 3000  # at most this many jobs read a day (cost cap)
     visa_reader_days: int = 3  # only jobs found this recently
+    visa_reader_provider: str = ""  # "groq" (free tier) or "anthropic"; empty = Groq if GROQ_API_KEY is set
+    groq_api_key: str = ""
+    visa_reader_groq_model: str = "openai/gpt-oss-120b"
+    visa_reader_groq_daily_tokens: int = 170_000  # the free plan allows 200,000 a day per model
+    visa_reader_groq_per_run: int = 40  # jobs per hourly run (about 8 s each)
     chat_model: str = "claude-sonnet-5-5"
 
     cors_origins: list[str] = ["http://localhost:5173"]

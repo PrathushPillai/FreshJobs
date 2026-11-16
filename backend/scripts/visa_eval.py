@@ -52,7 +52,8 @@ def report(name: str, items: list[dict], verdicts: list[dict]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ai", action="append", default=[], metavar="MODEL")
+    ap.add_argument("--ai", action="append", default=[], metavar="MODEL", help="a Claude model (paid)")
+    ap.add_argument("--groq", action="append", default=[], metavar="MODEL", help="a Groq model (free tier)")
     args = ap.parse_args()
     items = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
     print(f"{len(items)} hand-labelled postings")
@@ -62,6 +63,38 @@ def main() -> None:
              "student_visa": x["stored"]["student_visa"]} for x in items])
     rules = [derive(x["passage"], "") for x in items]
     report("today's rules", items, rules)
+
+    for model in args.groq:
+        import httpx
+
+        t = time.time()
+        results, tokens, failed = [], 0, 0
+        with httpx.Client() as http:
+            for i, x in enumerate(items):
+                for attempt in range(6):
+                    try:
+                        v, used = visa_reader.groq_read(http, x["title"], x["company"], x["passage"], model)
+                        tokens += used
+                        break
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code != 429 or attempt == 5:
+                            print("   error:", e.response.status_code, e.response.text[:150])
+                            v = None
+                            break
+                        time.sleep(float(e.response.headers.get("retry-after", "20")) + 1)
+                failed += v is None
+                results.append(v)
+                time.sleep(visa_reader.GROQ_SPACING_SECONDS)
+                if i % 25 == 24:
+                    print(f"   {i + 1} read, {tokens:,} tokens", flush=True)
+        report(f"rules + Groq {model}", items, [visa_reader.overlay(r, v) for r, v in zip(rules, results)])
+        report(f"Groq {model} alone", items, [visa_reader.overlay(
+            {"no_sponsor": False, "sponsors_text": False, "student_visa": None}, v) for v in results])
+        four = sum(1 for x, v in zip(items, results) if v and v["sponsorship"] == x["gold"]["sponsorship"])
+        print(f"  four-way sponsorship answer right: {four}/{len(items)}; failed reads: {failed}; "
+              f"{tokens:,} tokens ({tokens // max(1, len(items))} per posting); {time.time() - t:.0f} s")
+        (DATA.parent / f"visa_eval_groq_{model.replace('/', '_')}.json").write_text(json.dumps(
+            [{"id": x["id"], "verdict": v} for x, v in zip(items, results)], indent=1))
 
     for model in args.ai:
         t = time.time()
