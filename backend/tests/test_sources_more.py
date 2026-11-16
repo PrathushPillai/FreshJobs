@@ -591,3 +591,30 @@ async def test_workday_429_pauses_every_workday_board(monkeypatch):
         with pytest.raises(httpx.HTTPStatusError):
             await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=set())
     assert waits and waits[0] > 100  # the second board waited out the ~120 s pause first
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_comes_back_gently_after_a_429(monkeypatch):
+    """After a 429 every Workday request is spaced out until enough succeed in a row, then full speed again."""
+    from app.sources import http_util, workday
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(http_util.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(workday, "_PAUSE", http_util.Spacer(0.0))
+    monkeypatch.setattr(workday, "_gentle", {"left": 0})
+    monkeypatch.setattr(workday, "GENTLE_SUCCESSES", 3)
+    respx.post(f"{WD_API}/jobs").mock(return_value=httpx.Response(429, text="slow down"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=set())
+        assert workday._PAUSE.seconds == workday.GENTLE_SPACING and workday._gentle["left"] == 3
+        posts = [wd_posting(i) for i in range(3)]
+        handler, _ = wd_pages(posts)
+        respx.post(f"{WD_API}/jobs").mock(side_effect=handler)
+        known = {job_id(p["externalPath"]) for p in posts}
+        for _ in range(3):
+            await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=known)
+    assert workday._PAUSE.seconds == 0.0 and workday._gentle["left"] == 0

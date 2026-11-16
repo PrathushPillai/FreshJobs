@@ -51,15 +51,30 @@ SLOW_DOWN = (429, 503)
 _PAUSE = http_util.Spacer(0.0)  # no spacing, only the shared pause after a 429
 
 
+# After a pause, requests go out one at a time GENTLE_SPACING seconds apart until GENTLE_SUCCESSES of them in a row
+# succeed, then at full speed again. With only the pause, all 20 waiting requests went out together when it ended
+# and were refused at once (2026-11-16 evening: 45 of 53 Workday boards refused in 16 minutes).
+GENTLE_SPACING = 3.0
+GENTLE_SUCCESSES = 20
+_gentle = {"left": 0}  # successes still needed before full speed
+
+
 async def _request(method, client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    """A Workday request that waits out a pause, and starts one when Workday answers 429."""
+    """A Workday request that waits out a pause, starts one when Workday answers 429, and comes back gently."""
     await _PAUSE.wait()
     try:
-        return await method(client, url, **kwargs)
+        resp = await method(client, url, **kwargs)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 429:
             _PAUSE.pause(PAUSE_AFTER_429)
+            _PAUSE.seconds = GENTLE_SPACING
+            _gentle["left"] = GENTLE_SUCCESSES
         raise
+    if _gentle["left"]:
+        _gentle["left"] -= 1
+        if not _gentle["left"]:
+            _PAUSE.seconds = 0.0  # Workday answers normally again: full speed
+    return resp
 
 
 def _slow_down(e: Exception) -> bool:
