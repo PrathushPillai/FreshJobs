@@ -376,7 +376,8 @@ def due_jobs(session: Session, limit: int) -> list:
         "AND j.role_match = 1 AND NOT EXISTS (SELECT 1 FROM visa_reads v WHERE v.job_id = j.id) "
         # Only jobs the rules didn't settle: when they flag a job they are right 97-98% of the time (eval set).
         "AND j.no_sponsor = 0 AND j.sponsors_text = 0 "
-        "ORDER BY j.first_seen_at DESC LIMIT :n"), {"since": since, "n": limit * 4}).all()
+        # Most postings have nothing about work authorization (no passage): look through plenty of candidates.
+        "ORDER BY j.first_seen_at DESC LIMIT :n"), {"since": since, "n": max(limit * 20, 1000)}).all()
     out = []
     for jid, title, company, description in rows:
         p = passages(description or "")
