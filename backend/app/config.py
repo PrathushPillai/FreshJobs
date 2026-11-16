@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     poll_concurrency: int = 10
     # Minutes a lane's poll may run before the sources it hasn't reached wait for the next one. The slow
     # lane has none: a big Workday or Amazon scan can take longer and must be allowed to finish.
-    poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30}
+    # The slow lane got one too on 2026-11-16: a Workday rate-limit storm held one pass for 3.5 hours, and Amazon,
+    # Microsoft, Google, Apple and SmartRecruiters (same lane) weren't rechecked meanwhile.
+    poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30, "slow": 45}
     poll_on_startup: bool = True
     scheduler_enabled: bool = True
     # Each polling lane (and discovery) in its own worker process (app/lanes.py), so they don't share one core
