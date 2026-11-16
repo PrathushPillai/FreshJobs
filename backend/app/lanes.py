@@ -121,6 +121,9 @@ def run_discovery_once() -> dict:
     from app.pipeline import sbir
 
     summary["sbir_added"] = asyncio.run(sbir.maybe_import())  # only when SBIR.gov publishes a new award file
+    from app.pipeline import upkeep
+
+    summary.update(upkeep.run())  # names, stale jobs of switched-off sources, the AI visa reader
     return summary
 
 

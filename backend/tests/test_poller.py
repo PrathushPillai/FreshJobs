@@ -668,3 +668,39 @@ def test_gone_board_rules(ats, error, days, streak, gone):
     now = datetime.now(timezone.utc)
     company = Company(name="X", ats=ats, slug="x", fail_streak=streak, last_ok_at=now - timedelta(days=days))
     assert is_gone_board(company, error, now) is gone
+
+
+def test_discovery_worker_runs_the_hourly_upkeep(monkeypatch):
+    """The worker's discovery run must call the upkeep (names, stale closing, AI visa reader): until 2026-11-16 only
+    the old thread mode did, so none of it ran on the server."""
+    from app import lanes
+    from app.pipeline import autodiscover, sbir, upkeep
+
+    async def nothing(*a, **k):
+        return {}
+
+    async def zero(*a, **k):
+        return 0
+
+    monkeypatch.setattr(autodiscover, "run_once", nothing)
+    monkeypatch.setattr(autodiscover, "jobdiva_portals", zero)
+    monkeypatch.setattr(autodiscover, "crawl_new_index", zero)
+    monkeypatch.setattr(sbir, "maybe_import", zero)
+    monkeypatch.setattr(upkeep, "run", lambda: {"visa_reader": {"read": 0}})
+    assert lanes.run_discovery_once()["visa_reader"] == {"read": 0}
+
+
+def test_a_rate_limited_board_retries_within_half_an_hour(session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import Company
+    from app.pipeline import poller
+
+    now = datetime.now(timezone.utc)
+    c = Company(name="Acme", ats="greenhouse", slug="acme", last_status="error: HTTP 429", fail_streak=5,
+                last_ok_at=now - timedelta(hours=1), last_polled_at=now - timedelta(minutes=31), poll_count=3)
+    assert poller._due(c, now)
+    c.last_polled_at = now - timedelta(minutes=10)
+    assert not poller._due(c, now)
+    c.last_status, c.last_polled_at = "error: HTTP 502", now - timedelta(minutes=31)
+    assert not poller._due(c, now)  # other errors still wait idle_poll_minutes

@@ -452,6 +452,7 @@ def process_company(
 
 
 RETRY_FAILS = 2  # failures in a row a previously working board is retried at its normal pace
+RATE_LIMITED_RETRY_MINUTES = 30  # after that, a rate-limited (429) board is retried this often, not every 3 hours
 
 
 # Activity-paced polling (2026-11-12). Checking all ~13,600 fast-lane boards every 5 minutes needed more CPU than
@@ -538,7 +539,13 @@ def _due(company: Company, now: datetime) -> bool:
     failing = status.startswith("error")
     retry_soon = failing and company.last_ok_at is not None and (company.fail_streak or 0) <= RETRY_FAILS
     empty_and_slowed = status.startswith("ok (0 ") and adapter.lane == "bulk"
-    if empty_and_slowed or (failing and not retry_soon):
+    # A rate limit (429) passes in minutes: such a board waits RATE_LIMITED_RETRY_MINUTES, not 3 hours. On Monday
+    # 2026-11-16, Workday's 429s on the week's first wave of postings parked 2,461 of 4,937 Workday boards, and the
+    # median Workday board went 8 hours without a good check.
+    rate_limited = failing and company.last_ok_at is not None and "HTTP 429" in status
+    if rate_limited and not retry_soon:
+        interval = max(interval, RATE_LIMITED_RETRY_MINUTES)
+    elif empty_and_slowed or (failing and not retry_soon):
         interval = max(interval, settings.idle_poll_minutes)
     if interval <= 0:
         return True
