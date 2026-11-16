@@ -38,9 +38,28 @@ DETAIL_CONCURRENCY = 4
 # enough: on 2026-11-15, 729 of ~4,900 boards failed a check in 6 hours (CVS Health, Dollar Tree, O'Reilly,
 # Micron, Northrop Grumman...), while the same requests a minute later answered 200. List pages now wait
 # 5, 10, 20, 40 and 60 s, and a scan that still gets a 429 part way keeps the pages it read (see _keep_partial).
-LIST_RETRIES = 5
+# Then on Monday 2026-11-16 the week's first wave (13,561 new jobs in one slow-lane pass, each a detail request)
+# kept Workday rate-limiting the whole server, not single tenants: boards of every employer got 429 at once, and
+# those patient retries (over 2 minutes per board, ~2,500 boards) stretched one slow pass past 3.5 hours while the
+# constant retrying kept the limit on. Now a 429 pauses every Workday request for PAUSE_AFTER_429 seconds (like
+# YC, sources/yc.py), the list page is retried once, and a board still refused fails fast and is retried in 30
+# minutes (poller.RATE_LIMITED_RETRY_MINUTES).
+LIST_RETRIES = 1
 LIST_BACKOFF_SECONDS = 5.0
+PAUSE_AFTER_429 = 120.0
 SLOW_DOWN = (429, 503)
+_PAUSE = http_util.Spacer(0.0)  # no spacing, only the shared pause after a 429
+
+
+async def _request(method, client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """A Workday request that waits out a pause, and starts one when Workday answers 429."""
+    await _PAUSE.wait()
+    try:
+        return await method(client, url, **kwargs)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            _PAUSE.pause(PAUSE_AFTER_429)
+        raise
 
 
 def _slow_down(e: Exception) -> bool:
@@ -177,8 +196,9 @@ class WorkdayAdapter(Adapter):
     async def _page(self, client: httpx.AsyncClient, api: str, offset: int) -> dict:
         # Retried with backoff on 429/503: tenants rate-limit bursts, and one 429 used to fail the whole board
         # (149 boards, Kraft Heinz, Lowe's, Lilly, CVS Health, GEICO, Wells Fargo..., from 2026-11-06 on).
-        resp = await http_util.post(
-            client, f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""},
+        resp = await _request(
+            http_util.post, client, f"{api}/jobs",
+            json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""},
             retries=LIST_RETRIES, backoff=LIST_BACKOFF_SECONDS,
         )
         return resp.json()
@@ -280,7 +300,7 @@ class WorkdayAdapter(Adapter):
                 )
             async with sem:
                 try:
-                    resp = await http_util.get(client, f"{api}{path}")
+                    resp = await _request(http_util.get, client, f"{api}{path}", retries=1)
                     info = resp.json().get("jobPostingInfo") or {}
                 except (httpx.HTTPError, ValueError):
                     # Taken down since the list call, or a transient error. Skip it: it's still new
