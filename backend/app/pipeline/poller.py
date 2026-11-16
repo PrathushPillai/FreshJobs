@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
 
 from app.config import settings
-from app.db import SessionLocal, init_db
+from app.db import SessionLocal, init_db, is_sqlite
 from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.pipeline.dedupe import find_original, fingerprint
@@ -217,9 +217,18 @@ def close_stale_of_disabled(session: Session, now: datetime) -> int:
     cutoff = now - timedelta(days=settings.stale_days)
     off = list(session.scalars(select(Company.id).where(Company.enabled.is_(False))))
     ids: list[int] = []
+    # Index-only through ix_jobs_company_sync (company_id, ..., last_seen_at, ..., closed_at). Left alone, SQLite
+    # took ix_jobs_by_sponsor (closed_at=?) and read every open job's row once per 500 sources: on the server
+    # (4,244 switched-off sources, 2.1M open jobs) it ran for hours and read the disk flat out, and the slow lane's
+    # saves queued behind it, so no Workday board finished a check for over an hour (2026-11-16).
+    cutoff_text = cutoff.strftime("%Y-%m-%d %H:%M:%S")
     for i in range(0, len(off), 500):
-        ids += session.scalars(select(Job.id).where(Job.company_id.in_(off[i:i + 500]), Job.closed_at.is_(None),
-                                                    Job.last_seen_at < cutoff))
+        chunk = off[i:i + 500]
+        ids += session.scalars(text(
+            f"SELECT id FROM jobs INDEXED BY ix_jobs_company_sync WHERE company_id IN ({','.join(map(str, chunk))}) "
+            "AND closed_at IS NULL AND last_seen_at < :cutoff"), {"cutoff": cutoff_text}) if is_sqlite else \
+            session.scalars(select(Job.id).where(Job.company_id.in_(chunk), Job.closed_at.is_(None),
+                                                 Job.last_seen_at < cutoff))
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
         session.execute(update(Job).where(Job.id.in_(chunk)).values(closed_at=now)
