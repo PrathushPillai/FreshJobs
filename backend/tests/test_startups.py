@@ -11,9 +11,15 @@ import respx
 from app.models import Company
 from app.pipeline.sponsorship import find_no_sponsor_phrase
 from app.pipeline.startups import YC_HIRING, sync_yc
-from app.sources import ADAPTERS
+from app.sources import ADAPTERS, http_util
 from app.sources.hackernews import parse_header
-from app.sources.yc import visa_line
+from app.sources.yc import YCAdapter, visa_line
+
+
+@pytest.fixture(autouse=True)
+def unpaced_yc(monkeypatch):
+    """No 2-second spacing between the mocked YC requests (a fresh Spacer, so no pause leaks between tests)."""
+    monkeypatch.setattr(YCAdapter, "_spacer", http_util.Spacer(0))
 
 
 def yc_page(component: str, props: dict, extra: str = "") -> str:
@@ -43,6 +49,42 @@ async def test_yc_jobs_page_and_detail():
     assert "We build robots." in job.description and "Hiring manager: Andrew S." in job.description
     assert "Visa sponsorship: Will sponsor." in job.description and not find_no_sponsor_phrase(job.description)
     assert job.posted_at.isoformat() == "2026-11-01T10:00:00+00:00"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_yc_429_pauses_every_yc_request_and_is_not_retried():
+    """ycombinator.com blocks an address for a while after a burst: retrying into it only extends the block."""
+    route = respx.get("https://www.ycombinator.com/companies/circuithub/jobs").mock(return_value=httpx.Response(429))
+    adapter = ADAPTERS["yc"]
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.fetch(client, "circuithub")
+    assert route.call_count == 1
+    import time
+    assert adapter._spacer._paused_until - time.monotonic() > adapter.PAUSE_AFTER_429 - 5
+    assert adapter.lane == "bulk"  # waiting for its turn must never hold up a fast poll
+
+
+@pytest.mark.asyncio
+async def test_spacer_spaces_requests_and_holds_them_during_a_pause():
+    import asyncio
+    import time
+
+    spacer = http_util.Spacer(0.1)
+    starts = []
+
+    async def one():
+        await spacer.wait()
+        starts.append(time.monotonic())
+
+    await asyncio.gather(*(one() for _ in range(4)))
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert min(gaps) >= 0.07  # Windows timers tick every ~15 ms
+    spacer.pause(0.3)
+    before = time.monotonic()
+    await spacer.wait()
+    assert time.monotonic() - before >= 0.25
 
 
 def test_yc_visa_policy_feeds_sponsorship_detector():

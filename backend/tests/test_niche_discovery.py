@@ -59,6 +59,12 @@ async def test_niche_reads_allowed_lists_and_adds_boards_behind_their_websites(s
         return boards.get(url)
 
     monkeypatch.setattr(bd, "detect_from_page", fake_detect)
+    from app.pipeline import board_lists
+
+    async def fake_vet(client, ats, slug):
+        return (4, 2)  # every board found lists US jobs
+
+    monkeypatch.setattr(board_lists, "vet", fake_vet)
     async with httpx.AsyncClient(headers={"User-Agent": "FreshJobs test"}) as client:
         # A dry run finds the one untracked board and saves nothing.
         assert await bd.from_niche(client, "robotics", dry_run=True, sponsors=0) == 1
@@ -91,3 +97,21 @@ async def test_workday_probe_skips_names_tracked_or_already_probed(session, monk
     assert added == 1 and asked == ["New Health", "Other Health"]
     session.expire_all()
     assert session.scalar(select(Company).where(Company.ats == "workday")).slug == "newhealth|wd5|External"
+
+
+@pytest.mark.asyncio
+async def test_boards_with_no_us_job_are_not_added(monkeypatch):
+    from app.pipeline import board_lists
+
+    verdicts = {"usco": (5, 1), "euco": (6, 0), "dead": None}
+
+    async def fake_vet(client, ats, slug):
+        return verdicts[slug]
+
+    monkeypatch.setattr(board_lists, "vet", fake_vet)
+    links = [("US Co", "https://boards.greenhouse.io/usco"), ("EU Co", "https://jobs.lever.co/euco"),
+             ("Dead", "https://jobs.ashbyhq.com/dead"), ("Site", "https://acme.applytojob.com/apply")]
+    async with httpx.AsyncClient() as client:
+        kept = await bd._with_us_jobs(client, links)
+    # The JazzHR link isn't a platform the check reads, so it's kept as before.
+    assert [name for name, _ in kept] == ["US Co", "Site"]

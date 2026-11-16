@@ -32,6 +32,9 @@ class Adapter(ABC):
     # True if a full fetch lists every open job, so a job missing from it can be closed.
     # Aggregators only return recent jobs, so they set this to False.
     complete_feed: bool = True
+    # A feed that shows only the newest N jobs (JobDiva's 200): when a fetch hit the cap, jobs past it can't be
+    # told apart from closed ones, so they age out after stale_days unseen, as aggregator jobs do.
+    capped_ages_out: bool = False
     # True for sources listing many employers' jobs (set company_name on every job). Their employers and
     # job links are used to find company boards we don't track yet.
     aggregator: bool = False

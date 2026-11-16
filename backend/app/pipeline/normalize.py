@@ -56,6 +56,31 @@ def seniority(title: str) -> str:
     return "unknown"
 
 
+_TITLE_PREFIX = re.compile(r"^(?:\((?:USA|US|U\.S\.)\)\s*|[\s:;,\-–—•*|>]+)+")
+
+
+def clean_title(title: str) -> str:
+    """A title as shown: without a country tag every title of a board carries ("(USA) Produce Lead": Walmart),
+    leading punctuation (":Line Cook", "- Admissions Counselor") or runs of spaces."""
+    title = fix_mojibake(title or "")
+    cleaned = re.sub(r"\s+", " ", _TITLE_PREFIX.sub("", title)).strip()
+    return cleaned or title.strip()
+
+
+_MOJIBAKE = re.compile("[ÂÃ][\u0080-¿]|â€")
+
+
+def fix_mojibake(text: str) -> str:
+    """UTF-8 text a source read as Windows-1252: "Data Analyst â€“ Entry Level" -> "Data Analyst – Entry
+    Level" (seen in an alert email, 2026-11-15). Left as it was when it doesn't decode cleanly."""
+    if not text or not _MOJIBAKE.search(text):
+        return text
+    try:
+        return text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
 def normalize_title(title: str) -> str:
     """Lowercased title with noise (punctuation, req codes, location suffixes) removed, for fingerprinting."""
     t = title.lower()

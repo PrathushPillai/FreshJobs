@@ -1,0 +1,13 @@
+[Unit]
+Description=FreshJobs health monitor (app/health.py): checks the portal and emails the admin about problems
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/freshjobs/backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/freshjobs/backend/.venv/bin/python -m app.health
+# Never in the way of the pollers.
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1500

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     poll_deadline_minutes: dict[str, int] = {"fast": 8, "bulk": 30}
     poll_on_startup: bool = True
     scheduler_enabled: bool = True
+    # Each polling lane (and discovery) in its own worker process (app/lanes.py), so they don't share one core
+    # with the API under the GIL. false: every lane in a thread of the backend process, as before 2026-11-10.
+    poll_workers: bool = True
     # A job missing from its feed this many polls in a row is marked closed.
     missed_polls_to_close: int = 2
     repost_window_days: int = 60
@@ -32,6 +35,10 @@ class Settings(BaseSettings):
     harvest_per_poll: int = 200
     # Minutes between polls of a board that had no open jobs, or failed, last time.
     idle_poll_minutes: int = 180
+    # Check boards that posted nothing lately less often (poller.activity_factor: x2 after a day, x4 after a week).
+    # Off: every board at its normal pace. It was on while the server had 2 vCPUs, which couldn't check every
+    # board every 5 minutes; switch it on again only if fast polls start cutting boards short (cut_short).
+    activity_pacing: bool = False
     # A job found more than this long after the source's previous successful check gets a
     # "posted between" window instead of "posted when we found it" (date-only and undated sources).
     listed_exact_gap_minutes: int = 45
@@ -48,6 +55,9 @@ class Settings(BaseSettings):
     yc_sync_hours: int = 24
     # Hours between syncs of the community GitHub job lists into sources (pipeline/startup_lists.py). 0 = off.
     list_sync_hours: int = 12
+    # Always-on board discovery (pipeline/autodiscover.py): employers looked for per run, and how often.
+    autodiscover_per_run: int = 150
+    autodiscover_minutes: int = 60
 
     # Email alerts (leave smtp_host empty to disable)
     smtp_host: str = ""
@@ -77,6 +87,21 @@ class Settings(BaseSettings):
     chat_model: str = "claude-sonnet-5-5"
 
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    # Accounts (app/auth.py)
+    public_url: str = "http://localhost:5173"  # where the site is opened: links in emails point here
+    admin_email: str = ""  # this account is the admin; empty = the first account to sign up (fine locally only)
+    secure_cookies: bool = False  # True behind HTTPS (the cloud server), so the login cookie is never sent over HTTP
+    session_days: int = 30
+    support_email: str = ""  # where Contact & support messages go; empty = ADMIN_EMAIL
+    api_docs: bool = False  # serve /docs and /openapi.json (handy locally; off on the shared server)
+    health_api_url: str = "http://127.0.0.1:8000"  # where the health monitor (app/health.py) finds the backend
+    # Limits for a shared site (app/ratelimit.py); 0 turns one off (the tests do).
+    api_requests_per_minute: int = 300  # per visitor (login cookie, else client address); /api/status is exempt
+    signups_per_hour_per_client: int = 5
+    signups_per_hour: int = 50  # all sign-ups together: each one sends a welcome email from the site's account
+    verification_emails_per_hour: int = 3  # "Resend confirmation", per account
+    email_daily_limit: int = 450  # emails sent in 24 h; Gmail allows 500 a day for a personal account
 
 
 settings = Settings()

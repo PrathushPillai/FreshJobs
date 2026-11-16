@@ -207,6 +207,70 @@ async def test_workday_list_error_raises():
             await WorkdayAdapter().fetch(client, WD_SLUG)
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_keeps_the_pages_it_read_when_rate_limited_part_way(monkeypatch):
+    """A 429 that outlasts the retries part way through a scan keeps the newest pages and marks the scan
+    incomplete (so nothing is closed); a 429 on the very first page is still a failed fetch."""
+    from app.sources import http_util, workday
+
+    waits = []
+
+    async def no_wait(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(http_util.asyncio, "sleep", no_wait)
+    postings = [wd_posting(i) for i in range(60)]
+    handler, calls = wd_pages(postings)
+    respx.post(f"{WD_API}/jobs").mock(side_effect=lambda req: (
+        httpx.Response(429, text="slow down") if json.loads(req.content)["offset"] == 40 else handler(req)))
+    known = {job_id(p["externalPath"]) for p in postings}
+    adapter = WorkdayAdapter()
+    async with httpx.AsyncClient() as client:
+        jobs = await adapter.fetch(client, WD_SLUG, full=True, known_ids=known)
+        assert len(jobs) == 40 and not adapter.last_fetch_complete(WD_SLUG)
+        # patient retries on list pages: 5, 10, 20, 40, 60 s
+        assert waits == [5.0, 10.0, 20.0, 40.0, 60.0]
+        assert workday.LIST_RETRIES == 5
+        # a partial scan keeps the pages it read too (all new here, so it reads on until the 429 at offset 40)
+        new = [wd_posting(i, "Posted Today") for i in range(60)]
+        new_handler, _ = wd_pages(new)
+        respx.post(f"{WD_API}/jobs").mock(side_effect=lambda req: (
+            httpx.Response(429, text="slow down") if json.loads(req.content)["offset"] == 40 else new_handler(req)))
+        jobs = await adapter.fetch(client, WD_SLUG, full=False, known_ids={job_id(p["externalPath"]) for p in new})
+        assert len(jobs) == 40
+
+    respx.post(f"{WD_API}/jobs").mock(return_value=httpx.Response(429, text="slow down"))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=known)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_host_without_a_wd_number():
+    # NXP's wd3 host shows Workday's maintenance page; the tenant answers at nxp.myworkdayjobs.com.
+    handler, _ = wd_pages([wd_posting(1)])
+    respx.post("https://nxp.myworkdayjobs.com/wday/cxs/nxp/careers/jobs").mock(side_effect=handler)
+    async with httpx.AsyncClient() as client:
+        jobs = await WorkdayAdapter().fetch(client, "nxp|-|careers", known_ids={"JR1001-1"})
+    assert [j.url for j in jobs] == ["https://nxp.myworkdayjobs.com/careers/job/US-TX-Austin/Engineer-1_JR1001-1"]
+
+
+def test_workday_hosts_without_a_wd_number_are_detected():
+    from app.pipeline.bulk_discovery import _workday_url
+    from app.pipeline.detect import detect_board
+    from app.pipeline.liveness import _workday_api
+
+    assert detect_board("https://nxp.myworkdayjobs.com/careers") == ("workday", "nxp|-|careers")
+    assert detect_board("https://nxp.myworkdayjobs.com/en-US/careers/job/Austin/Engineer_R1") == ("workday", "nxp|-|careers")
+    assert detect_board("https://www.myworkdayjobs.com/") is None
+    assert _workday_api("https://nxp.myworkdayjobs.com/careers/job/Austin/Engineer_R1") == (
+        "https://nxp.myworkdayjobs.com/wday/cxs/nxp/careers/job/Austin/Engineer_R1")
+    assert _workday_url("nxp|-|careers") == "https://nxp.myworkdayjobs.com/careers"
+    assert _workday_url("nvidia|wd5|Ext") == "https://nvidia.wd5.myworkdayjobs.com/Ext"
+
+
 # --- SmartRecruiters ---------------------------------------------------------------------------
 
 SR_API = "https://api.smartrecruiters.com/v1/companies/ServiceNow/postings"
@@ -488,3 +552,17 @@ def test_registry_settings():
         assert ADAPTERS[ats].complete_feed
     assert ADAPTERS["remotive"].min_interval_minutes == 360
     assert ADAPTERS["workday"].full_scan_every > 1
+
+
+def test_workday_pinned_offsets_survive_a_restart(tmp_path, monkeypatch):
+    """A restart used to forget where each board's pinned block ends, so every board's next scan was a full one."""
+    path = tmp_path / "workday_state.json"
+    monkeypatch.setattr(WorkdayAdapter, "_state_path", lambda self: path)
+    first = WorkdayAdapter()
+    first._load_state()
+    first._pinned["acme|wd1|External"] = 40
+    first._capped.add("big|wd5|Careers")
+    first._save_state()
+    again = WorkdayAdapter()  # a new process
+    again._load_state()
+    assert again._pinned == {"acme|wd1|External": 40} and not again.last_fetch_complete("big|wd5|Careers")

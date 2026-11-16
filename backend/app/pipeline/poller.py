@@ -5,22 +5,28 @@ Run one poll by hand:  python -m app.pipeline.poller --once
 
 import argparse
 import asyncio
+import contextlib
 import logging
+import re
+import socket
+import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, inspect, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from app.config import settings
 from app.db import SessionLocal, init_db
-from app.h1b import sponsor_index
+from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
-from app.notify.email import send_alert
 from app.pipeline.dedupe import find_original, fingerprint
+from app.pipeline.listing_quality import listing_flag
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
 from app.pipeline.liveness import verify_due
@@ -28,17 +34,18 @@ from app.pipeline.startup_lists import maybe_sync_lists
 from app.pipeline.startups import maybe_sync_yc
 from app.pipeline.filters import is_us_location, role_matches
 from app.pipeline.locations import parse_locations
-from app.pipeline.normalize import company_key, experience_level, experience_years, listed_window, seniority
+from app.pipeline.normalize import clean_title, company_key, experience_level, experience_years, listed_window, seniority
 from app.everify import status_for as everify_status
 from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, says_sponsors, student_visa_signal
 from app.prefs import get_prefs, sync_companies
-from app.sources import ADAPTERS, NormalizedJob
+from app.sources import ADAPTERS, NormalizedJob, http_util
 
 log = logging.getLogger(__name__)
 
 USER_AGENT = "job-portal-personal/0.1 (personal job search tool)"
 # How stale a still-listed job's last_seen_at may get before it is rewritten (see process_company).
-LAST_SEEN_RESOLUTION = timedelta(hours=6)
+LAST_SEEN_RESOLUTION = timedelta(hours=24)  # was 6 h: on the cloud server's slow disk those rewrites (~80 a second
+# across 1.8M jobs) were a quarter of the fast lane's saving time; aggregators close after stale_days (14), so a day is enough
 
 
 def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
@@ -59,6 +66,9 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.sponsors_text = not job.no_sponsor and says_sponsors(job.description)
     job.everify = everify_status(session, job.company_name or "")
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
+    job.employer_kind = job_employer_kind(job.company_name or "", job.company.ats if job.company else "",
+                                          sponsor_index(session))
+    job.listing_flag = listing_flag(job.title, job.description)
     job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
 
@@ -120,8 +130,134 @@ def refresh_role_match_for(terms: list[str], include: list[str], exclude: list[s
 # Shorter than this, a job counts as having no description (enrichment and the UI fetch it again).
 MIN_DESCRIPTION_CHARS = 100
 
-# Failed polls in a row after which a never-working board that answers 404/410 is switched off.
+# Failed polls in a row after which a never-working board is switched off, by its answer: "not found" (404,
+# 410) and "no such site" (422: Workday's unknown tenant or site, Polymer) are dead links; 403 may be a
+# temporary block, so it takes longer. On 2026-11-10, 160 Workday 422s, 54 Workday 403s and 10 Polymer 422s
+# from discovery had never worked and were retried every 3 hours. A board that ever worked is never switched off.
+# Since 2026-11-12 also 400 and 401 (a wrong slug or a private board: Check24, Gensler, Mercari, a SmartRecruiters
+# "board" named robots.txt from crawl data), and server errors after 20 tries in a row (about 2.5 days at one try
+# every 3 hours: three Whole Foods Workday sites had answered 502 every time since they were found).
 DEAD_BOARD_FAILS = 3
+SERVER_ERROR_FAILS = 20
+DEAD_BOARD_RULES = {"HTTP 404": DEAD_BOARD_FAILS, "HTTP 410": DEAD_BOARD_FAILS, "HTTP 422": DEAD_BOARD_FAILS,
+                    "HTTP 400": DEAD_BOARD_FAILS, "HTTP 401": DEAD_BOARD_FAILS, "HTTP 403": 10,
+                    "HTTP 500": SERVER_ERROR_FAILS, "HTTP 502": SERVER_ERROR_FAILS, "HTTP 503": SERVER_ERROR_FAILS,
+                    "HTTP 504": SERVER_ERROR_FAILS}
+
+
+# Any other error on a board that has never worked, after this many tries in a row (about 30 hours at one try
+# every 3 hours). Adapters say "this isn't a board" with a ValueError ("no Avature job sitemap for ...", "no Taleo
+# REST career section at ..."), and a host that no longer exists fails to resolve. On 2026-11-15, 15 Avature and
+# Taleo "boards" from discovery had failed 7 to 37 times each and were still retried: loan and IT-support
+# sign-in portals taken for Avature, sites behind a bot challenge, and front ends of boards tracked already.
+# Timeouts and rate limits are left out: those boards may well work.
+NEVER_WORKED_FAILS = 10
+TEMPORARY_ERRORS = ("ReadTimeout", "ConnectTimeout", "PoolTimeout", "WriteTimeout", "HTTP 429")
+
+
+def is_dead_board(company: Company, error: str) -> bool:
+    if company.last_ok_at is not None:
+        return False
+    code = " ".join(str(error).split()[:2])  # "HTTP 404"
+    if code in DEAD_BOARD_RULES:
+        return company.fail_streak >= DEAD_BOARD_RULES[code]
+    if str(error).startswith(TEMPORARY_ERRORS) or code.startswith("HTTP"):
+        return False
+    return company.fail_streak >= NEVER_WORKED_FAILS
+
+
+# A board that worked before but now says "not found" has usually moved: the employer switched ATS (Parloa,
+# Mindbody, Kayak and ClassPass went from Greenhouse to Ashby) or took its board down. Failed fetches close no
+# jobs, so its open jobs stayed in the Feed for good (ClassPass: 51, from a board gone since 2026-11-12), and
+# it was retried every 3 hours. After MOVED_BOARD_DAYS of nothing but "not found" (at least MOVED_BOARD_FAILS
+# tries, so a short outage never counts), it's switched off and its open jobs are closed. Discovery and
+# harvesting add the new board when they meet it.
+# 401 too ("Unable to verify": a Workday career site the employer unpublished, whose page redirects to Workday's
+# "outage" page: BDO, Magellan Health, Mount Holyoke), and Workday's own 403 ("permission denied", 23andMe,
+# Marmon). A 403 from other platforms is more often a temporary block (Rippling's Cloudflare, 2026-11-14), so it
+# doesn't count there; Workday's blocks come as 429.
+MOVED_BOARD_DAYS = 3
+MOVED_BOARD_FAILS = 10
+GONE_ERRORS = ("HTTP 404", "HTTP 410", "HTTP 401")
+GONE_ERRORS_BY_ATS = {"workday": ("HTTP 403",)}
+
+
+def is_gone_board(company: Company, error: str, now: datetime) -> bool:
+    if company.last_ok_at is None:
+        return False
+    code = " ".join(str(error).split()[:2])
+    gone = code in GONE_ERRORS or code in GONE_ERRORS_BY_ATS.get(company.ats, ())
+    return (gone and (company.fail_streak or 0) >= MOVED_BOARD_FAILS
+            and company.last_ok_at <= now - timedelta(days=MOVED_BOARD_DAYS))
+
+
+def close_gone_board(session: Session, company: Company, now: datetime) -> int:
+    """Switch off a board that's gone and close its open jobs (one 'closed' event each). Commits."""
+    ids = list(session.scalars(select(Job.id).where(Job.company_id == company.id, Job.closed_at.is_(None))))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        session.execute(update(Job).where(Job.id.in_(chunk)).values(closed_at=now)
+                        .execution_options(synchronize_session=False))
+        session.add_all(JobEvent(job_id=j, kind="closed", at=now, detail="its board is gone (not found for days)")
+                        for j in chunk)
+    closed = set(ids)
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, Job) and obj.id in closed:
+            session.expire(obj)
+    company.enabled = False
+    session.commit()
+    return len(ids)
+
+
+def close_stale_of_disabled(session: Session, now: datetime) -> int:
+    """Close open jobs of switched-off sources not seen for stale_days. A source that's off is never polled, so
+    its jobs never closed: The Muse's 1,275 and Adzuna's 640 stayed in the Feed for good (2026-11-15). Commits."""
+    cutoff = now - timedelta(days=settings.stale_days)
+    off = list(session.scalars(select(Company.id).where(Company.enabled.is_(False))))
+    ids: list[int] = []
+    for i in range(0, len(off), 500):
+        ids += session.scalars(select(Job.id).where(Job.company_id.in_(off[i:i + 500]), Job.closed_at.is_(None),
+                                                    Job.last_seen_at < cutoff))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        session.execute(update(Job).where(Job.id.in_(chunk)).values(closed_at=now)
+                        .execution_options(synchronize_session=False))
+        session.add_all(JobEvent(job_id=j, kind="closed", at=now,
+                                 detail=f"its source is switched off and it wasn't seen for {settings.stale_days} days")
+                        for j in chunk)
+    session.commit()
+    return len(ids)
+
+
+# A failed name lookup ("getaddrinfo failed") is either a dead host or this machine being offline (Wi-Fi not
+# back after sleep). On 2026-11-10 one poll right after waking failed 15,973 boards that way, and the idle
+# rule then left them unchecked for 3 hours. So a lookup failure is first checked against a few hosts that
+# are always up: if those fail too, the machine is offline and the board is simply tried again next poll.
+_LOOKUP_FAILED = re.compile(r"getaddrinfo failed|Name or service not known|nodename nor servname|"
+                            r"Temporary failure in name resolution|No address associated with hostname", re.I)
+ONLINE_PROBE_HOSTS = ("www.google.com", "boards-api.greenhouse.io", "www.cloudflare.com")
+_online_cache: tuple[float, bool] | None = None
+
+
+def _resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except OSError:
+        return False
+
+
+async def is_offline(error: str) -> bool:
+    """True if `error` is a failed name lookup and this machine can't resolve well-known hosts either.
+    Answers are cached for 30 s, so a poll with thousands of such errors checks only a few times."""
+    global _online_cache
+    if not _LOOKUP_FAILED.search(error or ""):
+        return False
+    now = time.monotonic()
+    if _online_cache is None or now - _online_cache[0] > 30:
+        results = await asyncio.gather(*(asyncio.to_thread(_resolves, h) for h in ONLINE_PROBE_HOSTS))
+        _online_cache = (now, any(results))
+    return not _online_cache[1]
 
 
 def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
@@ -134,6 +270,10 @@ def is_alert_worthy(job: Job, prefs: UserPrefs) -> bool:
         and not (prefs.hide_no_sponsor and job.no_sponsor)
         and not (prefs.exclude_senior and job.exp_level == "senior")
     )
+
+
+def _is_aggregator(company: Company) -> bool:
+    return bool(getattr(ADAPTERS.get(company.ats), "aggregator", False))
 
 
 def process_company(
@@ -150,46 +290,54 @@ def process_company(
     gap_start = company.last_ok_at or (company.last_polled_at if (company.last_status or "").startswith("ok") else None)
     if gap_start is not None and now - gap_start <= timedelta(minutes=settings.listed_exact_gap_minutes):
         gap_start = None
-    # Descriptions are most of the table's size: leave them unloaded, and only note which jobs lack one.
-    existing = {j.external_id: j for j in session.scalars(
-        select(Job).where(Job.company_id == company.id).options(defer(Job.description)))}
-    undescribed = set(session.scalars(select(Job.id).where(
-        Job.company_id == company.id, Job.described.is_(False))))
+    # The few columns the reconcile needs, read from the covering index ix_jobs_company_sync: loading every job
+    # as a full row (even with the description deferred) read past each description's overflow pages and was
+    # 95% of a save. Changes are written as UPDATEs by id; a full Job is loaded only to fill in a description.
+    existing = {r.external_id: r for r in session.execute(
+        select(Job.external_id, Job.id, Job.last_seen_at, Job.missed_polls, Job.closed_at, Job.described)
+        .where(Job.company_id == company.id))}
+    refresh_seen: list[int] = []  # last_seen_at older than LAST_SEEN_RESOLUTION
+    reset_missed: list[int] = []
+    reopened: list[int] = []
     seen_ids = set()
     new_jobs: list[Job] = []
     same_poll_ids: set[int] = set()
+    titles: dict = {}  # dedupe.find_original's per-employer title index, built once per save
+    aggregator = _is_aggregator(company)
+    flip_later: list[tuple[int, Job, str]] = []  # (aggregator copy's id, the board's new job, board name)
     pending: deque[Job] = deque()  # new jobs whose ids haven't been moved into same_poll_ids yet
 
     for nj in fetched:
         if nj.external_id in seen_ids:
             continue
         seen_ids.add(nj.external_id)
-        job = existing.get(nj.external_id)
-        if job is not None:
+        row = existing.get(nj.external_id)
+        if row is not None:
             # Only write when something changed. Rewriting last_seen_at on every job every poll rewrote
             # ~900k rows (with their descriptions) per pass and held the write lock for tens of seconds.
             # last_seen_at only has to be accurate to the day (aggregators close after stale_days).
-            if job.last_seen_at is None or now - job.last_seen_at > LAST_SEEN_RESOLUTION:
-                job.last_seen_at = now
-            if job.missed_polls:
-                job.missed_polls = 0
-            if job.id in undescribed and nj.description:
+            if row.last_seen_at is None or now - row.last_seen_at > LAST_SEEN_RESOLUTION:
+                refresh_seen.append(row.id)
+            if row.missed_polls:
+                reset_missed.append(row.id)
+            if not row.described and nj.description:
                 # Enrichment: saved without its details (e.g. a Workday first scan), fetched now.
+                job = session.get(Job, row.id)
                 job.description = nj.description
                 job.posted_at = job.posted_at or nj.posted_at
                 job.location = nj.location[:400] or job.location
                 job.remote = job.remote or nj.remote
                 with session.no_autoflush:
                     apply_flags(session, job, prefs)
-            if job.closed_at is not None:
-                job.closed_at = None
-                session.add(JobEvent(job=job, kind="reopened", at=now))
+            if row.closed_at is not None:
+                reopened.append(row.id)
+                session.add(JobEvent(job_id=row.id, kind="reopened", at=now))
             continue
 
         job = Job(
             company=company,
             external_id=nj.external_id,
-            title=nj.title[:400],
+            title=clean_title(nj.title)[:400],
             company_name=(nj.company_name or company.name)[:200],
             location=nj.location[:400],
             remote=nj.remote,
@@ -214,10 +362,16 @@ def process_company(
             apply_flags(session, job, prefs)
             original = find_original(
                 session, job.company_key, nj.title, nj.location, nj.description, now,
-                settings.repost_window_days, same_poll_ids, company.id,
+                settings.repost_window_days, same_poll_ids, company.id, titles,
+                url=nj.url, aggregator=aggregator,
             )
         kind, detail = "seen", ""
-        if original is not None:
+        if (original is not None and original.closed_at is None and original.company_id != company.id
+                and not aggregator and _is_aggregator(original.company)):
+            # The employer's own board has the job an aggregator listed first (SimplifyJobs, Google Jobs): keep
+            # this copy, with its full description and direct link, and mark the aggregator's as the duplicate.
+            flip_later.append((original.id, job, company.name))
+        elif original is not None:
             job.is_repost = True
             job.repost_of_id = original.id
             if original.closed_at is None and original.company_id != company.id:
@@ -238,25 +392,127 @@ def process_company(
             # SQLite write lock is never held long enough to block the other lane or the API.
             session.commit()
 
-    for ext_id, job in existing.items():
-        if ext_id in seen_ids or job.closed_at is not None:
+    missed: dict[int, list[int]] = {}  # new missed_polls -> job ids still short of closing
+    to_close: list[int] = []
+    for ext_id, row in existing.items():
+        if ext_id in seen_ids or row.closed_at is not None:
             continue
         if complete:
             # Gone from a complete listing: close after enough misses in a row.
-            job.missed_polls += 1
-            if job.missed_polls >= settings.missed_polls_to_close:
-                job.closed_at = now
-                session.add(JobEvent(job=job, kind="closed", at=now))
-        elif not ADAPTERS[company.ats].complete_feed and job.last_seen_at < now - timedelta(days=settings.stale_days):
-            # Aggregators only list recent jobs, so age jobs out instead.
-            job.closed_at = now
-            session.add(JobEvent(job=job, kind="closed", at=now, detail=f"not seen for {settings.stale_days} days"))
+            misses = (row.missed_polls or 0) + 1
+            if misses >= settings.missed_polls_to_close:
+                to_close.append(row.id)
+                session.add(JobEvent(job_id=row.id, kind="closed", at=now))
+            missed.setdefault(misses, []).append(row.id)
+        elif ((not ADAPTERS[company.ats].complete_feed or ADAPTERS[company.ats].capped_ages_out)
+              and row.last_seen_at < now - timedelta(days=settings.stale_days)):
+            # Aggregators (and capped newest-N feeds) only list recent jobs, so age jobs out instead.
+            to_close.append(row.id)
+            session.add(JobEvent(job_id=row.id, kind="closed", at=now, detail=f"not seen for {settings.stale_days} days"))
+
+    touched: set[int] = set()
+
+    def bulk(ids: list[int], **values) -> None:
+        touched.update(ids)
+        for i in range(0, len(ids), 500):  # SQLite's limit on bound parameters
+            session.execute(update(Job).where(Job.id.in_(ids[i:i + 500])).values(**values)
+                            .execution_options(synchronize_session=False))
+
+    bulk(refresh_seen, last_seen_at=now)
+    bulk(reset_missed, missed_polls=0)
+    bulk(reopened, closed_at=None)
+    for misses, ids in missed.items():
+        bulk(ids, missed_polls=misses)
+    bulk(to_close, closed_at=now)
+    # Jobs this session already holds (added in an earlier poll of the same session, as in tests, or loaded
+    # for enrichment) would keep their old values: let them reload on next access.
+    for job_id in touched:
+        obj = session.identity_map.get(identity_key(Job, job_id))
+        if obj is not None:
+            session.expire(obj, ["last_seen_at", "missed_polls", "closed_at"])
+
+    if flip_later:
+        session.flush()  # the board's new jobs need their ids
+        for copy_id, job, board_name in flip_later:
+            session.execute(update(Job).where(Job.id == copy_id).values(is_repost=True, repost_of_id=job.id)
+                            .execution_options(synchronize_session=False))
+            obj = session.identity_map.get(identity_key(Job, copy_id))
+            if obj is not None:
+                session.expire(obj, ["is_repost", "repost_of_id"])
+            session.add(JobEvent(job_id=copy_id, kind="duplicate", at=now,
+                                 detail=f"also listed on {board_name}'s own board (job {job.id})"))
 
     company.poll_count += 1
     company.last_polled_at = now
     company.last_ok_at = now
     company.last_status = f"ok ({len(seen_ids)} {'open' if complete else 'fetched'})"
     return new_jobs
+
+
+RETRY_FAILS = 2  # failures in a row a previously working board is retried at its normal pace
+
+
+# Activity-paced polling (2026-11-12). Checking all ~13,600 fast-lane boards every 5 minutes needed more CPU than
+# the 2-vCPU cloud server has in the US daytime (a poll saved ~8,350 of ~12,400 due boards, so Greenhouse boards
+# waited ~76 minutes), while only ~2,000 of them had posted in the last day. A board's pace now follows how
+# recently it posted: within a day, its normal interval; within a week, twice that; otherwise (or empty) four
+# times (fast lane: 5 / 10 / 20 minutes). A board that posts something new is back at full pace at once.
+ACTIVITY_REFRESH_SECONDS = 3600
+QUIET_FACTORS = ((1, 1), (7, 2))  # (posted within N days, interval factor); older or empty boards: QUIET_FACTOR
+QUIET_FACTOR = 4
+# Per worker process: each board's newest job id, and the job-id boundaries of 1 and 7 days ago.
+_activity: dict = {"at": None, "max_id": {}, "cuts": {}}
+_activity_lock = threading.Lock()
+
+
+def _load_activity() -> None:
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as session:
+        cuts = {days: session.scalar(select(func.max(JobEvent.job_id)).where(
+            JobEvent.kind == "seen", JobEvent.at < now - timedelta(days=days))) or 0 for days, _ in QUIET_FACTORS}
+        hint = "INDEXED BY ix_jobs_company_described " if session.get_bind().dialect.name == "sqlite" else ""
+        max_id = dict(session.execute(text(f"SELECT company_id, max(id) FROM jobs {hint}GROUP BY company_id")).all())
+    _activity.update(max_id=max_id, cuts=cuts)
+
+
+def refresh_activity(*, wait: bool = False) -> None:
+    """Refresh _activity at most every ACTIVITY_REFRESH_SECONDS, in a background thread (the boundary lookup takes
+    ~20 s on the cloud server) unless wait. Until the first load finishes every board keeps its normal pace."""
+    with _activity_lock:
+        at = _activity["at"]
+        if at is not None and time.monotonic() - at < ACTIVITY_REFRESH_SECONDS:
+            return
+        _activity["at"] = time.monotonic()
+
+    def load() -> None:
+        try:
+            _load_activity()
+        except Exception:
+            log.warning("Board activity not refreshed", exc_info=True)
+            _activity["at"] = None  # try again next poll
+
+    if wait:
+        load()
+    else:
+        threading.Thread(target=load, daemon=True).start()
+
+
+def note_new_jobs(company_id: int) -> None:
+    """A board just posted something new: full pace until the next refresh shows it anyway."""
+    _activity["max_id"][company_id] = sys.maxsize
+
+
+def activity_factor(company: Company) -> int:
+    """How many times its normal interval a board waits, from how recently it posted (QUIET_FACTORS). While the
+    database holds less than that much history (a boundary of 0) or before the first load, 1."""
+    cuts = _activity["cuts"]
+    if not settings.activity_pacing or not cuts:
+        return 1
+    newest = _activity["max_id"].get(company.id, 0)
+    for days, factor in QUIET_FACTORS:
+        if newest > cuts[days] or cuts[days] == 0:
+            return factor
+    return QUIET_FACTOR
 
 
 def _due(company: Company, now: datetime) -> bool:
@@ -266,10 +522,21 @@ def _due(company: Company, now: datetime) -> bool:
     if company.last_polled_at is None:
         return True
     interval = adapter.min_interval_minutes
+    factor = activity_factor(company)
+    if factor > 1:  # boards with no interval of their own (Greenhouse, Lever...) go at the lane's poll pace
+        interval = max(interval, settings.poll_minutes) * factor
     # Boards with no open jobs, or whose last fetch failed, are checked less often: with thousands of
-    # discovered boards, most are small companies that post rarely.
+    # discovered boards, most are small companies that post rarely. But a board that has worked before gets
+    # RETRY_FAILS tries at its normal pace first: one timeout or 502 used to park Accenture, Micron and
+    # Prime Healthcare (2-3k jobs each) for 3 hours, and all of them answered fine minutes later.
+    # Empty boards are checked at the normal pace too (except in the rate-limited bulk lane): a small company's
+    # first new job is exactly the kind found hours late on LinkedIn, and since polls save every due board
+    # (lanes in their own processes, 2026-11-10) the 1,678 empty fast-lane boards cost about a minute a poll.
     status = company.last_status or ""
-    if status.startswith(("ok (0 ", "error")):
+    failing = status.startswith("error")
+    retry_soon = failing and company.last_ok_at is not None and (company.fail_streak or 0) <= RETRY_FAILS
+    empty_and_slowed = status.startswith("ok (0 ") and adapter.lane == "bulk"
+    if empty_and_slowed or (failing and not retry_soon):
         interval = max(interval, settings.idle_poll_minutes)
     if interval <= 0:
         return True
@@ -277,20 +544,35 @@ def _due(company: Company, now: datetime) -> bool:
     return now - company.last_polled_at >= timedelta(minutes=interval - 1)
 
 
-async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Company, known_ids: set[str]):
-    adapter = ADAPTERS[company.ats]
-    full = company.poll_count % adapter.full_scan_every == 0
+def _source_info(company: Company) -> tuple[str, str, int, str]:
+    """What a fetch needs to know about its source, read when the poll starts: (ats, slug, poll_count, name)."""
+    return company.ats, company.slug, company.poll_count or 0, company.name
+
+
+async def _fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, company: Company, known_ids: set[str],
+                 info: tuple[str, str, int, str] | None = None):
+    """Fetch one source. It never touches the database session: `info` is read before the poll's saves begin.
+
+    Saves run in a worker thread and commit, which expires every company in the session. Reading company.slug
+    here after waiting for a fetch slot then loaded it on the event loop while that thread was flushing the
+    same session: on the cloud server's slower disk (2026-11-11) that corrupted it ("Session.add() is not
+    supported within the execution stage of the flush", then an INSERT of a job with a stale id: UNIQUE
+    constraint failed: jobs.id), and every later query in the slow and bulk lanes' runs failed.
+    """
+    ats, slug, poll_count, name = info or _source_info(company)
+    adapter = ADAPTERS[ats]
+    full = poll_count % adapter.full_scan_every == 0
     async with sem:
         try:
-            jobs = await adapter.fetch(client, company.slug, full=full, known_ids=known_ids, first_scan=company.poll_count == 0)
-            complete = adapter.complete_feed and full and adapter.last_fetch_complete(company.slug)
+            jobs = await adapter.fetch(client, slug, full=full, known_ids=known_ids, first_scan=poll_count == 0)
+            complete = adapter.complete_feed and full and adapter.last_fetch_complete(slug)
             return company, jobs, complete, None
         except httpx.HTTPStatusError as e:
             return company, None, False, f"HTTP {e.response.status_code}"
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
             return company, None, False, f"{type(e).__name__}: {e}"[:300]
         except Exception as e:  # an adapter bug must only fail its own source, never the whole poll
-            log.exception("Unexpected error fetching %s (%s/%s)", company.name, company.ats, company.slug)
+            log.exception("Unexpected error fetching %s (%s/%s)", name, ats, slug)
             return company, None, False, f"{type(e).__name__}: {e}"[:300]
 
 
@@ -298,6 +580,26 @@ def _save(session: Session, company: Company, fetched: list[NormalizedJob], pref
     new_jobs = process_company(session, company, fetched, prefs, now, complete=complete, commit_every=200)
     session.commit()  # per source, so the write lock is held only briefly
     return new_jobs
+
+
+SAVE_TRIES = 3  # a save that failed only because the database stayed locked is tried again
+
+
+def _recover_failed_save(session: Session, company: Company) -> Company | None:
+    """After a save failed: roll back, and return the source (None if it no longer exists)."""
+    company_id = inspect(company).identity[0]
+    session.rollback()
+    return session.get(Company, company_id)
+
+
+def _record_save_error(session: Session, company: Company | None, error: Exception) -> None:
+    if company is None:
+        return
+    company.last_status = f"error: save failed ({type(error).__name__})"
+    try:
+        session.commit()
+    except SQLAlchemyError:  # still locked: the status waits for the next save
+        session.rollback()
 
 
 async def poll_once(lane: str | None = None) -> dict:
@@ -315,6 +617,8 @@ async def poll_once(lane: str | None = None) -> dict:
         if lane in (None, "fast"):  # one lane adds new companies, so two lanes starting together can't both insert them
             sync_companies(session, settings.companies_file)
         prefs = get_prefs(session)
+        if settings.activity_pacing:
+            refresh_activity()  # background, hourly: how recently each board posted (activity_factor)
         companies = [
             c for c in session.scalars(select(Company).where(Company.enabled.is_(True)))
             if _due(c, now) and (lane is None or ADAPTERS[c.ats].lane == lane)
@@ -345,12 +649,23 @@ async def poll_once(lane: str | None = None) -> dict:
 
         # One pool of fetch slots per ATS, so a few slow Workday boards can't hold every slot.
         lap("prepare")
-        sems = {
-            ats: asyncio.Semaphore(ADAPTERS[ats].max_concurrency or settings.poll_concurrency)
-            for ats in {c.ats for c in companies}
-        }
-        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
-            fetches = [asyncio.ensure_future(_fetch(client, sems[c.ats], c, known.get(c.id, set()))) for c in companies]
+        sems_size = {ats: ADAPTERS[ats].max_concurrency or settings.poll_concurrency for ats in {c.ats for c in companies}}
+        sems = {ats: asyncio.Semaphore(n) for ats, n in sems_size.items()}
+        # One client per ATS, its pool sized to that ATS's fetch slots (http_util.platform_client). With one shared
+        # 300-connection pool, httpcore checked every pooled connection on each request; platforms that give each
+        # employer its own host (BambooHR, Breezy, Recruitee) filled it with one-off connections, and on 2026-11-13
+        # the fast lane's event loop spent ~65% of its CPU there and saved ~450 of ~15,900 boards a poll.
+        async with contextlib.AsyncExitStack() as stack:
+            clients = {ats: await stack.enter_async_context(http_util.platform_client(
+                sems_size[ats], timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True))
+                for ats in sems}
+            # Harvest, YC/list syncs, liveness checks and discovery: many hosts, a few requests each.
+            client = await stack.enter_async_context(http_util.platform_client(
+                settings.poll_concurrency, timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True))
+            # Each fetch gets its source's details now, before any save can expire them (see _fetch).
+            fetches = [asyncio.ensure_future(_fetch(clients[c.ats], sems[c.ats], c, known.get(c.id, set()),
+                                                    _source_info(c)))
+                       for c in companies]
             # A poll ends by its deadline so the next one starts on time: one slow batch of boards
             # mustn't keep every other board from being checked again for an hour. Sources not
             # reached keep their last_polled_at, so they're first in line next time.
@@ -361,7 +676,8 @@ async def poll_once(lane: str | None = None) -> dict:
             employers: list[str] = []
             links: list[tuple[str, str]] = []  # (employer, job URL) from aggregators, to find their boards
             # Save each source as soon as it's fetched, so fast boards show up while slow ones are still going.
-            cut_short, saving = 0, 0.0
+            cut_short, saving, offline, taken = 0, 0.0, 0, 0
+            loop_started = time.monotonic()
             for next_done in asyncio.as_completed(fetches, timeout=deadline * 60 if deadline else None):
                 try:
                     company, fetched, complete, error = await next_done
@@ -371,34 +687,69 @@ async def poll_once(lane: str | None = None) -> dict:
                         f.cancel()
                     log.info("%s lane hit its %d-minute deadline; %d sources wait for the next poll", lane, deadline, cut_short)
                     break
+                taken += 1
+                if deadline and time.monotonic() - loop_started > deadline * 60:
+                    # The deadline covers saving too: on 2026-11-10 a poll after a 3-hour backlog had every
+                    # fetch done in minutes, then spent 72 minutes saving 12,603 boards, and no fast board was
+                    # rechecked meanwhile. Unsaved sources keep their last check, so they're first next time.
+                    cut_short = len(fetches) - taken + 1
+                    for f in fetches:
+                        f.cancel()
+                    log.info("%s lane hit its %d-minute deadline while saving; %d sources wait for the next poll",
+                             lane, deadline, cut_short)
+                    break
+                if error is not None and await is_offline(error):
+                    # This machine is offline: the board isn't failing. Leave its last check as it was,
+                    # so it's due again (and first in line) on the next poll.
+                    offline += 1
+                    continue
                 if error is not None:
                     # Don't touch the source's jobs: a failed fetch says nothing about whether they closed.
                     errors += 1
                     company.last_polled_at = now
                     company.last_status = f"error: {error}"
                     company.fail_streak = (company.fail_streak or 0) + 1
-                    if company.last_ok_at is None and company.fail_streak >= DEAD_BOARD_FAILS and str(error).startswith(("HTTP 404", "HTTP 410")):
+                    if is_dead_board(company, error):
                         # A board that has never worked and keeps saying "not found" is a dead link from
                         # discovery or a list (2,078 of them were retried every 3 hours): switch it off.
                         company.enabled = False
                         company.last_status = f"error: {error} (switched off: this board never worked)"
+                    elif is_gone_board(company, error, now):
+                        # Awaited here like a save, so the session is never used by two threads at once.
+                        closed = await asyncio.to_thread(close_gone_board, session, company, now)
+                        company.last_status = (f"error: {error} (switched off: gone for "
+                                               f"{MOVED_BOARD_DAYS}+ days; {closed} open jobs closed)")
+                        log.warning("%s (%s/%s) is gone: switched off, %d open jobs closed",
+                                    company.name, company.ats, company.slug, closed)
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
                     continue
-                try:
-                    # In a worker thread: saving a big board takes seconds, and on the event loop it froze
-                    # every download in flight. One save at a time, so the session is never shared.
-                    started_save = time.monotonic()
-                    new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
-                    saving += time.monotonic() - started_save
-                except SQLAlchemyError as e:
-                    # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
-                    session.rollback()
-                    errors += 1
-                    log.exception("Saving %s (%s/%s) failed", company.name, company.ats, company.slug)
-                    company.last_status = f"error: save failed ({type(e).__name__})"
-                    session.commit()
+                # Read before saving: after a failed save, touching the board's attributes would flush it.
+                label = f"{company.name} ({company.ats}/{company.slug})"
+                new_jobs = None
+                for attempt in range(SAVE_TRIES):
+                    try:
+                        # In a worker thread: saving a big board takes seconds, and on the event loop it froze
+                        # every download in flight. One save at a time, so the session is never shared.
+                        started_save = time.monotonic()
+                        new_jobs = await asyncio.to_thread(_save, session, company, fetched, prefs, now, complete)
+                        saving += time.monotonic() - started_save
+                        break
+                    except SQLAlchemyError as e:
+                        # One source failing (e.g. the database stayed locked) mustn't break the rest of the poll.
+                        company = await asyncio.to_thread(_recover_failed_save, session, company)
+                        if company is not None and "database is locked" in str(e) and attempt + 1 < SAVE_TRIES:
+                            log.warning("Saving %s: database locked, trying again", label)
+                            await asyncio.sleep(5 * (attempt + 1))
+                            continue
+                        errors += 1
+                        log.exception("Saving %s failed", label)
+                        await asyncio.to_thread(_record_save_error, session, company, e)
+                        break
+                if new_jobs is None:
                     continue
                 company.fail_streak = 0
+                if new_jobs:
+                    note_new_jobs(company.id)
                 new_total += len(new_jobs)
                 to_alert += [j for j in new_jobs if is_alert_worthy(j, prefs)]
                 if ADAPTERS[company.ats].aggregator:
@@ -425,9 +776,7 @@ async def poll_once(lane: str | None = None) -> dict:
                 discovered = await discover(session, client, employers, settings.discovery_per_poll)
             lap("discover")
 
-        emailed = False
-        if to_alert and prefs.email_alerts:
-            emailed = send_alert(to_alert)
+        emailed = False  # alerts are per user and opt-in now: pipeline/alerts.deliver_alerts, after each fast poll
         for j in to_alert:
             j.alerted = True
         session.commit()
@@ -436,7 +785,7 @@ async def poll_once(lane: str | None = None) -> dict:
         "lane": lane or "all",
         "sources": len(companies), "errors": errors, "new_jobs": new_total, "matches": len(to_alert),
         "emailed": emailed, "discovered": [c.name for c in discovered],
-        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short, "timings": timings,
+        "harvested": len(harvested), "closed_by_check": verified_closed, "cut_short": cut_short, "offline": offline, "timings": timings,
     }
     log.info("Poll finished: %s", summary)
     return summary

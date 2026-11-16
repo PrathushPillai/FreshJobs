@@ -6,6 +6,7 @@ fetches the HTML and runs detect_board on the ATS links, iframes and scripts emb
 """
 
 import html as htmllib
+import importlib
 import re
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -19,13 +20,53 @@ _SUBDOMAIN_BOARDS = {".bamboohr.com": "bamboohr", ".recruitee.com": "recruitee",
 _NOT_A_BOARD = {"www", "app", "api", "help", "support", "status", "blog", "marketing", "careers", "jobs"}
 
 
+# Adapters for careers-site platforms that carry their own detection: `detect(url) -> slug | None` for their
+# URLs, and `PAGE_MARKER` + `slug_from_page(url, html)` for a careers page built on them. The ATS name is the
+# module name. Imported lazily (adapters may import this module).
+PLUGIN_SOURCES = ("phenom", "jibe", "radancy", "avature", "taleo", "ukg", "paycom", "dayforce", "adp", "paylocity",
+                  "jobdiva", "jobvite", "zoho", "manatal", "bullhorn")
+_plugin_modules: list | None = None
+
+
+def plugins() -> list:
+    global _plugin_modules
+    if _plugin_modules is None:
+        mods = []
+        for name in PLUGIN_SOURCES:
+            try:
+                mods.append(importlib.import_module(f"app.sources.{name}"))
+            except ModuleNotFoundError as e:
+                if e.name != f"app.sources.{name}":
+                    raise
+        _plugin_modules = mods
+    return _plugin_modules
+
+
+def _plugin_name(mod) -> str:
+    return mod.__name__.rsplit(".", 1)[-1]
+
+
 def _first_segment(path: str) -> str:
     parts = [p for p in path.split("/") if p]
     return unquote(parts[0]) if parts else ""
 
 
+# Page scripts build board URLs from templates and JSON (`boards.greenhouse.io/${boardToken}`,
+# `jobs.ashbyhq.com/strava","color":...`). The slug ends at a quote or backtick; a placeholder is no slug.
+_SLUG_END = re.compile(r"[\"'`]")
+_PLACEHOLDER = re.compile(r"[${}<>]")
+
+
 def detect_board(url: str) -> tuple[str, str] | None:
     """(ats, slug) for a careers URL, or None if it isn't a board we know."""
+    hit = _detect_board(url)
+    if not hit:
+        return None
+    slug = _SLUG_END.split(hit[1], 1)[0].strip()
+    return (hit[0], slug) if slug and not _PLACEHOLDER.search(slug) else None
+
+
+def _detect_board(url: str) -> tuple[str, str] | None:
     url = (url or "").strip()
     if not url:
         return None
@@ -61,14 +102,15 @@ def detect_board(url: str) -> tuple[str, str] | None:
         return "ashby", seg
 
     # --- Workday: {tenant}.wd{N}.myworkdayjobs.com/[locale/]{site} ---
-    m = re.match(r"^([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com$", host)
-    if m:
+    m = re.match(r"^([a-z0-9-]+)\.(?:(wd\d+)\.)?myworkdayjobs\.com$", host)
+    if m and m.group(1) != "www":
+        wd = m.group(2) or "-"  # nxp.myworkdayjobs.com has no wdN
         parts = [p for p in path.split("/") if p]
         if parts and parts[0] == "wday":  # the CXS API: /wday/cxs/{tenant}/{site}/...
-            return ("workday", f"{m.group(1)}|{m.group(2)}|{parts[3]}") if len(parts) >= 4 else None
+            return ("workday", f"{m.group(1)}|{wd}|{parts[3]}") if len(parts) >= 4 else None
         parts = [p for p in parts if not _LOCALE.match(p)]
         # Site names never contain dots: robots.txt, llms.txt, sitemap.xml are files at the host's root.
-        return ("workday", f"{m.group(1)}|{m.group(2)}|{parts[0]}") if parts and "." not in parts[0] else None
+        return ("workday", f"{m.group(1)}|{wd}|{parts[0]}") if parts and "." not in parts[0] else None
 
     if host in ("jobs.smartrecruiters.com", "careers.smartrecruiters.com") and seg.lower() not in _RESERVED:
         return "smartrecruiters", seg
@@ -86,7 +128,7 @@ def detect_board(url: str) -> tuple[str, str] | None:
     # --- iCIMS: careers-{x}.icims.com (also other prefixes such as uscareers-{x}) ---
     m = re.match(r"^([a-z0-9]+)-([a-z0-9-]+)\.icims\.com$", host)
     if m:
-        if "internal" in m.group(1) or m.group(1) == "www":  # employee-only portals
+        if "internal" in m.group(1) or m.group(1) in ("www", "employees", "employee"):  # employee-only portals
             return None
         return ("icims", m.group(2)) if m.group(1) == "careers" else ("icims", host)
 
@@ -142,6 +184,11 @@ def detect_board(url: str) -> tuple[str, str] | None:
         return "apple", "postLocation-USA"
     # metacareers.com is deliberately unsupported: its robots.txt forbids automated collection without
     # written permission, and its GraphQL API needs per-session tokens.
+    for mod in plugins():
+        detect = getattr(mod, "detect", None)
+        slug = detect(url) if detect else None
+        if slug:
+            return _plugin_name(mod), slug
     return None
 
 
@@ -181,6 +228,12 @@ def detect_in_html(html: str, base: str) -> tuple[str, str] | None:
     host = urlparse(base).hostname or ""
     if host and (_SF_RMK.search(html) or _SF_UNIFY.search(html)) and "successfactors" not in host:
         return "successfactors", host
+    for mod in plugins():  # a careers site built on a platform (Phenom, Radancy, ...), recognised by its HTML
+        marker = getattr(mod, "PAGE_MARKER", None)
+        if marker is not None and marker.search(html):
+            slug = mod.slug_from_page(base, html)
+            if slug:
+                return _plugin_name(mod), slug
     return None
 
 

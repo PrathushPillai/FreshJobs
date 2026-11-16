@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import sign_up
+
 from app.main import app
 from app.models import Company
 from app.pipeline.poller import process_company
@@ -33,6 +35,7 @@ def client(session, now):
     ], prefs, now)
     session.commit()
     with TestClient(app) as c:
+        sign_up(c)
         yield c
 
 
@@ -126,6 +129,65 @@ def test_cross_source_duplicate_flagged(session, now):
                             complete=False)
     assert dup.is_repost and dup.repost_of_id == original.id
     assert dup.events[0].kind == "duplicate"
+
+
+def _board_and_list(session, now):
+    prefs = get_prefs(session)
+    board = Company(name="Rbfcu", ats="workday", slug="rbfcu|wd503|Jobs")
+    simplify = Company(name="SimplifyJobs: New Grad", ats="simplify", slug="new-grad")
+    session.add_all([board, simplify])
+    session.flush()
+    for c in (board, simplify):
+        process_company(session, c, [], prefs, now - timedelta(hours=1))
+    return prefs, board, simplify
+
+
+def _workday_job(location="San Antonio, TX", ext="JR1"):
+    return NormalizedJob(external_id=ext, title="Collections Business Analyst", locations=[location],
+                         url=f"https://rbfcu.wd503.myworkdayjobs.com/Jobs/job/San-Antonio/Analyst_{ext}",
+                         description="A full description of the role. " * 30)
+
+
+def _simplify_job(location="San Antonio, TX", ext="s1", url_ext="JR1"):
+    # SimplifyJobs keeps a stub description and links the posting with a locale prefix and a different place format.
+    return NormalizedJob(external_id=ext, title="Collections Business Analyst", locations=[location],
+                         url=f"https://rbfcu.wd503.myworkdayjobs.com/en-US/Jobs/job/San-Antonio/Analyst_{url_ext}?src=simplify",
+                         description="Category: Data. Terms: New grad.", company_name="RBFCU")
+
+
+def test_aggregator_copy_of_a_board_job_is_a_duplicate(session, now):
+    prefs, board, simplify = _board_and_list(session, now)
+    [original] = process_company(session, board, [_workday_job("ASC - San Antonio")], prefs, now)
+    [copy] = process_company(session, simplify, [_simplify_job()], prefs, now + timedelta(minutes=5), complete=False)
+    assert copy.is_repost and copy.repost_of_id == original.id and copy.events[0].kind == "duplicate"
+
+
+def test_board_job_found_after_its_aggregator_copy_wins(session, now):
+    prefs, board, simplify = _board_and_list(session, now)
+    [copy] = process_company(session, simplify, [_simplify_job()], prefs, now, complete=False)
+    session.commit()
+    [own] = process_company(session, board, [_workday_job()], prefs, now + timedelta(minutes=5))
+    session.commit()
+    session.refresh(copy)
+    assert not own.is_repost
+    assert copy.is_repost and copy.repost_of_id == own.id
+    assert [e.kind for e in copy.events][-1] == "duplicate"
+
+
+def test_same_title_in_another_city_is_not_a_duplicate(session, now):
+    prefs, board, simplify = _board_and_list(session, now)
+    process_company(session, board, [_workday_job("Austin, TX")], prefs, now)
+    [other] = process_company(session, simplify, [_simplify_job("San Antonio, TX", url_ext="JR9")], prefs,
+                              now + timedelta(minutes=5), complete=False)
+    assert not other.is_repost
+
+
+def test_url_key():
+    from app.pipeline.dedupe import url_key
+
+    assert url_key("https://jobs.ashbyhq.com/x/123/application") == url_key("https://jobs.ashbyhq.com/x/123")
+    assert url_key("https://a.wd5.myworkdayjobs.com/en-US/Jobs/job/X_1?q=1") == url_key("https://a.wd5.myworkdayjobs.com/Jobs/job/X_1")
+    assert url_key("https://boards.greenhouse.io/a/jobs/1") != url_key("https://boards.greenhouse.io/a/jobs/2")
 
 
 def test_add_company_from_careers_url(client):
@@ -334,3 +396,138 @@ def test_companies_list_busiest_first_and_searchable(client, session):
     assert [c["name"] for c in client.get("/api/companies", params={"q": "zqglob"}).json()] == ["Zqglobex"]
     assert "Zqglobex" in [c["name"] for c in client.get("/api/companies", params={"q": "lever", "limit": 50_000}).json()]
     assert len(client.get("/api/companies", params={"limit": 1}).json()) == 1
+
+
+def test_a_job_found_closed_leaves_cached_feed_pages_at_once(client, monkeypatch):
+    """Opening a job checks its apply page; when that closes it, the next feed request mustn't show it from the
+    60-second page cache (it did, until the cache was cleared on close)."""
+    from app.pipeline import liveness
+
+    async def gone(client_, url):
+        return False, "the posting is gone (404)"
+
+    params = {"hide_no_sponsor": False}
+    before = client.get("/api/jobs", params=params).json()["items"]
+    assert client.get("/api/jobs", params=params).headers["X-Cache"] == "hit"  # the page is cached
+    target = before[0]
+    monkeypatch.setattr(liveness, "check", gone)
+    assert client.post(f"/api/jobs/{target['id']}/verify").json()["closed_at"] is not None
+    after = client.get("/api/jobs", params=params)
+    assert target["id"] not in [j["id"] for j in after.json()["items"]]
+
+
+def test_sponsor_likely_verdict_and_filter(client, session):
+    from app.models import Job
+
+    jobs = {j.title: j for j in session.query(Job)}
+    jobs["Data Analyst"].h1b_filings = 250  # likely: 10+ filings
+    jobs["Senior Software Engineer"].h1b_filings = 3  # possible: a few filings
+    jobs["Business Intelligence Developer"].everify = "yes"  # possible: E-Verify only (STEM OPT)
+    jobs["Registered Nurse"].sponsors_text = True  # likely: the posting says so
+    jobs["Data Engineer"].h1b_filings = 900  # ruled out by its text, whatever the filings
+    session.commit()
+    from app import main
+
+    main._jobs_cache.clear()
+    all_jobs = client.get("/api/jobs", params={"hide_no_sponsor": False}).json()["items"]
+    assert {j["title"]: j["sponsor_likely"] for j in all_jobs} == {
+        "Data Analyst": "likely", "Senior Software Engineer": "possible",
+        "Business Intelligence Developer": "possible", "Registered Nurse": "likely", "Data Engineer": "ruled_out"}
+    likely = {"hide_no_sponsor": False, "sponsor_likely": "likely"}
+    assert titles(client.get("/api/jobs", params=likely)) == ["Data Analyst", "Registered Nurse"]
+    assert titles(client.get("/api/jobs", params={**likely, "sponsor_likely": "possible"})) == [
+        "Business Intelligence Developer", "Data Analyst", "Registered Nurse", "Senior Software Engineer"]
+
+
+def test_startup_survives_a_locked_database(monkeypatch):
+    """A locked database during the startup backfill used to end the startup; now it's retried later."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import OperationalError
+
+    from app import main
+    started = []
+
+    def locked():
+        raise OperationalError("UPDATE jobs ...", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(main, "backfill", locked)
+    monkeypatch.setattr(main, "_backfill_until_done", lambda: started.append(True))
+    with TestClient(main.app) as client:
+        assert client.get("/api/status").status_code == 200
+    assert started == [True]
+
+
+def test_status_counts_are_served_at_once_and_recounted_in_the_background(session, monkeypatch):
+    import threading
+    import time as _time
+
+    from app import main
+
+    main._status_counts.clear()
+    first = main._counts(session)  # nothing counted yet: this one waits
+    assert "open_jobs" in first
+    main._status_counts["at"] = _time.monotonic() - 120  # stale
+    started = threading.Event()
+    real = main._recount
+    monkeypatch.setattr(main, "_recount", lambda s: (started.set(), _time.sleep(0.3), real(s)))
+    t = _time.monotonic()
+    again = main._counts(session)
+    assert _time.monotonic() - t < 0.1 and again is main._status_counts  # served stale, at once
+    assert started.wait(2)  # and recounted in the background
+    for _ in range(100):
+        if _time.monotonic() - main._status_counts["at"] < 60:
+            break
+        _time.sleep(0.05)
+    assert _time.monotonic() - main._status_counts["at"] < 60
+    main._status_counts.clear()
+
+
+def test_h1b_sponsors_filter_in_every_sort(client, session):
+    from app.models import Job
+
+    for job in session.query(Job):
+        job.h1b_filings = 25 if job.title in ("Data Analyst", "Senior Software Engineer") else 0
+    session.commit()
+    for sort in ("newest", "posted", "company", "sponsor"):
+        got = titles(client.get("/api/jobs", params={"sponsors_only": True, "sort": sort, "countries": []}))
+        assert got == ["Data Analyst", "Senior Software Engineer"], sort
+
+
+def test_h1b_sponsors_filter_does_not_start_from_the_sponsor_index(session):
+    # As a plain range, SQLite read every sponsored open job through ix_jobs_by_sponsor and sorted them by
+    # date (5-32 s on 1.8M jobs). Written as +jobs.h1b_filings it walks the date index for one page.
+    from sqlalchemy import text
+
+    # The statement list_jobs sends for "All jobs, newest found, H-1B sponsors only" (traced 2026-11-11).
+    sql = ("SELECT jobs.id FROM jobs WHERE jobs.closed_at IS NULL AND jobs.is_repost IS 0 AND +jobs.h1b_filings > 0 "
+           "ORDER BY jobs.first_seen_at DESC, jobs.id DESC LIMIT 50")
+    plan = " ".join(str(r[-1]) for r in session.execute(text("EXPLAIN QUERY PLAN " + sql)))
+    assert "ix_jobs_by_found_v2" in plan and "TEMP B-TREE FOR ORDER BY" not in plan, plan
+
+
+def test_consultancies_get_a_badge_and_are_hidden_only_when_asked(client, session):
+    from app.models import Job
+
+    for job in session.query(Job):
+        job.employer_kind = {"Data Analyst": "consultancy", "Senior Software Engineer": "staffing"}.get(job.title, "")
+    session.commit()
+    everything = client.get("/api/jobs", params={"countries": [], "hide_no_sponsor": False}).json()["items"]
+    kinds = {j["title"]: j["employer_kind"] for j in everything}
+    assert kinds["Data Analyst"] == "consultancy" and kinds["Senior Software Engineer"] == "staffing"
+    assert "Data Analyst" in kinds  # shown by default: a badge, never hidden unasked
+    hidden = titles(client.get("/api/jobs", params={"countries": [], "hide_no_sponsor": False, "hide_consultancies": True}))
+    assert "Data Analyst" not in hidden and "Senior Software Engineer" not in hidden and "Data Engineer" in hidden
+
+
+def test_job_employer_kind_rules():
+    from app.h1b import SponsorIndex, job_employer_kind
+
+    idx = SponsorIndex([("yash technologies", 68, "consultancy"), ("google", 9000, ""), ("mix", 10, "consultancy"),
+                        ("mix holdings", 30, "")])
+    assert job_employer_kind("Yash Technologies, Inc", "successfactors", idx) == "consultancy"
+    assert job_employer_kind("Google", "greenhouse", idx) == ""
+    assert job_employer_kind("Mix", "lever", idx) == ""  # a minority of its filings: hires mostly for itself
+    assert job_employer_kind("Talent Software Services", "jobdiva", idx) == "staffing"  # a staffing agency's system
+    assert job_employer_kind("Blue Ridge Consulting Group", "lever", idx) == "consultancy"  # the name says so
+    assert job_employer_kind("TekPro Staffing", "ashby", idx) == "staffing"
+    assert job_employer_kind("Stripe", "greenhouse", idx) == ""

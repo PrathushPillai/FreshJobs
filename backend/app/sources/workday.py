@@ -1,7 +1,8 @@
 """Workday career sites, through the JSON API ("CXS") that the public career site itself uses.
 
 slug: "{tenant}|{wdN}|{site}", taken from the career-site URL
-https://{tenant}.{wdN}.myworkdayjobs.com/{site}, e.g. "nvidia|wd5|NVIDIAExternalCareerSite".
+https://{tenant}.{wdN}.myworkdayjobs.com/{site}, e.g. "nvidia|wd5|NVIDIAExternalCareerSite". A few tenants live on a host with no wdN
+(https://nxp.myworkdayjobs.com/careers); their slug has "-" in the middle: "nxp|-|careers".
 
 API quirks (verified live, Nov 2026):
 - The list endpoint caps `limit` at 20 (larger values return HTTP 400).
@@ -25,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 PAGE_SIZE = 20  # the API's maximum
@@ -32,6 +34,17 @@ PAGE_SIZE = 20  # the API's maximum
 RESULT_CAP = 2000
 MAX_PARTIAL_PAGES = 15
 DETAIL_CONCURRENCY = 4
+# Workday's Cloudflare answers 429 to bursts, with no Retry-After. Three quick retries (2, 4 and 8 s) weren't
+# enough: on 2026-11-15, 729 of ~4,900 boards failed a check in 6 hours (CVS Health, Dollar Tree, O'Reilly,
+# Micron, Northrop Grumman...), while the same requests a minute later answered 200. List pages now wait
+# 5, 10, 20, 40 and 60 s, and a scan that still gets a 429 part way keeps the pages it read (see _keep_partial).
+LIST_RETRIES = 5
+LIST_BACKOFF_SECONDS = 5.0
+SLOW_DOWN = (429, 503)
+
+
+def _slow_down(e: Exception) -> bool:
+    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code in SLOW_DOWN
 # A board's first scan fetches details only for jobs posted in the last few days:
 # a big tenant has thousands of old jobs, and a detail call for each would hold the slow lane for hours.
 BASELINE_DETAIL_DAYS = 7
@@ -42,6 +55,15 @@ def parse_slug(slug: str) -> tuple[str, str, str]:
     if len(parts) != 3 or not all(parts):
         raise ValueError(f"Workday slug must look like 'tenant|wd5|Site', got {slug!r}")
     return parts[0], parts[1], parts[2]
+
+
+def board_host(tenant: str, wd: str) -> str:
+    """https://{tenant}.{wdN}.myworkdayjobs.com, or https://{tenant}.myworkdayjobs.com when wd is "-".
+
+    NXP's wd3 host has shown Workday's maintenance page since 2026-11-06 (CXS answers 422) while
+    nxp.myworkdayjobs.com serves the same 800 jobs.
+    """
+    return f"https://{tenant}.myworkdayjobs.com" if wd == "-" else f"https://{tenant}.{wd}.myworkdayjobs.com"
 
 
 def days_ago(posted_on: str | None) -> int | None:
@@ -94,21 +116,71 @@ class WorkdayAdapter(Adapter):
     min_interval_minutes = 10
     full_scan_every = 6
     lane = "slow"
+    # Each employer is its own tenant, and 429s are retried with backoff (http_util). With the default 10,
+    # a pass over ~3,700 boards left the median Workday board unchecked for 6.6 hours (2026-11-10).
+    max_concurrency = 20
 
     def __init__(self) -> None:
         # slug -> offset where the newest-first list starts (after any pinned block), learned on full scans.
+        # Kept in workday_state.json next to the database: held only in memory, every restart turned each
+        # board's next partial scan into a full one (up to 100 list requests for a big board).
         self._pinned: dict[str, int] = {}
         # Slugs whose last full scan hit Workday's 2000-result cap: jobs past it are invisible, not closed.
         self._capped: set[str] = set()
+        self._loaded = False
+
+    def _state_path(self):
+        """workday_state.json next to the database; None for an in-memory database (tests)."""
+        from pathlib import Path
+
+        from app.config import settings
+        from app.matching import _models_dir
+
+        url = settings.database_url
+        if url in ("sqlite://", "sqlite:///:memory:") or ":memory:" in url:
+            return None
+        return Path(_models_dir()).parent / "workday_state.json"
+
+    def _load_state(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        import json
+
+        path = self._state_path()
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text())
+            self._pinned.update({k: int(v) for k, v in data.get("pinned", {}).items()})
+            self._capped.update(data.get("capped", []))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save_state(self) -> None:
+        import json
+        import os
+
+        path = self._state_path()
+        if path is None:
+            return
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps({"pinned": self._pinned, "capped": sorted(self._capped)}))
+            os.replace(tmp, path)
+        except OSError:
+            pass  # only a speed-up: the next full scan learns it again
 
     def last_fetch_complete(self, slug: str) -> bool:
         return slug not in self._capped
 
     async def _page(self, client: httpx.AsyncClient, api: str, offset: int) -> dict:
-        resp = await client.post(
-            f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""}
+        # Retried with backoff on 429/503: tenants rate-limit bursts, and one 429 used to fail the whole board
+        # (149 boards, Kraft Heinz, Lowe's, Lilly, CVS Health, GEICO, Wells Fargo..., from 2026-11-06 on).
+        resp = await http_util.post(
+            client, f"{api}/jobs", json={"appliedFacets": {}, "limit": PAGE_SIZE, "offset": offset, "searchText": ""},
+            retries=LIST_RETRIES, backoff=LIST_BACKOFF_SECONDS,
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def _list_all(self, client: httpx.AsyncClient, api: str) -> tuple[list[dict], bool]:
@@ -118,7 +190,14 @@ class WorkdayAdapter(Adapter):
         total = None
         offset = 0
         while True:
-            data = await self._page(client, api, offset)
+            try:
+                data = await self._page(client, api, offset)
+            except httpx.HTTPError as e:
+                # Rate-limited part way through a big board: the pages read so far hold the newest jobs, so
+                # keep them. The scan counts as incomplete, so no job is closed for missing from it.
+                if postings and _slow_down(e):
+                    return postings, False
+                raise
             if total is None:
                 total = data.get("total") or 0
             page = [p for p in data.get("jobPostings") or [] if p.get("externalPath")]
@@ -147,7 +226,12 @@ class WorkdayAdapter(Adapter):
             add((await self._page(client, api, 0)).get("jobPostings") or [])
         offset = start
         for _ in range(MAX_PARTIAL_PAGES):
-            data = await self._page(client, api, offset)
+            try:
+                data = await self._page(client, api, offset)
+            except httpx.HTTPError as e:
+                if postings and _slow_down(e):
+                    break  # keep the newest pages (a partial scan never closes jobs)
+                raise
             fresh = add(data.get("jobPostings") or [])
             if not fresh:
                 break
@@ -163,13 +247,15 @@ class WorkdayAdapter(Adapter):
         first_scan: bool = False,
     ) -> list[NormalizedJob]:
         tenant, wd, site = parse_slug(slug)
-        host = f"https://{tenant}.{wd}.myworkdayjobs.com"
+        host = board_host(tenant, wd)
         api = f"{host}/wday/cxs/{tenant}/{site}"
 
+        self._load_state()
         if full or slug not in self._pinned:  # a partial scan needs the pinned offset from a full scan
             postings, complete = await self._list_all(client, api)
             (self._capped.discard if complete else self._capped.add)(slug)
             self._pinned[slug] = _pinned_end(postings) // PAGE_SIZE * PAGE_SIZE
+            self._save_state()
         else:
             postings = await self._list_recent(client, api, self._pinned[slug], known_ids)
 
@@ -194,8 +280,7 @@ class WorkdayAdapter(Adapter):
                 )
             async with sem:
                 try:
-                    resp = await client.get(f"{api}{path}")
-                    resp.raise_for_status()
+                    resp = await http_util.get(client, f"{api}{path}")
                     info = resp.json().get("jobPostingInfo") or {}
                 except (httpx.HTTPError, ValueError):
                     # Taken down since the list call, or a transient error. Skip it: it's still new

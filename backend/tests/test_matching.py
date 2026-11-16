@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import sign_up
+
 from app import matching
 from app.main import app
 from app.models import Company
@@ -78,6 +80,7 @@ def client(session, now, monkeypatch):
     ], prefs, now)
     session.commit()
     with TestClient(app) as c:
+        sign_up(c)
         yield c
 
 

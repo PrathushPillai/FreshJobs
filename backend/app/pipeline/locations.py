@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from app.pipeline.filters import US_STATES
+from app.pipeline.filters import US_STATES, foreign_country
 
 STATE_NAME_TO_CODE = {name: code for code, name in US_STATES.items()}
 
@@ -133,7 +133,15 @@ class Place:
 def _clean(token: str) -> str:
     token = token.replace("(", " ").replace(")", " ")
     token = _NOISE.sub(" ", token)
-    return re.sub(r"\s+", " ", token).strip(" .:-–—/&").strip()
+    token = re.sub(r"\s+", " ", token).strip(" .:-–—/&").strip()
+    # A state with its ZIP code: "Paris, TX 75460", "Dublin, OH 0755", "New Brunswick, NJ 08903".
+    token = re.sub(r"^([A-Z]{2})\s+\d{3,5}(?:-\d{4})?$", r"\1", token)
+    # "Remote in USA" leaves "in USA", which read as Indiana; "in" in lower case is never the state's code.
+    return re.sub(r"^(in|within|across|from) ", "", token)
+
+
+# Walmart's store and warehouse places: "(USA) SC ROCK HILL 06236 SAM'S CLUB", "(USA) CA PERRIS 08799 ECOMM WHSE".
+_STORE_FORM = re.compile(r"^\(?USA\)?\s+([A-Z]{2})\s+([A-Z][A-Z .'-]*?[A-Z])\s+\d{3,6}(?!\w)")
 
 
 def _canonical_city(city: str) -> str:
@@ -165,6 +173,9 @@ def _from_code_form(part: str) -> Place | None:
     country = COUNTRY_CODES[m.group(1)]
     sub = (m.group(2) or "").rstrip("-").upper() or None
     rest = _clean(m.group(3).replace("-", " - "))
+    us_city = CITIES.get(rest.lower())
+    if not sub and m.group(1) in US_STATES and us_city and us_city[1] == "United States":
+        return Place(_canonical_city(rest), m.group(1), "United States")  # "IL-Chicago": Illinois, not Israel
     state = sub if (country == "United States" and sub in US_STATES) or country == "Canada" else None
     if sub and state is None and sub in CITY_ABBREVIATIONS:  # "US-SF-HQ"
         return _city_place(sub, None, country)
@@ -174,8 +185,15 @@ def _from_code_form(part: str) -> Place | None:
 
 
 def _parse_part(part: str) -> list[Place]:
-    pieces = [p for p in re.split(r",\s*", part) if p.strip()]
+    if (m := _STORE_FORM.match(part.strip())) and m.group(1) in US_STATES:
+        return [Place(_canonical_city(m.group(2)), m.group(1), "United States")]
+    pieces = [p for p in re.split(r",\s*|\.\s+(?=[A-Z]{2}-)", part) if p.strip()]
     if pieces and all(_CODE_FORM.match(p.strip()) for p in pieces):  # "US-SF-HQ, US-SEA"
+        codes = [_CODE_FORM.match(p.strip()).group(1) for p in pieces]
+        if any(c in US_STATES and c not in COUNTRY_CODES for c in codes):
+            # State-first: "NY-New York, TX-Frisco, DE-Greenville" (DE is Delaware here, not Germany).
+            return [Place(_canonical_city(_clean(m.group(3))), m.group(1), "United States")
+                    for p in pieces if (m := _CODE_FORM.match(p.strip())) and m.group(1) in US_STATES and _clean(m.group(3))]
         return [pl for p in pieces if (pl := _from_code_form(p))]
     is_remote = "remote" in part.lower()
     tokens = [_clean(t) for t in re.split(r",|\s[-–—]\s|\s/\s|:|\s&\s", part)]
@@ -186,18 +204,28 @@ def _parse_part(part: str) -> list[Place]:
         low = raw.lower()
         if low in COUNTRIES and not (low == "us" and raw != raw.upper()):
             country = COUNTRIES[low]
+        elif len(raw) == 2 and i > 0 and country is None and (
+                foreign := next((f for t in tokens[:i] if (f := foreign_country(t, raw))), None)):
+            # Any earlier token: "Bangalore, KA, IN" and "Chennai, Chennai-MRV, IN" (SuccessFactors) put a region
+            # between the city and the country's code.
+            country = foreign  # "Hyderabad, IN" is India, not Indiana (filters.FOREIGN_CITIES)
         elif len(raw) == 2 and raw.upper() in US_STATES and (raw.isupper() or i > 0) and country in (None, "United States"):
             state, country = raw.upper(), "United States"
         elif low in STATE_NAME_TO_CODE and (low not in CITIES or (is_remote and low == "washington")):
             state, country = STATE_NAME_TO_CODE[low], country or "United States"
         elif len(raw) == 2 and raw.isupper() and raw in CA_PROVINCES and country in (None, "Canada"):
             state, country = raw, "Canada"
+        elif (i == 0 and low in PROVINCE_NAME_TO_CODE and len(tokens) > 1
+              and ((tokens[1].isupper() and tokens[1] in US_STATES) or tokens[1].lower() in STATE_NAME_TO_CODE)):
+            leftovers.append(raw)  # "Ontario, CA" and "Ontario, California": the city in California
         elif low in PROVINCE_NAME_TO_CODE:
             state, country = PROVINCE_NAME_TO_CODE[low], "Canada"
         elif i > 0 and len(raw) == 3 and raw.isupper() and raw in COUNTRY_CODES:
             country = COUNTRY_CODES[raw]
         elif low in _REGIONS:
             continue
+        elif raw == "CA" and country == "Canada":
+            continue  # "Montreal, QC, CA": the country's code after its province, not a city called CA
         elif (cs := re.fullmatch(r"([A-Z]{2,3})-([A-Z]{2,3})", raw)) and cs.group(1) in COUNTRY_CODES:
             # "Denver, USA-CO, USA, 12421" (SuccessFactors): country code and state, not a city called USA-CO
             country = COUNTRY_CODES[cs.group(1)]
@@ -206,7 +234,8 @@ def _parse_part(part: str) -> list[Place]:
         else:
             # "Fort Worth TX", "San Mateo, CA United States", "CA United States"
             m = re.match(r"^(?:(.*?)\s+)?([A-Z]{2})(?:\s+(?:united states|usa|us))?$", raw, re.I)
-            if m and m.group(2).upper() in US_STATES and (m.group(2).isupper() or m.group(1) is None):
+            # Only while no other country was found: "Montreal, QC, CA" is Quebec, Canada, not California.
+            if m and m.group(2).upper() in US_STATES and (m.group(2).isupper() or m.group(1) is None)                     and country in (None, "United States"):
                 state, country = m.group(2).upper(), "United States"
                 if m.group(1):
                     leftovers.append(m.group(1))

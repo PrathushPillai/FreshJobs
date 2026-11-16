@@ -5,7 +5,7 @@ import { LAST_QUERY_KEY } from './Elsewhere'
 import JobDetail, { JobDetailContent } from './JobDetail'
 import { FacetList } from './LocationFilter'
 import RolesBar from './RolesBar'
-import { Badge, Choice, CompanyAvatar, EXP_LABELS, ExperienceBadge, FilterPill, MatchLine, MatchRing, RepeatBadge, SponsorBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
+import { Badge, Choice, CompanyAvatar, EXP_LABELS, EmployerKindBadge, ExperienceBadge, FilterPill, ListingFlagBadge, MatchLine, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, Toggle, TrackControl, VisaSignalBadges } from './ui'
 
 const PAGE = 50
 // "Date posted" uses the company's own posting date; "Found" uses when we first saw the job.
@@ -35,8 +35,14 @@ const SORTS = [
   { value: 'company', label: 'Company A–Z' },
 ] as const
 const EXP_LEVELS: ExpLevel[] = ['entry', 'mid', 'senior']
+// The Visa pill's sponsorship verdict choice (backend sponsorship.sponsor_likelihood).
+const SPONSOR_CHOICES = [
+  { value: 'any', label: 'All jobs', hint: 'Every employer, sponsor or not' },
+  { value: 'likely', label: 'Likely sponsors', hint: 'Says it sponsors, or 10+ H-1B filings' },
+  { value: 'possible', label: 'Likely or may sponsor', hint: 'Also employers with a few H-1Bs, or E-Verify (STEM OPT)' },
+] as const
 
-type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'everify_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
+type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_consultancies' | 'hide_flagged' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
   Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
@@ -50,7 +56,10 @@ const DEFAULT_FILTERS: Filters = {
   include_unstated: true,
   remote_only: false,
   sponsors_only: false,
+  sponsor_likely: 'any',  // 'likely' / 'possible': the Visa pill's sponsorship choice
   everify_only: false,
+  hide_consultancies: false,  // shown with a badge by default; More can hide them
+  hide_flagged: false,  // possible scams and MLM recruiting: a red badge; More can hide them
   // Shown by default: some employers that say they don't sponsor can still be persuaded. Each such job
   // carries a red "No sponsorship" badge, and the Visa pill can hide them.
   hide_no_sponsor: false,
@@ -164,7 +173,34 @@ function FreshnessBadge({ job }: { job: Job }) {
 
 const PIN = 'M10 2a6 6 0 0 0-6 6c0 4.5 6 10 6 10s6-5.5 6-10a6 6 0 0 0-6-6Zm0 8.5A2.5 2.5 0 1 1 10 5.5a2.5 2.5 0 0 1 0 5Z'
 
-function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boolean; onSelect: () => void; index: number }) {
+/** One card per role: the same title at the same employer in several places (a chain hiring in three cities posts
+ * three jobs) is one card with links to each place, as in the alert emails (backend alerts.group_jobs). Each place is
+ * still its own job with its own apply link; only the page's own jobs are grouped, in their order. */
+function groupSameRole(items: Job[]): { job: Job; others: Job[] }[] {
+  const groups = new Map<string, { job: Job; others: Job[] }>()
+  for (const job of items) {
+    const key = `${job.company.trim().toLowerCase()}|${job.title.trim().toLowerCase()}`
+    const group = groups.get(key)
+    if (group) group.others.push(job)
+    else groups.set(key, { job, others: [] })
+  }
+  return [...groups.values()]
+}
+
+/** "Los Angeles, California, United States" -> "Los Angeles, California": enough to tell the places apart. */
+function shortPlace(job: Job): string {
+  const parts = (job.location || 'Location not listed').split(',').map((p) => p.trim()).filter(Boolean)
+  return parts.length > 2 && /^(united states|usa|us)$/i.test(parts[parts.length - 1]) ? parts.slice(0, -1).join(', ') : parts.join(', ')
+}
+
+function JobCard({ job: first, others = [], selectedId, onPick, index }: {
+  job: Job; others?: Job[]; selectedId: number | null; onPick: (id: number) => void; index: number
+}) {
+  // The card shows the place that's open (or the first one); the other places are links.
+  const job = others.find((o) => o.id === selectedId) ?? first
+  const selected = selectedId === job.id
+  const onSelect = () => onPick(job.id)
+  const places = [first, ...others]
   return (
     <li
       onClick={onSelect}
@@ -193,10 +229,35 @@ function JobCard({ job, selected, onSelect, index }: { job: Job; selected: boole
             <span className="truncate">{job.location || 'Location not listed'}</span>
             {job.remote && <span className="ml-1 shrink-0 rounded-full bg-violet-50 px-2 text-[11px] font-semibold text-violet-700 ring-1 ring-inset ring-violet-200">Remote</span>}
           </p>
+          {others.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[12px] text-slate-500">
+              <span className="font-semibold text-slate-600">Open in ({places.length} places):</span>
+              {/* Buttons have no hand cursor by default in Tailwind v4, so these read as plain tags (2026-11-12). */}
+              {places.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onPick(p.id) }}
+                  title={p.id === job.id ? `Showing the ${shortPlace(p)} posting` : `Open the ${shortPlace(p)} posting`}
+                  aria-pressed={p.id === job.id}
+                  className={`cursor-pointer rounded-full px-2.5 py-0.5 ring-1 ring-inset transition ${
+                    p.id === job.id
+                      ? 'bg-brand-600 font-semibold text-white ring-brand-600'
+                      : 'bg-white text-brand-700 ring-brand-200 hover:bg-brand-50 hover:ring-brand-400'
+                  }`}
+                >
+                  📍 {shortPlace(p)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-2.5 flex flex-wrap items-center gap-1">
             <ExperienceBadge job={job} />
+            <SponsorLikelyBadge job={job} />
             <SponsorBadge filings={job.h1b_filings} />
             <VisaSignalBadges job={job} />
+            <EmployerKindBadge kind={job.employer_kind} />
+            <ListingFlagBadge flag={job.listing_flag} />
             {isNew(job) && <Badge tone="green" dot>Found {timeAgo(job.first_seen_at)}</Badge>}
             <RepeatBadge job={job} />
             {job.no_sponsor && <Badge tone="red" dot>No sponsorship</Badge>}
@@ -335,6 +396,11 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const setView = (forYouView: boolean) => setViews((v) => ({ ...v, view: forYouView ? 'forYou' : 'all' }))
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
+  // The two-pane view's detail panel starts from its top for every job it shows.
+  const detailPane = useRef<HTMLElement>(null)
+  useEffect(() => {
+    detailPane.current?.scrollTo({ top: 0 })
+  }, [selected])
   const wide = useWideScreen()
   useEffect(() => {
     if (!hasResume) return
@@ -449,10 +515,17 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
     resultsTop.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  // Two-pane view: keep a job open on the right, defaulting to the first result.
+  // Two-pane view: keep a job open on the right, defaulting to the first result. A job opened from outside the
+  // list (the top-matches strip) stays open: it's usually not on this page, and it used to be replaced at once by
+  // the first result (2026-11-12). A new search or filter goes back to the list's first job.
+  const [openedOutside, setOpenedOutside] = useState(false)
+  const listKey = JSON.stringify(query)
   useEffect(() => {
-    if (wide && items?.length && !items.some((j) => j.id === selected)) setSelected(items[0].id)
-  }, [wide, items, selected])
+    setOpenedOutside(false)
+  }, [listKey])
+  useEffect(() => {
+    if (wide && items?.length && !openedOutside && !items.some((j) => j.id === selected)) setSelected(items[0].id)
+  }, [wide, items, selected, openedOutside])
 
   const postedLabel = POSTED_WINDOWS.find((w) => w.hours === filters.posted_within_hours)?.label
   const foundLabel = FOUND_WINDOWS.find((w) => w.hours === filters.since_hours)?.label
@@ -461,7 +534,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const expLabel = filters.exp_levels.length
     ? filters.exp_levels.map((l) => EXP_LABELS[l].split(' ')[0]).join(', ')
     : filters.max_years !== undefined ? `≤ ${filters.max_years} yrs` : 'Experience'
-  const moreActive = filters.show_reposts || filters.tracked !== 'any'
+  const moreActive = filters.show_reposts || filters.tracked !== 'any' || filters.hide_consultancies || filters.hide_flagged
 
   return (
     <div className="space-y-4">
@@ -640,11 +713,21 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
           </button>
 
           <FilterPill {...staging}
-            label={filters.sponsors_only ? 'H-1B sponsors' : 'Visa'}
-            active={filters.sponsors_only || filters.everify_only || filters.hide_no_sponsor}
-            onClear={() => set({ sponsors_only: false, everify_only: false, hide_no_sponsor: false })}
+            label={filters.sponsor_likely === 'likely' ? 'Likely sponsors' : filters.sponsor_likely === 'possible' ? 'Likely or may sponsor' : filters.sponsors_only ? 'H-1B sponsors' : 'Visa'}
+            active={filters.sponsor_likely !== 'any' || filters.sponsors_only || filters.everify_only || filters.hide_no_sponsor}
+            onClear={() => set({ sponsor_likely: 'any', sponsors_only: false, everify_only: false, hide_no_sponsor: false })}
           >
             <div className="space-y-2">
+              <p className="px-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Will they sponsor?</p>
+              {SPONSOR_CHOICES.map((c) => (
+                <Choice key={c.value} selected={f.sponsor_likely === c.value} onClick={() => stage({ sponsor_likely: c.value })}>
+                  <span>
+                    {c.label}
+                    <span className="block text-xs font-normal text-slate-500">{c.hint}</span>
+                  </span>
+                </Choice>
+              ))}
+              <div className="my-1 border-t border-slate-100" />
               <Toggle label="Only companies that filed H-1Bs" checked={f.sponsors_only} onChange={(v) => stage({ sponsors_only: v })} />
               <Toggle
                 label="Only E-Verify employers (needed for STEM OPT)"
@@ -671,8 +754,18 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             ))}
           </FilterPill>
 
-          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any' })}>
+          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any', hide_consultancies: false, hide_flagged: false })}>
             <div className="space-y-2">
+              <Toggle
+                label="Hide consultancies & staffing firms"
+                checked={f.hide_consultancies}
+                onChange={(v) => stage({ hide_consultancies: v })}
+              />
+              <Toggle
+                label="Hide possible scams & MLM recruiting"
+                checked={f.hide_flagged}
+                onChange={(v) => stage({ hide_flagged: v })}
+              />
               <Toggle
                 label="Show repeated jobs (hidden by default)"
                 checked={f.show_reposts}
@@ -719,7 +812,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
 
       <FreshnessStrip base={{ ...query, limit: 1, offset: 0 }} active={filters.posted_within_hours} onPick={(hours) => set({ posted_within_hours: hours })} />
 
-      {forYou && hasResume && <TopMatches base={{ ...query, limit: 8, offset: 0 }} onOpen={(id) => setSelected(id)} />}
+      {forYou && hasResume && <TopMatches base={{ ...query, limit: 8, offset: 0 }} onOpen={(id) => { setSelected(id); setOpenedOutside(true) }} />}
       {forYou && profile.data && !hasResume && (
         <button
           onClick={onOpenProfile}
@@ -806,8 +899,9 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
         <div className="min-w-0 space-y-3">
           <ul className="space-y-2.5">
             {!items && jobs.isLoading && Array.from({ length: 6 }, (_, i) => <CardSkeleton key={i} />)}
-            {items?.map((job, i) => (
-              <JobCard key={job.id} index={i} job={job} selected={wide && job.id === selected} onSelect={() => setSelected(job.id)} />
+            {items && groupSameRole(items).map(({ job, others }, i) => (
+              <JobCard key={job.id} index={i} job={job} others={others} selectedId={wide ? selected : null}
+                       onPick={(id) => { setSelected(id); setOpenedOutside(false) }} />
             ))}
             {items?.length === 0 && (
               <li className="rounded-3xl border-2 border-dashed border-slate-200 bg-white/70 px-6 py-14 text-center">
@@ -840,8 +934,12 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
         </div>
 
         {wide && (
-          <aside className="thin-scroll sticky top-24 h-[calc(100vh-7rem)] overflow-y-auto rounded-3xl bg-white p-6 shadow-xl shadow-slate-900/[0.06] ring-1 ring-slate-200/80">
-            {selected !== null ? <JobDetailContent id={selected} /> : <p className="text-sm text-slate-500">Select a job to see the details.</p>}
+          <aside ref={detailPane} className="thin-scroll sticky top-24 h-[calc(100vh-7rem)] overflow-y-auto rounded-3xl bg-white p-6 shadow-xl shadow-slate-900/[0.06] ring-1 ring-slate-200/80">
+            {/* Keyed by job: switching jobs (e.g. another place of the same role, whose title and company are the
+                same) re-mounts the panel with its rise-in animation, so the change is visible. */}
+            {selected !== null
+              ? <div key={selected} className="animate-rise"><JobDetailContent id={selected} /></div>
+              : <p className="text-sm text-slate-500">Select a job to see the details.</p>}
           </aside>
         )}
       </div>

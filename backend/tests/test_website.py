@@ -74,7 +74,10 @@ async def test_add_careers_url_without_ats_uses_website_reader(session):
     from app.main import app
 
     respx.get("https://wizer.example/careers").mock(return_value=httpx.Response(200, text=INLINE_PAGE))
+    from tests.conftest import sign_up
+
     with TestClient(app) as c:
+        sign_up(c)
         r = c.post("/api/companies/from-url", json={"url": "https://wizer.example/careers", "name": "Wizer"})
     assert r.status_code == 200, r.text
     assert r.json()["company"]["ats"] == "website" and r.json()["company"]["slug"] == "https://wizer.example/careers"

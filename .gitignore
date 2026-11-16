@@ -11,3 +11,7 @@ backend/data/uscis_h1b/
 
 # resume-match model files and scoring state (tests and Docker)
 backend/data/models/
+
+# Private working notes, kept on the maintainer's machine only (not part of the public showcase)
+CLAUDE.md
+deploy/README.md

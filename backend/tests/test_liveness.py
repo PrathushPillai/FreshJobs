@@ -67,6 +67,57 @@ async def test_verify_due_closes_taken_down_aggregator_jobs(session, now):
     assert session.query(Job).filter(Job.checked_at.is_(None)).count() == 0
 
 
+def test_due_jobs_newest_first_from_sources_that_cant_close_their_own(session, now):
+    from app.pipeline.liveness import _checked, due_jobs
+
+    agg = Company(name="The Muse", ats="themuse", slug="")
+    healthy = Company(name="Acme", ats="greenhouse", slug="acme", last_ok_at=now)
+    broken = Company(name="Broken", ats="greenhouse", slug="broken", last_ok_at=now - timedelta(days=3))
+    session.add_all([agg, healthy, broken])
+    session.flush()
+
+    def job(c, ext, hours, **kw):
+        j = Job(company_id=c.id, external_id=ext, title="Data Analyst", company_name=c.name, url=f"https://x/{ext}", fingerprint=ext,
+                first_seen_at=now, last_seen_at=now, listed_at=now - timedelta(hours=hours) if hours is not None else None,
+                **{"is_repost": False, "us_eligible": True, **kw})
+        session.add(j)
+        return j
+
+    old = job(agg, "old", 50)
+    new = job(agg, "new", 1)
+    undated = job(agg, "undated", None)
+    job(agg, "abroad", 0, us_eligible=False)
+    job(agg, "repost", 0, is_repost=True)
+    job(agg, "closed", 0, closed_at=now)
+    job(agg, "seen", 0, checked_at=now - timedelta(hours=2))  # checked by the job panel today
+    stale = job(broken, "stale", 5)
+    job(healthy, "fine", 0)  # its board closes it on its own
+    session.commit()
+
+    assert [j.external_id for j in due_jobs(session, 10, now)] == ["new", "stale", "old", "undated"]
+    assert [j.external_id for j in due_jobs(session, 2, now)] == ["new", "stale"]
+    _checked[new.id] = now
+    assert [j.external_id for j in due_jobs(session, 2, now)] == ["stale", "old"]
+    assert old.id and undated.id and stale.id
+
+
+def test_due_jobs_reads_dates_from_the_index(session):
+    from sqlalchemy import text
+
+    plan = " ".join(r[-1] for r in session.execute(text(
+        "EXPLAIN QUERY PLAN SELECT id, listed_at FROM jobs INDEXED BY ix_jobs_id_feed "
+        "WHERE id IN (1, 2, 3) AND is_repost = 0")))
+    assert "COVERING INDEX ix_jobs_id_feed" in plan
+    plan = " ".join(r[-1] for r in session.execute(text(
+        "EXPLAIN QUERY PLAN SELECT id FROM jobs INDEXED BY ix_jobs_company_sync "
+        "WHERE company_id IN (1, 2) AND closed_at IS NULL")))
+    assert "COVERING INDEX ix_jobs_company_sync" in plan
+    plan = " ".join(r[-1] for r in session.execute(text(
+        "EXPLAIN QUERY PLAN SELECT id FROM jobs INDEXED BY ix_jobs_by_listed_v2 "
+        "WHERE closed_at IS NULL AND is_repost = 0 ORDER BY listed_at DESC")))
+    assert "COVERING INDEX ix_jobs_by_listed_v2" in plan and "TEMP B-TREE" not in plan
+
+
 def test_workday_files_are_not_boards():
     assert detect_board("https://acme.wd1.myworkdayjobs.com/robots.txt") is None
     assert detect_board("https://acme.wd1.myworkdayjobs.com/en-US/External") == ("workday", "acme|wd1|External")
