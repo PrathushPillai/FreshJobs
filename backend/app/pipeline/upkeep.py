@@ -19,9 +19,12 @@ def run() -> dict:
     from app.pipeline.poller import close_stale_of_disabled
 
     out: dict = {}
-    for key, fn in (("named", lambda s: source_names.name_some(s, limit=300)),
+    # The AI visa reader first (about 6 minutes at most), naming last: a naming run asks each Workday board for
+    # its name (up to 5 requests), which took the whole first manual run (2026-11-16) and adds to Workday's rate
+    # limits, so it does 100 boards an hour.
+    for key, fn in (("visa_reader", lambda s: visa_reader.run_once(s)),
                     ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc))),
-                    ("visa_reader", lambda s: visa_reader.run_once(s))):
+                    ("named", lambda s: source_names.name_some(s, limit=100))):
         try:
             with SessionLocal() as session:
                 out[key] = fn(session)
