@@ -152,21 +152,9 @@ def run_discovery() -> dict:
 
 
 def _upkeep() -> dict:
-    """Hourly work beside discovery: real names for boards still named after their slug, closing jobs of switched-off
-    sources that nobody can check any more, and the AI visa reader's batches. Each part fails on its own."""
-    from app.pipeline import source_names, visa_reader
-    from app.pipeline.poller import close_stale_of_disabled
+    from app.pipeline import upkeep
 
-    out: dict = {}
-    for key, fn in (("named", lambda s: source_names.name_some(s, limit=300)),
-                    ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc))),
-                    ("visa_reader", lambda s: visa_reader.run_once(s))):
-        try:
-            with SessionLocal() as session:
-                out[key] = fn(session)
-        except Exception:
-            log.exception("upkeep step %s failed", key)
-    return out
+    return upkeep.run()
 
 
 def _backfill_until_done(wait_seconds: int = 60) -> None:
