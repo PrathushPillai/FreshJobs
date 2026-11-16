@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -252,17 +253,28 @@ def read_due_with_groq(session: Session, max_jobs: int | None = None, sleep=None
             if verdict is None:
                 failed += 1
                 continue
-            row = VisaRead(job_id=jid, passage_hash=passage_hash(p), model=f"groq:{settings.visa_reader_groq_model}",
-                           verdict=verdict, read_at=datetime.now(timezone.utc))
-            job = session.get(Job, jid)
-            if job is not None:
-                before = (job.no_sponsor, job.sponsors_text, job.student_visa)
-                apply_verdict(job, verdict)
-                row.changed = (job.no_sponsor, job.sponsors_text, job.student_visa) != before
-                changed += row.changed
-            session.merge(row)
-            session.commit()
-            read += 1
+            # Saved in its own short transaction, retried while a poll or a re-read holds the write lock ("database
+            # is locked" lost the first live read, 2026-11-16).
+            for attempt in range(10):
+                try:
+                    row = VisaRead(job_id=jid, passage_hash=passage_hash(p),
+                                   model=f"groq:{settings.visa_reader_groq_model}",
+                                   verdict=verdict, read_at=datetime.now(timezone.utc))
+                    job = session.get(Job, jid)
+                    if job is not None:
+                        before = (job.no_sponsor, job.sponsors_text, job.student_visa)
+                        apply_verdict(job, verdict)
+                        row.changed = (job.no_sponsor, job.sponsors_text, job.student_visa) != before
+                    session.merge(row)
+                    session.commit()
+                    changed += bool(row.changed)
+                    read += 1
+                    break
+                except OperationalError as e:
+                    session.rollback()
+                    if "locked" not in str(e) or attempt == 9:
+                        raise
+                    sleep(3 * (attempt + 1))
     state.setdefault("groq_tokens", {})[today] = used
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     state["groq_tokens"] = {d: t for d, t in state["groq_tokens"].items() if d >= week_ago}
