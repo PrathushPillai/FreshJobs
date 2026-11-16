@@ -237,6 +237,20 @@ class UserProfile(Base):
     version: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class VisaRead(Base):
+    """The AI visa reader's verdict on one job (pipeline/visa_reader.py). verdict is None while its batch runs."""
+
+    __tablename__ = "visa_reads"
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    passage_hash: Mapped[str] = mapped_column(String(40), default="")
+    model: Mapped[str] = mapped_column(String(40), default="")
+    batch_id: Mapped[str | None] = mapped_column(String(80))
+    verdict: Mapped[dict | None] = mapped_column(JSON)  # sponsorship, opt_cpt, us_persons_only, clearance_required, evidence
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    changed: Mapped[bool] = mapped_column(Boolean, default=False)  # it changed the job's visa flags
+
+
 class JobVector(Base):
     """A job's embedding (title + the start of its description), computed once and reused for every profile."""
 

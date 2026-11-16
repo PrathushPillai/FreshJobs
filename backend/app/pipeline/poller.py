@@ -27,6 +27,7 @@ from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.listing_quality import listing_flag
+from app.pipeline.visa_reader import apply_verdict, verdict_for
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
 from app.pipeline.liveness import verify_due
@@ -64,6 +65,7 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.no_sponsor = find_no_sponsor_phrase(job.description) is not None or job.student_visa == "excluded"
     job.everify_text = mentions_everify(job.description)
     job.sponsors_text = not job.no_sponsor and says_sponsors(job.description)
+    apply_verdict(job, verdict_for(session, job.id))  # the AI visa reader's additions, once it has read the job
     job.everify = everify_status(session, job.company_name or "")
     job.h1b_filings = sponsor_index(session).filings(job.company_name or "")
     job.employer_kind = job_employer_kind(job.company_name or "", job.company.ats if job.company else "",

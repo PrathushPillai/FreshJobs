@@ -96,6 +96,15 @@ export interface JobDetail extends Job {
   match: MatchDetail | null
   /** LinkedIn post search: "hiring" + this role + this company, past month (a link only). */
   hiring_posts_url: string
+  /** The AI visa reader's verdict (backend pipeline/visa_reader.py), with the sentence it relied on. */
+  visa_ai?: {
+    sponsorship: 'yes' | 'no' | 'unclear' | 'not_mentioned'
+    opt_cpt: 'welcome' | 'excluded' | 'not_mentioned'
+    us_persons_only: boolean
+    clearance_required: boolean
+    evidence: string
+    model: string
+  } | null
   uscis: {
     years: { fiscal_year: number; new_approvals: number; new_denials: number; approvals: number; denials: number }[]
     names: string[]

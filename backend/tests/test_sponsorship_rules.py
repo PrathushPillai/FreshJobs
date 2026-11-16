@@ -231,3 +231,42 @@ def test_citizen_or_visa_holder_is_not_a_ban():
     assert find_no_sponsor_phrase("You must be a US Citizen or Permanent Resident, or hold a visa that does not require "
                                   "sponsorship now or in the future.")
     assert find_no_sponsor_phrase("Must be a U.S. Citizen or Permanent Resident.")
+
+
+@pytest.mark.parametrize("text,no,yes", [
+    # Wordings from the hand-labelled eval set and the 20,000-job check (2026-11-15), each from a real posting.
+    ("This position is not eligible for employment-based visa sponsorship.", True, False),
+    ("This position is ineligible for employment Visa sponsorship.", True, False),
+    ("This position is not eligible for employer-sponsored employment authorization.", True, False),
+    ("The company does not intend to provide sponsorship for employment visa status (eg, H-1B, TN, etc).", True, False),
+    ("Invitation Homes does not offer employment-based visa sponsorship for this role at this time.", True, False),
+    ("the company will not pursue visa sponsorship for this position.", True, False),
+    ("Please note that sponsorship for US employment authorization is not available now or in the future.", True, False),
+    ("Current and future sponsorship are not available for this position.", True, False),
+    ("Work Shift: | Sponsorship Available:No", True, False),
+    ("Uline does not participate in the H-1B lottery.", True, False),
+    ("Legal authorization to work permanently in the United States for any employer without requiring a visa transfer or sponsorship now or in the future.", True, False),
+    ("This role requires the ability to work lawfully in the US without employment-based immigration sponsorship, now or in the future.", True, False),
+    ("PCG does not sponsor newly hired foreign national workers for work authorization.", True, False),
+    ("Ability to work in the US permanently and without restriction", True, False),
+    ("- US citizen (required): you will work in FedRAMP environments.", True, False),
+    ("US Citizenship for this position is required by law due to federal customer contracts", True, False),
+    ("Hold US citizenship, or Greencard status", True, False),
+    ("Active Secret (or above) US security clearance and US citizenship", True, False),
+    ("Shift: full-time | Clearance: Secret", True, False),
+    ("Be able to receive a favorable security clearance.", True, False),
+    ("We're happy to sponsor international candidates (eg, STEM OPT, OPT, H1B, O1, E3).", False, True),
+    ("401(k) | Visa: H1-B Transfers Allowed", False, True),
+    ("Work Location: Santa Clara, CA | Visa sponsorship: Available for this position.", False, True),
+    ("Visa sponsorship: Will sponsor.", False, True),
+    ("GEICO will consider sponsoring a new qualified applicant for employment authorization for this position.", False, True),
+    # Look-alikes that must not match.
+    ("Current CPR certification or willingness to renew (family is happy to sponsor renewal).", False, False),
+    ("Backed by executive sponsorship from the C-Suite, we are reimagining products.", False, False),
+    ("Security clearance is not required.", False, False),
+])
+def test_eval_set_wordings(text, no, yes):
+    from app.pipeline.sponsorship import find_no_sponsor_phrase, says_sponsors
+
+    assert (find_no_sponsor_phrase(text) is not None) is no
+    assert says_sponsors(text) is yes
