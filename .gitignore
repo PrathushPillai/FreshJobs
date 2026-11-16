@@ -15,3 +15,4 @@ backend/data/models/
 # Private working notes, kept on the maintainer's machine only (not part of the public showcase)
 CLAUDE.md
 deploy/README.md
+backend/data/visa_eval_groq_*.json

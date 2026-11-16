@@ -54,6 +54,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ai", action="append", default=[], metavar="MODEL", help="a Claude model (paid)")
     ap.add_argument("--groq", action="append", default=[], metavar="MODEL", help="a Groq model (free tier)")
+    ap.add_argument("--max-reads", type=int, default=0, help="Groq: read at most N new postings this run (answers are "
+                    "saved as they come, so the next run continues; the score prints once every posting is read)")
     args = ap.parse_args()
     items = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
     print(f"{len(items)} hand-labelled postings")
@@ -68,9 +70,16 @@ def main() -> None:
         import httpx
 
         t = time.time()
-        results, tokens, failed = [], 0, 0
+        cache_path = DATA.parent / f"visa_eval_groq_{model.replace('/', '_')}.json"
+        cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+        tokens, reads = 0, 0
         with httpx.Client() as http:
             for i, x in enumerate(items):
+                if str(x["id"]) in cache:
+                    continue
+                if args.max_reads and reads >= args.max_reads:
+                    break
+                v = None
                 for attempt in range(6):
                     try:
                         v, used = visa_reader.groq_read(http, x["title"], x["company"], x["passage"], model)
@@ -82,19 +91,20 @@ def main() -> None:
                             v = None
                             break
                         time.sleep(float(e.response.headers.get("retry-after", "20")) + 1)
-                failed += v is None
-                results.append(v)
+                cache[str(x["id"])] = v
+                cache_path.write_text(json.dumps(cache))
+                reads += 1
                 time.sleep(visa_reader.GROQ_SPACING_SECONDS)
-                if i % 25 == 24:
-                    print(f"   {i + 1} read, {tokens:,} tokens", flush=True)
+        print(f"   {reads} read this run ({tokens:,} tokens); {len(cache)}/{len(items)} done", flush=True)
+        if len(cache) < len(items):
+            continue
+        results = [cache[str(x["id"])] for x in items]
+        failed = sum(v is None for v in results)
         report(f"rules + Groq {model}", items, [visa_reader.overlay(r, v) for r, v in zip(rules, results)])
         report(f"Groq {model} alone", items, [visa_reader.overlay(
             {"no_sponsor": False, "sponsors_text": False, "student_visa": None}, v) for v in results])
         four = sum(1 for x, v in zip(items, results) if v and v["sponsorship"] == x["gold"]["sponsorship"])
-        print(f"  four-way sponsorship answer right: {four}/{len(items)}; failed reads: {failed}; "
-              f"{tokens:,} tokens ({tokens // max(1, len(items))} per posting); {time.time() - t:.0f} s")
-        (DATA.parent / f"visa_eval_groq_{model.replace('/', '_')}.json").write_text(json.dumps(
-            [{"id": x["id"], "verdict": v} for x, v in zip(items, results)], indent=1))
+        print(f"  four-way sponsorship answer right: {four}/{len(items)}; failed reads: {failed}; {time.time() - t:.0f} s")
 
     for model in args.ai:
         t = time.time()

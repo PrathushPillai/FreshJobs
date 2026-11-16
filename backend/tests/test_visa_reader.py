@@ -171,3 +171,32 @@ def test_groq_rate_limit_stops_the_run(session, monkeypatch, tmp_path, respx_moc
     out = vr.read_due_with_groq(session, sleep=lambda s: None)
     assert out["read"] == 0 and out["stopped"] == "Groq answered HTTP 429"
     assert session.query(VisaRead).count() == 0  # read again next run
+
+
+def test_groq_tool_use_quirk_is_retried(respx_mock, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(vr.settings, "groq_api_key", "test-key")
+    ok = httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(VERDICT_NO)}}],
+                                   "usage": {"total_tokens": 800}})
+    quirk = httpx.Response(400, json={"error": {"message": "Tool choice is none, but model called a tool",
+                                                "code": "tool_use_failed"}})
+    route = respx_mock.post(vr.GROQ_URL).mock(side_effect=[quirk, ok])
+    with httpx.Client() as http:
+        verdict, tokens = vr.groq_read(http, "Analyst", "Acme", "We are unable to sponsor visas.")
+    assert route.call_count == 2 and verdict["sponsorship"] == "no" and tokens == 800
+
+
+@pytest.mark.parametrize("verdict,no", [
+    # A "no" whose quote rules something out counts.
+    ({"sponsorship": "no", "evidence": "We are unable to sponsor visas."}, True),
+    ({"sponsorship": "no", "evidence": "Must be a US citizen."}, True),
+    # A "no" on a posting that is only unclear doesn't (BASF, eval set).
+    ({"sponsorship": "no", "evidence": "Applicants must be currently authorized to work in the United States on a full-time basis."}, False),
+    # Clearance and US-persons answers are specific enough on their own, even with no quote.
+    ({"sponsorship": "not_mentioned", "clearance_required": True, "evidence": ""}, True),
+    ({"sponsorship": "unclear", "us_persons_only": True, "evidence": ""}, True),
+])
+def test_a_no_needs_a_quote_that_rules_something_out(verdict, no):
+    base = {"opt_cpt": "not_mentioned", "us_persons_only": False, "clearance_required": False}
+    assert bool(vr.flags_from({**base, **verdict}).get("no_sponsor")) is no

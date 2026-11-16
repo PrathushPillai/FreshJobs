@@ -31,7 +31,7 @@ from app.config import settings
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 MAX_PASSAGE_CHARS = 3000
 MAX_TOKENS = 2048  # thinking counts toward it; the JSON answer itself is ~150 tokens
 
@@ -103,8 +103,8 @@ us_persons_only: true only when the posting restricts the job to US citizens, pe
 
 clearance_required: true only when a US government security clearance (or eligibility for one) is required.
 
-evidence: copy the one sentence (at most 300 characters) that most decides the sponsorship answer, word for word \
-from the text. Empty string when sponsorship is "not_mentioned"."""
+evidence: copy the one sentence (at most 300 characters) that most decides your answers, word for word from the \
+text (the restriction, if there is one). Empty string only when the sentences say nothing about who may work."""
 
 SCHEMA = {
     "type": "object",
@@ -190,8 +190,14 @@ def groq_payload(title: str, company: str, passage: str, model: str | None = Non
 def groq_read(http, title: str, company: str, passage: str, model: str | None = None) -> tuple[dict | None, int]:
     """One posting read by a Groq model: (verdict or None, tokens used). Raises httpx.HTTPStatusError on an error
     answer (429 included, with Retry-After) so the caller can stop for the day."""
-    resp = http.post(GROQ_URL, json=groq_payload(title, company, passage, model),
-                     headers={"Authorization": f"Bearer {settings.groq_api_key}"}, timeout=60)
+    for attempt in range(3):
+        resp = http.post(GROQ_URL, json=groq_payload(title, company, passage, model),
+                         headers={"Authorization": f"Bearer {settings.groq_api_key}"}, timeout=60)
+        # gpt-oss now and then answers a structured-output request with a tool call ("Tool choice is none, but model
+        # called a tool", 400 tool_use_failed, 1 in 25 in the eval): the same request usually works again.
+        if resp.status_code == 400 and "tool_use_failed" in resp.text and attempt < 2:
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
     tokens = int((data.get("usage") or {}).get("total_tokens") or 0)
@@ -268,12 +274,22 @@ def read_due_with_groq(session: Session, max_jobs: int | None = None, sleep=None
 
 # ---- what a verdict changes ---------------------------------------------------------------------------------------
 
+# A "no" counts only when the sentence the model quotes rules something out. On the eval set gpt-oss-120b also said
+# "no" to postings that are only unclear ("Applicants must be currently authorized to work in the United States on a
+# full-time basis", BASF): their quotes have none of these words, so they get no badge.
+_RULES_OUT = re.compile(
+    r"\b(not|no|unable|cannot|can ?not|can'?t|won'?t|will\s+not|does\s+not|do\s+not|ineligible|without|only|"
+    r"exclusively|restricted|limited\s+to)\b|citizen|green\s*card|permanent\s+resident|clearance|polygraph|"
+    r"u\.?s\.?\s+persons?|itar|export", re.I)
+
+
 def flags_from(verdict: dict | None) -> dict:
     """The job fields a verdict can set. Only additions: see the module docstring."""
     if not verdict:
         return {}
     out = {}
-    if verdict.get("sponsorship") == "no" or verdict.get("us_persons_only") or verdict.get("clearance_required"):
+    restricted = verdict.get("us_persons_only") or verdict.get("clearance_required")  # specific, no guard needed
+    if restricted or (verdict.get("sponsorship") == "no" and _RULES_OUT.search(verdict.get("evidence") or "")):
         out["no_sponsor"] = True
     elif verdict.get("sponsorship") == "yes":
         out["sponsors_text"] = True
