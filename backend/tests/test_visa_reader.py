@@ -48,7 +48,8 @@ def test_parse_message():
      {"no_sponsor": False, "sponsors_text": True, "student_visa": "welcome"}),
     # A clearance requirement rules sponsorship out.
     ({"no_sponsor": False, "sponsors_text": True, "student_visa": None},
-     {**VERDICT_NO, "sponsorship": "unclear", "opt_cpt": "not_mentioned", "clearance_required": True},
+     {**VERDICT_NO, "sponsorship": "unclear", "opt_cpt": "not_mentioned", "clearance_required": True,
+      "evidence": "Active Secret clearance required."},
      {"no_sponsor": True, "sponsors_text": False, "student_visa": None}),
     # Nothing read: the rules stand.
     ({"no_sponsor": False, "sponsors_text": True, "student_visa": "welcome"}, None,
@@ -193,9 +194,15 @@ def test_groq_tool_use_quirk_is_retried(respx_mock, monkeypatch):
     ({"sponsorship": "no", "evidence": "Must be a US citizen."}, True),
     # A "no" on a posting that is only unclear doesn't (BASF, eval set).
     ({"sponsorship": "no", "evidence": "Applicants must be currently authorized to work in the United States on a full-time basis."}, False),
-    # Clearance and US-persons answers are specific enough on their own, even with no quote.
-    ({"sponsorship": "not_mentioned", "clearance_required": True, "evidence": ""}, True),
-    ({"sponsorship": "unclear", "us_persons_only": True, "evidence": ""}, True),
+    # Clearance and US-only answers need their own words in the quote (live reads, 2026-11-16).
+    ({"sponsorship": "not_mentioned", "clearance_required": True,
+      "evidence": "An active US government Public Trust or security clearance."}, True),
+    ({"sponsorship": "not_mentioned", "clearance_required": True,
+      "evidence": "Qualified candidates must be legally authorized to access such controlled technology."}, False),  # ASML
+    ({"sponsorship": "no", "us_persons_only": True, "evidence": "REMOTE (US & US Citizen)"}, True),
+    ({"sponsorship": "no", "us_persons_only": True,
+      "evidence": "Work Requirements: US Citizen, GC Holders or Authorized to Work in the US"}, False),  # INSPYR
+    ({"sponsorship": "unclear", "us_persons_only": True, "evidence": ""}, False),
 ])
 def test_a_no_needs_a_quote_that_rules_something_out(verdict, no):
     base = {"opt_cpt": "not_mentioned", "us_persons_only": False, "clearance_required": False}

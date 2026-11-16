@@ -295,13 +295,26 @@ _RULES_OUT = re.compile(
     r"u\.?s\.?\s+persons?|itar|export", re.I)
 
 
+_CLEARANCE_WORDS = re.compile(r"clearance|polygraph|public\s+trust|ts\s*/\s*sci|top\s+secret|\bsecret\b|\bsci\b", re.I)
+_CITIZEN_WORDS = re.compile(r"citizen|green\s*card|\bgc\b|permanent\s+resident|u\.?s\.?\s+persons?|\bitar\b", re.I)
+# "US Citizen, GC Holders or Authorized to Work in the US": the last alternative lets visa holders in.
+_OR_AUTHORIZED = re.compile(r"\bor\s+(\w+\s+){0,3}(authori[sz]ed|eligible)\s+to\s+work", re.I)
+
+
 def flags_from(verdict: dict | None) -> dict:
     """The job fields a verdict can set. Only additions: see the module docstring."""
     if not verdict:
         return {}
     out = {}
-    restricted = verdict.get("us_persons_only") or verdict.get("clearance_required")  # specific, no guard needed
-    if restricted or (verdict.get("sponsorship") == "no" and _RULES_OUT.search(verdict.get("evidence") or "")):
+    evidence = verdict.get("evidence") or ""
+    # Clearance and US-only answers need their own words in the quote too (live reads, 2026-11-16): ASML's "must be
+    # legally authorized to access such controlled technology" (an export licence can be sought) came back as a
+    # clearance, and INSPYR's "US Citizen, GC Holders or Authorized to Work in the US" as citizens-only.
+    clearance = verdict.get("clearance_required") and _CLEARANCE_WORDS.search(evidence)
+    open_alternative = _OR_AUTHORIZED.search(evidence)  # "... or Authorized to Work in the US": not a "no"
+    us_only = verdict.get("us_persons_only") and _CITIZEN_WORDS.search(evidence) and not open_alternative
+    plain_no = verdict.get("sponsorship") == "no" and _RULES_OUT.search(evidence) and not open_alternative
+    if clearance or us_only or plain_no:
         out["no_sponsor"] = True
     elif verdict.get("sponsorship") == "yes":
         out["sponsors_text"] = True
