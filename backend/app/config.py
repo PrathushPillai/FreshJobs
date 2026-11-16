@@ -84,6 +84,12 @@ class Settings(BaseSettings):
 
     # Chatbot (phase 3)
     anthropic_api_key: str = ""
+    # AI visa reader (pipeline/visa_reader.py): runs only with an API key.
+    visa_reader_enabled: bool = True
+    visa_reader_model: str = "claude-opus-5-5"
+    visa_reader_per_batch: int = 1000  # jobs sent per hourly batch
+    visa_reader_daily_jobs: int = 3000  # at most this many jobs read a day (cost cap)
+    visa_reader_days: int = 3  # only jobs found this recently
     chat_model: str = "claude-sonnet-5-5"
 
     cors_origins: list[str] = ["http://localhost:5173"]

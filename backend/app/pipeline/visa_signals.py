@@ -24,9 +24,10 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
 from app.db import SessionLocal, init_db
-from app.models import Job
+from app.models import Job, VisaRead
 from app.pipeline.normalize import experience_level, experience_years
 from app.pipeline.sponsorship import find_no_sponsor_phrase, mentions_everify, says_sponsors, student_visa_signal
+from app.pipeline.visa_reader import overlay
 
 log = logging.getLogger(__name__)
 FIELDS = ("no_sponsor", "student_visa", "everify_text", "sponsors_text", "min_years", "exp_level")
@@ -108,9 +109,12 @@ def refresh(for_you_only: bool = False, others_only: bool = False, resume: bool 
                 rows = session.execute(
                     select(Job.id, Job.description, Job.seniority, *(getattr(Job, f) for f in FIELDS))
                     .where(Job.id.in_(ids), Job.described.is_(True))).all()
+                verdicts = dict(session.execute(select(VisaRead.job_id, VisaRead.verdict).where(
+                    VisaRead.job_id.in_([r[0] for r in rows]), VisaRead.verdict.is_not(None))).all())
                 for row in rows:
                     old = dict(zip(FIELDS, row[3:]))
-                    new = derive(row[1], row[2])
+                    # The AI visa reader's additions stay: apply_flags adds them too (visa_reader.overlay).
+                    new = overlay(derive(row[1], row[2]), verdicts.get(row[0]))
                     counts["read"] += 1
                     counts["sponsors_text"] += new["sponsors_text"]
                     if any((new[f] or None) != (old[f] or None) for f in FIELDS):

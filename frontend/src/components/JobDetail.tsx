@@ -509,7 +509,36 @@ function VisaSnapshot({ job }: { job: JobDetailType }) {
           </div>
         ))}
       </div>
+      <AiVisaRead job={job} />
     </section>
+  )
+}
+
+const AI_SPONSORSHIP = {
+  yes: { text: 'Says it sponsors visas', tone: 'text-emerald-800 bg-emerald-50 ring-emerald-200' },
+  no: { text: 'Rules out sponsorship', tone: 'text-rose-800 bg-rose-50 ring-rose-200' },
+  unclear: { text: 'Leaves sponsorship unclear', tone: 'text-amber-800 bg-amber-50 ring-amber-200' },
+  not_mentioned: { text: 'Says nothing about sponsorship', tone: 'text-slate-700 bg-slate-50 ring-slate-200' },
+} as const
+
+/** What the AI visa reader concluded from the posting's own words, with the sentence it relied on. */
+function AiVisaRead({ job }: { job: JobDetailType }) {
+  const ai = job.visa_ai
+  if (!ai) return null
+  const s = AI_SPONSORSHIP[ai.sponsorship]
+  const extras = [
+    ai.us_persons_only && 'US citizens / green card holders only',
+    ai.clearance_required && 'security clearance required',
+    ai.opt_cpt === 'welcome' && 'OPT/CPT welcome',
+    ai.opt_cpt === 'excluded' && 'OPT/CPT ruled out',
+  ].filter(Boolean)
+  return (
+    <div className={`mt-3 rounded-2xl p-4 ring-1 ring-inset ${s.tone}`}>
+      <p className="text-[11px] font-bold uppercase tracking-wider opacity-70">✦ AI read of the posting</p>
+      <p className="mt-1 font-display text-base font-bold">{s.text}{extras.length ? ` · ${extras.join(' · ')}` : ''}</p>
+      {ai.evidence && <blockquote className="mt-2 border-l-2 border-current/30 pl-3 text-sm italic opacity-90">“{ai.evidence}”</blockquote>}
+      <p className="mt-2 text-[11px] opacity-60">Read by Claude from the posting&apos;s own words. Check the posting before you rely on it.</p>
+    </div>
   )
 }
 

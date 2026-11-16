@@ -152,14 +152,15 @@ def run_discovery() -> dict:
 
 
 def _upkeep() -> dict:
-    """Hourly clean-up beside discovery: real names for boards still named after their slug, and closing jobs of
-    switched-off sources that nobody can check any more. Each part fails on its own."""
-    from app.pipeline import source_names
+    """Hourly work beside discovery: real names for boards still named after their slug, closing jobs of switched-off
+    sources that nobody can check any more, and the AI visa reader's batches. Each part fails on its own."""
+    from app.pipeline import source_names, visa_reader
     from app.pipeline.poller import close_stale_of_disabled
 
     out: dict = {}
     for key, fn in (("named", lambda s: source_names.name_some(s, limit=300)),
-                    ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc)))):
+                    ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc))),
+                    ("visa_reader", lambda s: visa_reader.run_once(s))):
         try:
             with SessionLocal() as session:
                 out[key] = fn(session)
@@ -425,6 +426,9 @@ class JobDetailOut(JobOut):
     events: list[EventOut]
     sponsor: SponsorOut | None
     hiring_posts_url: str  # LinkedIn posts saying they're hiring for this role at this company (a link, never fetched)
+    # The AI visa reader's verdict (pipeline/visa_reader.py): sponsorship, opt_cpt, us_persons_only,
+    # clearance_required, evidence (the sentence it relied on) and model. None until the job has been read.
+    visa_ai: dict | None = None
 
 
 class JobPage(BaseModel):
@@ -937,6 +941,10 @@ def get_job(job_id: int, session: Session = Depends(get_session), user: User = D
     data["everify_info"] = everify_lookup(session, job.company_name or job.company.name)
     data["uscis"] = uscis_lookup(session, job.company_name or job.company.name)
     data["hiring_posts_url"] = hiring_posts_url(job.company_name or job.company.name, job.title)
+    from app.models import VisaRead
+
+    read = session.get(VisaRead, job.id)
+    data["visa_ai"] = {**read.verdict, "model": read.model} if read and read.verdict else None
     full = ensure_scores(session, [job.id], user.id).get(job.id)
     data["match"] = full.detail if full else None
     return data
