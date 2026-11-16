@@ -85,3 +85,13 @@ def test_stale_jobs_of_switched_off_sources_close(session):
 ])
 def test_choose_takes_the_brand_not_the_legal_entity(slug, answers, name):
     assert sn.choose(co("x", "workday", slug), answers) == name
+
+
+def test_stale_closing_query_reads_only_the_index(session):
+    """It must stay index-only: SQLite otherwise walked every open job per 500 sources (hours on the server)."""
+    from sqlalchemy import text
+
+    plan = " ".join(str(r) for r in session.execute(text(
+        "EXPLAIN QUERY PLAN SELECT id FROM jobs INDEXED BY ix_jobs_company_sync WHERE company_id IN (1, 2) "
+        "AND closed_at IS NULL AND last_seen_at < '2026-01-01'")))
+    assert "ix_jobs_company_sync" in plan and "COVERING" in plan.upper()
