@@ -25,6 +25,18 @@ def no_sleep(monkeypatch):
     monkeypatch.setattr(http_util.asyncio, "sleep", instant)
 
 
+@pytest.fixture(autouse=True)
+def same_page_locale(request, monkeypatch):
+    """Job pages under the slug's own locale, unless the test is about the locale redirect."""
+    if "locale" in request.node.name:
+        return
+
+    async def same(self, client, host, cc, lang):
+        return cc, lang
+
+    monkeypatch.setattr(PhenomAdapter, "_page_locale", same)
+
+
 # --- Phenom -------------------------------------------------------------------------------------
 
 PENTAIR = "https://careers.pentair.com"
@@ -285,3 +297,30 @@ async def test_phenom_robots_disallowed_search_is_not_read(monkeypatch):
         assert await PhenomAdapter().fetch(client, "careers.open.com/us/en") == []
     assert not blocked.called and search.called
     assert search.calls[0].request.headers["User-Agent"].startswith("FreshJobsBot/1.0 (+")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_phenom_job_links_follow_the_sites_page_locale():
+    """jobs.tjx.com answers the search at /us/en but serves every page under /global/en (2026-11-17)."""
+    TJX = "https://jobs.tjx.com"
+    respx.get(f"{TJX}/us/en").mock(return_value=httpx.Response(302, headers={"Location": f"{TJX}/global/en"}))
+    respx.get(f"{TJX}/global/en").mock(return_value=httpx.Response(200, text="<html></html>"))
+
+    def widgets(request):
+        if not json.loads(request.content)["selected_fields"]:
+            return httpx.Response(200, json=ph_response([ph_job(0)], 1, {"country": {"United States of America": 1}}))
+        return httpx.Response(200, json=ph_response([ph_job(1)], 1, {"state": {"Wisconsin": 1}}))
+
+    respx.post(f"{TJX}/widgets").mock(side_effect=widgets)
+    detail = respx.get(f"{TJX}/global/en/job/R20001").mock(
+        return_value=httpx.Response(200, text=ph_detail_page("<p>Stock and merchandise the sales floor.</p>")))
+
+    adapter = PhenomAdapter()
+    async with httpx.AsyncClient() as client:
+        jobs = await adapter.fetch(client, "jobs.tjx.com/us/en")
+        again = await adapter.fetch(client, "jobs.tjx.com/us/en", known_ids={"R20001"})
+
+    assert jobs[0].url == f"{TJX}/global/en/job/R20001" and "sales floor" in jobs[0].description
+    assert detail.call_count == 1 and again[0].url == f"{TJX}/global/en/job/R20001"
+    assert respx.routes[0].call_count == 1  # the locale is looked up once per board

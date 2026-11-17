@@ -14,6 +14,10 @@ What the public pages use (verified live, Nov 2026; no login, no token):
   every job, the scan is marked incomplete so nothing is closed.
 - List entries carry only a teaser. The description is in the job page's embedded `phApp.ddo` JSON
   (jobDetail.data.job.description, HTML) at https://{host}/{country}/{lang}/job/{jobId}: one request per new job.
+  Job pages live under the site's own locale, which can differ from the slug's: jobs.tjx.com answers the search
+  at /us/en but redirects /us/en (and every /us/en/job/ page) to /global/en, so job links are built from where
+  https://{host}/{country}/{lang} redirects to (`_page_locale`, once per board per process; 2026-11-17: all 8,771
+  TJX links and descriptions pointed at the home page before).
 robots.txt (the same Phenom template on every site checked) disallows */apply, */jobcart, */chatbot, */iauth,
 */px-widgets and similar, but not /widgets or /job/ pages.
 
@@ -47,6 +51,8 @@ US_NAMES = {"united states", "united states of america", "usa", "us", "u.s.", "u
 
 PAGE_MARKER = re.compile(r"cdn\.phenompeople\.com|phApp\.ddo\s*=|phenompeople", re.I)
 _LOCALE_PATH = re.compile(r"^/([a-z]{2})/([a-z]{2})(?:/|$)", re.I)
+# Where a site's pages live: /us/en, /global/en (TJX), ...
+_PAGE_LOCALE = re.compile(r"^/([a-z]{2}|global)/([a-z]{2})(?:/|$)", re.I)
 _DDO = re.compile(r"phApp\.ddo\s*=\s*")
 
 
@@ -140,6 +146,7 @@ class PhenomAdapter(Adapter):
 
     def __init__(self) -> None:
         self._complete: dict[str, bool] = {}
+        self._locales: dict[str, tuple[str, str]] = {}
 
     def last_fetch_complete(self, slug: str) -> bool:
         return self._complete.get(slug, True)
@@ -217,6 +224,19 @@ class PhenomAdapter(Adapter):
             posted_at=parse_iso(j.get("postedDate") or j.get("dateCreated")),
         )
 
+    async def _page_locale(self, client, host: str, cc: str, lang: str) -> tuple[str, str]:
+        """The country/language path the site's job pages use: where https://{host}/{cc}/{lang} redirects to."""
+        key = f"{host}/{cc}/{lang}"
+        if key not in self._locales:
+            try:
+                resp = await http_util.get(client, f"https://{key}", follow_redirects=True,
+                                           headers={"User-Agent": bot_user_agent()})
+            except httpx.HTTPError:
+                return cc, lang  # not cached: asked again next poll
+            m = _PAGE_LOCALE.match(urlsplit(str(resp.url)).path or "")
+            self._locales[key] = (m.group(1).lower(), m.group(2).lower()) if m else (cc, lang)
+        return self._locales[key]
+
     async def _description(self, client, url: str) -> str | None:
         html = (await http_util.get(client, url, follow_redirects=True,
                                     headers={"User-Agent": bot_user_agent()})).text
@@ -231,11 +251,12 @@ class PhenomAdapter(Adapter):
         host, cc, lang = parse_slug(slug)
         # robots.txt: the search endpoint and the job pages must both be allowed (2026-11-17: they are, on every
         # Phenom template checked; */px-widgets, */apply and */iauth are the disallowed ones).
-        for path in ("/widgets", f"/{cc}/{lang}/job/"):
+        page_cc, page_lang = await self._page_locale(client, host, cc, lang)
+        for path in ("/widgets", f"/{page_cc}/{page_lang}/job/"):
             if not await robots_allows(client, f"https://{host}", path):
                 raise ValueError(f"robots.txt on {host} disallows {path}: not read")
         raw = await self._list(client, slug, host, cc, lang)
-        jobs = [self._summary(host, cc, lang, j) for j in raw if (j.get("title") or "").strip()]
+        jobs = [self._summary(host, page_cc, page_lang, j) for j in raw if (j.get("title") or "").strip()]
         new = [j for j in jobs if j.external_id not in known_ids]
         new.sort(key=lambda j: j.posted_at.timestamp() if j.posted_at else 0, reverse=True)
         budget = FIRST_SCAN_DETAILS if first_scan else DETAILS_PER_FETCH
