@@ -6,7 +6,8 @@ Opening such a job asks its source directly:
 - Workday: the CXS job API (`liveness._workday_api`), field jobPostingInfo.jobDescription
 - Lever: api.lever.co/v0/postings/{company}/{id}, built with every section (`lever_description`)
 - Greenhouse: boards-api.greenhouse.io/v1/boards/{board}/jobs/{id}
-- anything else: the page's schema.org JobPosting (JSON-LD), which most career sites and ATSs embed
+- anything else: the page's schema.org JobPosting (JSON-LD), which most career sites and ATSs embed, else a
+  Phenom page's embedded `phApp.ddo` job (Phenom pages carry no JSON-LD; TJX, CVS, O'Reilly... since 2026-11-17)
 """
 
 import html
@@ -18,6 +19,7 @@ import httpx
 from app.pipeline.liveness import _workday_api
 from app.pipeline.normalize import html_to_text
 from app.sources.http_util import json_ld_jobs
+from app.sources import phenom
 from app.sources.lever import lever_description
 
 _LEVER = re.compile(r"^/([^/]+)/([0-9a-f-]{36})")
@@ -53,6 +55,9 @@ async def fetch_description(client: httpx.AsyncClient, url: str) -> str | None:
             text = html_to_text(str(posting.get("description") or ""))
             if text.strip():
                 return text
+        if phenom.PAGE_MARKER.search(r.text):
+            job = ((phenom.ddo(r.text).get("jobDetail") or {}).get("data") or {}).get("job") or {}
+            return html_to_text(job.get("description") or "") or None
     except (httpx.HTTPError, ValueError):
         return None
     return None

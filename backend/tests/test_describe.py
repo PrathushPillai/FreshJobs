@@ -48,3 +48,15 @@ def test_short_descriptions_count_as_missing(session, now):
         NormalizedJob(external_id="3", title="Intern", url="u3", locations=["NY"], description="A real description. " * 10),
     ], get_prefs(session), now)
     assert [j.described for j in sorted(jobs, key=lambda j: j.external_id)] == [False, False, True]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_phenom_page_without_json_ld_uses_its_embedded_job():
+    page = ('<html><script src="https://cdn.phenompeople.com/x.js"></script><script>phApp.ddo = '
+            '{"jobDetail": {"data": {"job": {"description": "<p>Stock the sales floor.</p>"}}}}; '
+            'phApp.experimentData = {};</script></html>')
+    respx.get("https://jobs.tjx.com/global/en/job/R2325246").mock(return_value=httpx.Response(200, text=page))
+    async with httpx.AsyncClient() as client:
+        text = await fetch_description(client, "https://jobs.tjx.com/global/en/job/R2325246")
+    assert text == "Stock the sales floor."
