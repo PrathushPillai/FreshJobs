@@ -36,6 +36,7 @@ from app.sources import http_util, phenom
 RESULTS = Path(_models_dir()).parent / "phenom_sites.json"
 PREFIXES = ("jobs", "careers", "talent")
 PAUSE_SECONDS = 1.0
+MIN_SHARE = 0.1  # a site with under a tenth of the employer's Workday jobs is probably another company's
 # Cloudflare challenge pages only: "captcha" alone appears in every Phenom page (a reCAPTCHA script for forms).
 _CHALLENGE = ("challenge-platform", "Just a moment", "cf-chl")
 
@@ -107,8 +108,10 @@ def add(max_add: int, dry_run: bool) -> None:
     results = json.loads(RESULTS.read_text())
     with SessionLocal() as session:
         tracked = {s.lower() for (s,) in session.execute(select(Company.slug).where(Company.ats == "phenom"))}
-        todo = sorted(((n, v) for n, v in results.items() if v.get("us_jobs") and v["slug"].lower() not in tracked),
-                      key=lambda nv: -nv[1]["us_jobs"])[:max_add]
+        # The site must be on the employer's scale: careers.circle.com (39 jobs) isn't Circle K's (6,106 on Workday).
+        plausible = [(n, v) for n, v in results.items() if v.get("us_jobs") and v["slug"].lower() not in tracked
+                     and v["us_jobs"] >= MIN_SHARE * v.get("workday_jobs", 0)]
+        todo = sorted(plausible, key=lambda nv: -nv[1]["us_jobs"])[:max_add]
         for name, v in todo:
             print(f"{'would add' if dry_run else 'adding'} {name}: {v['slug']} ({v['us_jobs']:,} US jobs)")
             if not dry_run:
