@@ -25,6 +25,7 @@ from app.sources.lever import lever_description
 _LEVER = re.compile(r"^/([^/]+)/([0-9a-f-]{36})")
 _GREENHOUSE = re.compile(r"^/([^/]+)/jobs/(\d+)")
 # LinkedIn, Indeed and Glassdoor are never fetched (their terms).
+_TAG = re.compile(r"</?(?:p|div|br|li|ul|span|strong|b)(?:\s[^>]*)?/?>", re.I)
 _SKIP = ("linkedin.com", "indeed.com", "glassdoor.com")
 
 
@@ -53,6 +54,8 @@ async def fetch_description(client: httpx.AsyncClient, url: str) -> str | None:
             return None
         for posting in json_ld_jobs(r.text):
             text = html_to_text(str(posting.get("description") or ""))
+            if _TAG.search(text):  # HTML escaped twice (TJX's Phenom pages): one pass leaves the tags as text
+                text = html_to_text(text)
             if text.strip():
                 return text
         if phenom.PAGE_MARKER.search(r.text):

@@ -60,3 +60,14 @@ async def test_phenom_page_without_json_ld_uses_its_embedded_job():
     async with httpx.AsyncClient() as client:
         text = await fetch_description(client, "https://jobs.tjx.com/global/en/job/R2325246")
     assert text == "Stock the sales floor."
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_json_ld_description_escaped_twice_loses_its_tags():
+    page = ('<script type="application/ld+json">{"@type":"JobPosting","description":'
+            '"Marshalls&lt;div&gt;&lt;p style=\\"text-align:left\\"&gt;At TJX&lt;/p&gt;&lt;/div&gt;"}</script>')
+    respx.get("https://jobs.tjx.com/global/en/job/REQ1").mock(return_value=httpx.Response(200, text=page))
+    async with httpx.AsyncClient() as client:
+        text = await fetch_description(client, "https://jobs.tjx.com/global/en/job/REQ1")
+    assert "<" not in text and "At TJX" in text
