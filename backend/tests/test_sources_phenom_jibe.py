@@ -264,3 +264,24 @@ async def test_jibe_full_scan_hitting_page_limit_is_incomplete(monkeypatch):
     async with httpx.AsyncClient() as client:
         jobs = await adapter.fetch(client, "careers.ice.com")
     assert len(jobs) == 2 and not adapter.last_fetch_complete("careers.ice.com")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_phenom_robots_disallowed_search_is_not_read(monkeypatch):
+    """A Phenom site whose robots.txt disallows the search endpoint is never searched; an allowed one is, and every
+    request names FreshJobsBot."""
+    monkeypatch.setattr(http_util, "_robots", {})
+    respx.get("https://careers.blocked.com/robots.txt").mock(return_value=httpx.Response(
+        200, text="User-agent: *\nDisallow: /widgets\n"))
+    respx.get("https://careers.open.com/robots.txt").mock(return_value=httpx.Response(
+        200, text="User-agent: *\nDisallow: */apply\nDisallow: */px-widgets\n"))
+    search = respx.post("https://careers.open.com/widgets").mock(return_value=httpx.Response(
+        200, json={"refineSearch": {"totalHits": 0, "data": {"jobs": [], "aggregations": []}}}))
+    blocked = respx.post("https://careers.blocked.com/widgets")
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="robots.txt"):
+            await PhenomAdapter().fetch(client, "careers.blocked.com/us/en")
+        assert await PhenomAdapter().fetch(client, "careers.open.com/us/en") == []
+    assert not blocked.called and search.called
+    assert search.calls[0].request.headers["User-Agent"].startswith("FreshJobsBot/1.0 (+")

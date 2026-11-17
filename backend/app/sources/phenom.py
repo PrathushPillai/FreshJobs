@@ -18,7 +18,9 @@ robots.txt (the same Phenom template on every site checked) disallows */apply, *
 */px-widgets and similar, but not /widgets or /job/ pages.
 
 Many Phenom sites front another ATS (CVS and Pentair link to Workday); their jobs are then also found through
-that ATS's own board, and dedupe marks the copies.
+that ATS's own board, and dedupe marks the copies. Registered on 2026-11-17, when Workday's Cloudflare began refusing
+our client: for the biggest Workday employers (CVS, O'Reilly, Lowe's, TJX, Dollar Tree...) their Phenom site is the
+other place their jobs are published, and it answers our honest FreshJobsBot User-Agent.
 """
 
 import asyncio
@@ -32,6 +34,7 @@ import httpx
 from app.pipeline.normalize import html_to_text
 from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
+from app.sources.http_util import bot_user_agent, robots_allows
 
 PAGE_SIZE = 100
 RESULT_CAP = 10_000  # from + size beyond this returns nothing
@@ -151,7 +154,8 @@ class PhenomAdapter(Adapter):
             "keywords": "", "global": True, "selected_fields": selected, "locationData": {},
         }
         resp = await http_util.post(client, f"https://{host}/widgets", json=body,
-                                    headers={"Accept": "application/json", "Content-Type": "application/json"})
+                                    headers={"Accept": "application/json", "Content-Type": "application/json",
+                                             "User-Agent": bot_user_agent()})
         rs = resp.json().get("refineSearch") or {}
         data = rs.get("data") or {}
         aggs = {a.get("field"): a.get("value") or {} for a in data.get("aggregations") or [] if isinstance(a, dict)}
@@ -214,7 +218,8 @@ class PhenomAdapter(Adapter):
         )
 
     async def _description(self, client, url: str) -> str | None:
-        html = (await http_util.get(client, url, follow_redirects=True)).text
+        html = (await http_util.get(client, url, follow_redirects=True,
+                                    headers={"User-Agent": bot_user_agent()})).text
         job = ((ddo(html).get("jobDetail") or {}).get("data") or {}).get("job") or {}
         raw = job.get("description") or http_util.json_ld_job(html).get("description") or ""
         return html_to_text(raw) if raw else None
@@ -224,6 +229,11 @@ class PhenomAdapter(Adapter):
         first_scan: bool = False,
     ) -> list[NormalizedJob]:
         host, cc, lang = parse_slug(slug)
+        # robots.txt: the search endpoint and the job pages must both be allowed (2026-11-17: they are, on every
+        # Phenom template checked; */px-widgets, */apply and */iauth are the disallowed ones).
+        for path in ("/widgets", f"/{cc}/{lang}/job/"):
+            if not await robots_allows(client, f"https://{host}", path):
+                raise ValueError(f"robots.txt on {host} disallows {path}: not read")
         raw = await self._list(client, slug, host, cc, lang)
         jobs = [self._summary(host, cc, lang, j) for j in raw if (j.get("title") or "").strip()]
         new = [j for j in jobs if j.external_id not in known_ids]

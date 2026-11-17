@@ -624,9 +624,9 @@ async def test_workday_comes_back_gently_after_a_429(monkeypatch):
 @respx.mock
 async def test_workday_robots_disallowed_site_is_not_read(monkeypatch):
     """NVIDIA's robots.txt disallows its research site: we never read it, and every request says who we are."""
-    from app.sources import workday
+    from app.sources import http_util
 
-    monkeypatch.setattr(workday, "_robots", {})
+    monkeypatch.setattr(http_util, "_robots", {})
     robots = respx.get("https://nvidia.wd5.myworkdayjobs.com/robots.txt").mock(return_value=httpx.Response(
         200, text="User-agent: *\nAllow: /NVIDIAExternalCareerSite/\nDisallow: /NVIDIAExternalCareerSiteResearch/\n"))
     jobs = respx.post(url__startswith="https://nvidia.wd5.myworkdayjobs.com/wday/cxs/").mock(
@@ -643,8 +643,8 @@ async def test_workday_robots_disallowed_site_is_not_read(monkeypatch):
 @pytest.mark.asyncio
 @respx.mock
 async def test_workday_robots_unreadable_means_allowed(monkeypatch):
-    from app.sources import workday
+    from app.sources import http_util
 
-    monkeypatch.setattr(workday, "_robots", {})
+    monkeypatch.setattr(http_util, "_robots", {})
     respx.get("https://nvidia.wd5.myworkdayjobs.com/robots.txt").mock(return_value=httpx.Response(429))
-    assert await workday.robots_allows(httpx.AsyncClient(), "https://nvidia.wd5.myworkdayjobs.com", "/X/")
+    assert await http_util.robots_allows(httpx.AsyncClient(), "https://nvidia.wd5.myworkdayjobs.com", "/X/")
