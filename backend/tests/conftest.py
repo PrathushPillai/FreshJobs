@@ -58,3 +58,17 @@ def sign_up(client, email="me@example.test", password="correct horse battery", n
     r = client.post("/api/auth/signup", json={"name": name, "email": email, "password": password})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+@pytest.fixture(autouse=True)
+def _workday_robots_allow(request, monkeypatch):
+    """Workday's robots.txt check is tested on its own (test_workday_robots_*); elsewhere the fake Workday servers
+    have no robots.txt, so it allows everything."""
+    if "robots" in request.node.name:
+        return
+    from app.sources import workday
+
+    async def allow(*a, **k):
+        return True
+
+    monkeypatch.setattr(workday, "robots_allows", allow)

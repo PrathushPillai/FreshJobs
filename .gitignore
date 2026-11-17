@@ -16,3 +16,4 @@ backend/data/models/
 CLAUDE.md
 deploy/README.md
 backend/data/visa_eval_groq_*.json
+cloudflare-verified-bot-application.md

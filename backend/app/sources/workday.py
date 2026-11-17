@@ -59,9 +59,49 @@ GENTLE_SUCCESSES = 20
 _gentle = {"left": 0}  # successes still needed before full speed
 
 
+def bot_user_agent() -> str:
+    """Our crawler's own, stable User-Agent, pointing at the public page that describes it (frontend/public/bot.html),
+    as Cloudflare's Verified Bots program asks (2026-11-17)."""
+    from app.config import settings
+
+    return f"FreshJobsBot/1.0 (+{settings.public_url.rstrip('/')}/bot.html)"
+
+
+ROBOTS_TOKEN = "FreshJobsBot"
+ROBOTS_CACHE_SECONDS = 24 * 3600
+ROBOTS_RETRY_SECONDS = 3600  # robots.txt couldn't be read: assume allowed, ask again in an hour
+_robots: dict[str, tuple[float, object]] = {}  # host -> (fetched at, RobotFileParser or None)
+
+
+async def robots_allows(client: httpx.AsyncClient, host: str, path: str) -> bool:
+    """Whether the employer's robots.txt lets FreshJobsBot read `path` on `host`. Workday's robots.txt allows each
+    public career site and disallows private ones per employer (NVIDIA: /NVIDIAExternalCareerSiteResearch/,
+    /talentcommunity/), so a disallowed site is never read. When robots.txt can't be read, reading is allowed (the
+    usual convention) and it's asked again within the hour."""
+    import time
+    from urllib.robotparser import RobotFileParser
+
+    cached = _robots.get(host)
+    if cached and time.time() - cached[0] < (ROBOTS_CACHE_SECONDS if cached[1] is not None else ROBOTS_RETRY_SECONDS):
+        parser = cached[1]
+    else:
+        parser = None
+        try:
+            resp = await client.get(f"{host}/robots.txt", headers={"User-Agent": bot_user_agent()}, timeout=20)
+            if resp.status_code == 200:
+                parser = RobotFileParser()
+                parser.parse(resp.text.splitlines())
+        except httpx.HTTPError:
+            pass
+        _robots[host] = (time.time(), parser)
+    return True if parser is None else parser.can_fetch(ROBOTS_TOKEN, f"{host}{path}")
+
+
 async def _request(method, client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    """A Workday request that waits out a pause, starts one when Workday answers 429, and comes back gently."""
+    """A Workday request that waits out a pause, starts one when Workday answers 429, and comes back gently. It
+    always says who we are (bot_user_agent)."""
     await _PAUSE.wait()
+    kwargs["headers"] = {**(kwargs.get("headers") or {}), "User-Agent": bot_user_agent()}
     try:
         resp = await method(client, url, **kwargs)
     except httpx.HTTPStatusError as e:
@@ -284,6 +324,8 @@ class WorkdayAdapter(Adapter):
         tenant, wd, site = parse_slug(slug)
         host = board_host(tenant, wd)
         api = f"{host}/wday/cxs/{tenant}/{site}"
+        if not await robots_allows(client, host, f"/{site}/"):
+            raise ValueError(f"robots.txt on {host} disallows the {site} site: not read")
 
         self._load_state()
         if full or slug not in self._pinned:  # a partial scan needs the pinned offset from a full scan

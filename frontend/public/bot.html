@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreshJobsBot</title>
+<meta name="description" content="FreshJobsBot reads public job listings from employers' own career sites for the FreshJobs job portal.">
+<style>
+  :root { --bg: #ffffff; --ink: #1d1b2f; --muted: #555170; --accent: #5b4bdb; --line: #e4e2f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f0d1c; --ink: #ecebf5; --muted: #a9a6c2; --accent: #a99cff; --line: #2a2740; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.8rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 28px 0 8px; }
+  p, li { color: var(--ink); }
+  .muted { color: var(--muted); }
+  code { background: var(--line); padding: 1px 5px; border-radius: 4px; font-size: .92em; word-break: break-all; }
+  a { color: var(--accent); }
+  ul { padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>FreshJobsBot</h1>
+  <p class="muted">The crawler behind <a href="https://freshjobs-prathu.duckdns.org/">FreshJobs</a>, a job portal for international students in the US.</p>
+
+  <h2>What it does</h2>
+  <p>FreshJobsBot reads the public job listings that employers publish for applicants: the job boards of their own
+  career sites and hiring systems (Workday, Greenhouse, Lever and others). It lets students see new openings soon
+  after they are posted, with a link back to the employer's own page to apply.</p>
+  <ul>
+    <li>It reads only public job listings and job descriptions. It never signs in, never applies, never submits forms,
+      and never collects personal data.</li>
+    <li>It follows each site's <code>robots.txt</code>, including disallowed paths and crawl delays.</li>
+    <li>It keeps request rates low: a limited number of requests at a time per platform, and it backs off on
+      <code>429 Too Many Requests</code> and <code>503</code>, honouring <code>Retry-After</code>.</li>
+    <li>It never tries to get around access controls, bot challenges or CAPTCHAs. If a site blocks it, it stops.</li>
+  </ul>
+
+  <h2>How to recognise it</h2>
+  <p>User-Agent: <code>FreshJobsBot/1.0 (+https://freshjobs-prathu.duckdns.org/bot.html)</code></p>
+  <p>It sends requests only from the IP addresses listed at
+    <a href="/bot-ips.txt"><code>https://freshjobs-prathu.duckdns.org/bot-ips.txt</code></a>.</p>
+
+  <h2>Opting out or contacting us</h2>
+  <p>To stop FreshJobsBot reading your site, add a <code>robots.txt</code> rule for <code>FreshJobsBot</code>
+    (or for all user agents). To reach the operator, use <strong>Contact &amp; support</strong> on the
+    <a href="https://freshjobs-prathu.duckdns.org/">FreshJobs</a> sign-in page.</p>
+</main>
+</body>
+</html>
