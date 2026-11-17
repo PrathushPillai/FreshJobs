@@ -128,7 +128,21 @@ def find_original(
             titles[company_key] = by_title
     from app.sources import ADAPTERS
 
-    for job_id, board_id, still_open in by_title.get(normalize_title(title), ()):
+    norm_title = normalize_title(title)
+    if not description.strip():
+        # Nothing to compare a description with: only another source's open copy with the same apply link or city
+        # can match. Those are read once per save and title (link and place only, never the job row with its
+        # description) and matched in memory: loading each candidate in full for each new job was quadratic,
+        # and Dollar Tree's first Phenom scan (thousands of same-title store jobs also open on Workday) kept the
+        # slow lane saving one board for hours (2026-11-17 profile: all its time in `_loaded`).
+        for job_id in _same_posting_ids(session, titles, company_key, norm_title, by_title, company_id,
+                                        same_poll_ids, url, location):
+            candidate = _loaded(session, job_id)
+            if candidate is not None:
+                return candidate
+        return None
+
+    for job_id, board_id, still_open in by_title.get(norm_title, ()):
         # The same role, still open on the same board, in another place is a separate opening (a chain
         # hiring a store manager in Seattle and in San Francisco), not a repost: the city matters. Skipped
         # before loading the job: 500 open "Store Associate" jobs were each read with their descriptions.
@@ -152,3 +166,27 @@ def find_original(
             if (aggregator or other_aggregator or short) and same_posting(url, location, candidate.url, candidate.location):
                 return candidate
     return None
+
+
+def _same_posting_ids(session, titles, company_key, norm_title, by_title, company_id, same_poll_ids, url, location):
+    """Ids of still-open same-title jobs on other sources that `same_posting` matches, in `by_title` order.
+
+    The candidates' (url_key, places) are read once and kept in `titles` (keyed by a tuple, so they never clash
+    with an employer's key) for the rest of the save."""
+    key = ("postings", company_key, norm_title, company_id)
+    cached = titles.get(key) if titles is not None else None
+    if cached is None:
+        ids = [job_id for job_id, board_id, still_open in by_title.get(norm_title, ())
+               if still_open and board_id != company_id]
+        info: dict[int, tuple[str, set]] = {}
+        for i in range(0, len(ids), 500):
+            for job_id, job_url, job_location in session.execute(
+                select(Job.id, Job.url, Job.location).where(Job.id.in_(ids[i:i + 500]))
+            ):
+                info[job_id] = (url_key(job_url), _places(job_location))
+        cached = [(job_id, *info[job_id]) for job_id in ids if job_id in info]
+        if titles is not None:
+            titles[key] = cached
+    mine_url, mine_places = url_key(url), _places(location)
+    return [job_id for job_id, their_url, their_places in cached
+            if job_id not in same_poll_ids and ((mine_url and mine_url == their_url) or (mine_places & their_places))]

@@ -704,3 +704,39 @@ def test_a_rate_limited_board_retries_within_half_an_hour(session):
     assert not poller._due(c, now)
     c.last_status, c.last_polled_at = "error: HTTP 502", now - timedelta(minutes=31)
     assert not poller._due(c, now)  # other errors still wait idle_poll_minutes
+
+
+def test_copies_without_descriptions_are_matched_from_one_read_per_title(session, now):
+    """A second source listing an employer's many same-title jobs with no description (Dollar Tree's Phenom
+    site against its Workday board, 2026-11-17) matches each by city from one light read, not by loading every
+    candidate for every new job."""
+    from sqlalchemy import event
+
+    prefs = get_prefs(session)
+    board = make_company(session)
+    process_company(session, board, [nj(str(i), title="Store Associate", location=f"Town{i}, TX")
+                                     for i in range(30)], prefs, now)
+    other = Company(name="Acme", ats="phenom", slug="careers.acme.com/us/en")
+    session.add(other)
+    session.flush()
+    reads = []
+
+    def count(conn, cursor, statement, *args):
+        if statement.lstrip().startswith("SELECT jobs.id, jobs.url, jobs.location"):
+            reads.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", count)
+    try:
+        copies = process_company(session, other, [nj(f"p{i}", title="Store Associate", location=f"Town{i}, TX",
+                                                     description="") for i in range(30)]
+                                 + [nj("p99", title="Store Associate", location="Elsewhere, TX", description="")],
+                                 prefs, now + timedelta(hours=1))
+    finally:
+        event.remove(engine, "before_cursor_execute", count)
+    assert len(reads) == 1
+    by_id = {j.external_id: j for j in copies}
+    assert all(by_id[f"p{i}"].is_repost for i in range(30))
+    from app.models import Job
+    assert session.get(Job, by_id["p7"].repost_of_id).location == "Town7, TX"
+    assert not by_id["p99"].is_repost  # a town the other board doesn't list is its own opening
