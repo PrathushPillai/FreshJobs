@@ -618,3 +618,33 @@ async def test_workday_comes_back_gently_after_a_429(monkeypatch):
         for _ in range(3):
             await WorkdayAdapter().fetch(client, WD_SLUG, full=True, known_ids=known)
     assert workday._PAUSE.seconds == 0.0 and workday._gentle["left"] == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_robots_disallowed_site_is_not_read(monkeypatch):
+    """NVIDIA's robots.txt disallows its research site: we never read it, and every request says who we are."""
+    from app.sources import workday
+
+    monkeypatch.setattr(workday, "_robots", {})
+    robots = respx.get("https://nvidia.wd5.myworkdayjobs.com/robots.txt").mock(return_value=httpx.Response(
+        200, text="User-agent: *\nAllow: /NVIDIAExternalCareerSite/\nDisallow: /NVIDIAExternalCareerSiteResearch/\n"))
+    jobs = respx.post(url__startswith="https://nvidia.wd5.myworkdayjobs.com/wday/cxs/").mock(
+        return_value=httpx.Response(200, json={"total": 0, "jobPostings": [], "facets": []}))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="robots.txt"):
+            await WorkdayAdapter().fetch(client, "nvidia|wd5|NVIDIAExternalCareerSiteResearch", full=True)
+        assert jobs.call_count == 0
+        await WorkdayAdapter().fetch(client, "nvidia|wd5|NVIDIAExternalCareerSite", full=True)
+    assert robots.call_count == 1  # cached per host
+    assert jobs.calls[0].request.headers["User-Agent"].startswith("FreshJobsBot/1.0 (+")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_robots_unreadable_means_allowed(monkeypatch):
+    from app.sources import workday
+
+    monkeypatch.setattr(workday, "_robots", {})
+    respx.get("https://nvidia.wd5.myworkdayjobs.com/robots.txt").mock(return_value=httpx.Response(429))
+    assert await workday.robots_allows(httpx.AsyncClient(), "https://nvidia.wd5.myworkdayjobs.com", "/X/")
