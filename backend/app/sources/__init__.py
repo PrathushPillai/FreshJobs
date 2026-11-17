@@ -23,6 +23,7 @@ from app.sources.manatal import ManatalAdapter
 from app.sources.microsoft import MicrosoftAdapter
 from app.sources.oracle_hcm import OracleHCMAdapter
 from app.sources.paylocity import PaylocityAdapter
+from app.sources.phenom import PhenomAdapter
 from app.sources.pinpoint import PinpointAdapter
 from app.sources.polymer import PolymerAdapter
 from app.sources.radancy import RadancyAdapter
@@ -69,6 +70,9 @@ ADAPTERS: dict[str, Adapter] = {
         PolymerAdapter(),
         JazzHRAdapter(),
         RadancyAdapter(),  # TalentBrew careers sites (Spectrum, Moody's, Arm...), from their sitemaps
+        # Phenom careers sites (CVS, O'Reilly, Lowe's, TJX...): most front a Workday board, so they were left out to
+        # avoid duplicates until Workday's Cloudflare began refusing our client (2026-11-17); dedupe merges copies.
+        PhenomAdapter(),
         AvatureAdapter(),  # Avature portals (Koch, Bloomberg, Synopsys...), from their sitemaps
         TaleoAdapter(),  # Oracle Taleo Enterprise career sections (Textron, D.R. Horton, Zions...)
         ADPAdapter(),  # ADP Workforce Now career centers

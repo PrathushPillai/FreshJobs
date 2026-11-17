@@ -62,13 +62,14 @@ def sign_up(client, email="me@example.test", password="correct horse battery", n
 
 @pytest.fixture(autouse=True)
 def _workday_robots_allow(request, monkeypatch):
-    """Workday's robots.txt check is tested on its own (test_workday_robots_*); elsewhere the fake Workday servers
+    """The robots.txt check of the Workday and Phenom readers is tested on its own (tests named *robots*); elsewhere the fake Workday servers
     have no robots.txt, so it allows everything."""
     if "robots" in request.node.name:
         return
-    from app.sources import workday
+    from app.sources import phenom, workday
 
     async def allow(*a, **k):
         return True
 
     monkeypatch.setattr(workday, "robots_allows", allow)
+    monkeypatch.setattr(phenom, "robots_allows", allow)
