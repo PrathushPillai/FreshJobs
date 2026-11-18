@@ -551,9 +551,13 @@ def _due(company: Company, now: datetime) -> bool:
     # A rate limit (429) passes in minutes: such a board waits RATE_LIMITED_RETRY_MINUTES, not 3 hours. On Monday
     # 2026-11-16, Workday's 429s on the week's first wave of postings parked 2,461 of 4,937 Workday boards, and the
     # median Workday board went 8 hours without a good check.
+    # A board refused again and again backs off (30, 60, 120, then 180 minutes): during Workday's block (from
+    # 2026-11-16) ~2,800 refused Workday boards were all due every 30 minutes, the slow lane cut ~4,900 boards
+    # short per pass, and the health monitor warned that it couldn't keep up.
     rate_limited = failing and company.last_ok_at is not None and "HTTP 429" in status
     if rate_limited and not retry_soon:
-        interval = max(interval, RATE_LIMITED_RETRY_MINUTES)
+        extra = max((company.fail_streak or 0) - RETRY_FAILS - 1, 0)
+        interval = max(interval, min(RATE_LIMITED_RETRY_MINUTES * 2 ** min(extra, 4), settings.idle_poll_minutes))
     elif empty_and_slowed or (failing and not retry_soon):
         interval = max(interval, settings.idle_poll_minutes)
     if interval <= 0:

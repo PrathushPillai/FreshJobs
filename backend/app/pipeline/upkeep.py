@@ -1,5 +1,6 @@
 """Hourly work beside discovery: real names for boards still named after their slug, closing jobs of switched-off
-sources that nobody can check any more, and the AI visa reader. Each part fails on its own.
+sources that nobody can check any more, the AI visa reader, and the next batch of Phenom careers sites
+(`phenom_rollout`, only once the last batch loaded cleanly). Each part fails on its own.
 
 Run by the discovery worker after each discovery run (lanes.run_discovery_once) and by main.run_discovery in the
 old thread mode. Until 2026-11-16 it was called only from main.run_discovery, which the worker mode never uses, so
@@ -15,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def run() -> dict:
-    from app.pipeline import source_names, visa_reader
+    from app.pipeline import phenom_rollout, source_names, visa_reader
     from app.pipeline.poller import close_stale_of_disabled
 
     out: dict = {}
@@ -24,6 +25,7 @@ def run() -> dict:
     # limits, so it does 100 boards an hour.
     for key, fn in (("visa_reader", lambda s: visa_reader.run_once(s)),
                     ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc))),
+                    ("phenom_rollout", lambda s: phenom_rollout.step(s)),
                     ("named", lambda s: source_names.name_some(s, limit=100))):
         try:
             with SessionLocal() as session:

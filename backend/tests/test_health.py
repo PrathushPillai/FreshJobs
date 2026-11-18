@@ -113,3 +113,29 @@ def test_a_failure_during_a_restart_waits_for_the_next_run(monitor, monkeypatch)
     monitor["checks"] = [Check("backend", "fail", "down")]
     health.run()
     assert monitor["sent"] == []  # a deploy restarts the backend for minutes
+
+
+def _flood_feed(session, employers: list[str]):
+    from app.models import Company, Job
+
+    jazz = Company(name="JazzHR (all employers)", ats="jazzhr", slug="all", enabled=True)
+    session.add(jazz)
+    session.flush()
+    now = datetime.now(timezone.utc)
+    for i, employer in enumerate(employers):
+        session.add(Job(company_id=jazz.id, external_id=str(i), title=f"Role {i}", url=f"https://x/{i}",
+                        company_name=employer, company_key=employer.lower(), location="Austin, TX",
+                        us_eligible=True, fingerprint=f"f{i}", first_seen_at=now, last_seen_at=now))
+    session.commit()
+    return next(c for c in health.check_feed_content(session) if c.name == "one source flooding")
+
+
+def test_a_multi_employer_source_is_counted_per_employer(session):
+    # JazzHR's daily batch: hundreds of jobs from one source, each from a different employer. Not a flood.
+    check = _flood_feed(session, [f"Employer {i}" for i in range(300)])
+    assert check.level == "ok"
+
+
+def test_one_employer_flooding_through_a_multi_employer_source_is_flagged(session):
+    check = _flood_feed(session, ["Blaster Inc"] * 60 + [f"Employer {i}" for i in range(240)])
+    assert check.level == "warn" and "Blaster Inc (via JazzHR" in check.detail and "60 of the newest 300" in check.detail

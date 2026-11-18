@@ -166,3 +166,36 @@ def test_scoring_runs_at_the_lowest_cpu_priority(monkeypatch):
     calls = []
     monkeypatch.setattr(scoring.os, "nice", lambda n: calls.append(n), raising=False)
     assert scoring.lower_priority() is True and calls == [scoring.SCORING_NICE]
+
+
+def test_a_stuck_or_frozen_worker_is_judged_stuck():
+    now = datetime(2026, 11, 17, 22, 0, tzinfo=timezone.utc)
+    started_worker = now - timedelta(hours=5)
+    beat = now.isoformat()
+    running = lambda minutes: {"polling": True, "heartbeat": beat,  # noqa: E731
+                               "started_at": (now - timedelta(minutes=minutes)).isoformat()}
+    assert lanes.stuck_reason("slow", running(60), now, started_worker) is None  # long, but within limits
+    assert "one run going for 170 min" == lanes.stuck_reason("slow", running(170), now, started_worker)
+    assert lanes.stuck_reason("fast", running(45), now, started_worker)  # fast's limit is much shorter
+    assert lanes.stuck_reason("slow", {**running(170), "polling": False}, now, started_worker) is None
+    frozen = {"polling": False, "heartbeat": (now - timedelta(minutes=20)).isoformat()}
+    assert "no heartbeat" in lanes.stuck_reason("bulk", frozen, now, started_worker)
+    # A new worker hasn't written its own status yet: its predecessor's run doesn't count against it.
+    assert lanes.stuck_reason("slow", running(170), now, now - timedelta(minutes=2)) is None
+    assert lanes.stuck_reason("bulk", frozen, now, now - timedelta(minutes=2)) is None
+
+
+def test_restarts_are_logged_for_the_health_monitor(lane_dir, monkeypatch):
+    from app import health
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+
+    now = datetime.now(timezone.utc)
+    lanes.record_restart("slow", "one run going for 170 min", now - timedelta(days=8))  # dropped: over a week
+    lanes.record_restart("slow", "one run going for 170 min", now - timedelta(hours=1))
+    assert [e["lane"] for e in lanes.recent_restarts(now)] == ["slow"]
+    one = [c for c in health.check_lanes(now) if c.name == "self-repair"]
+    lanes.record_restart("slow", "one run going for 160 min", now)
+    two = [c for c in health.check_lanes(now) if c.name == "self-repair"]
+    assert one[0].level == "ok" and two[0].level == "warn" and "slow 2x" in two[0].detail

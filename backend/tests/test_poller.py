@@ -697,13 +697,31 @@ def test_a_rate_limited_board_retries_within_half_an_hour(session):
     from app.pipeline import poller
 
     now = datetime.now(timezone.utc)
-    c = Company(name="Acme", ats="greenhouse", slug="acme", last_status="error: HTTP 429", fail_streak=5,
+    c = Company(name="Acme", ats="greenhouse", slug="acme", last_status="error: HTTP 429", fail_streak=3,
                 last_ok_at=now - timedelta(hours=1), last_polled_at=now - timedelta(minutes=31), poll_count=3)
     assert poller._due(c, now)
     c.last_polled_at = now - timedelta(minutes=10)
     assert not poller._due(c, now)
     c.last_status, c.last_polled_at = "error: HTTP 502", now - timedelta(minutes=31)
     assert not poller._due(c, now)  # other errors still wait idle_poll_minutes
+
+
+def test_a_board_refused_again_and_again_backs_off(session):
+    """30, 60, 120, then 180 minutes between tries while a board keeps answering 429 (Workday's block)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import Company
+    from app.pipeline import poller
+
+    now = datetime.now(timezone.utc)
+    c = Company(name="Acme", ats="greenhouse", slug="acme", last_status="error: HTTP 429",
+                last_ok_at=now - timedelta(days=1), poll_count=3)
+    for streak, wait in ((3, 30), (4, 60), (5, 120), (6, 180), (40, 180)):
+        c.fail_streak = streak
+        c.last_polled_at = now - timedelta(minutes=wait - 5)
+        assert not poller._due(c, now), streak
+        c.last_polled_at = now - timedelta(minutes=wait + 1)
+        assert poller._due(c, now), streak
 
 
 def test_copies_without_descriptions_are_matched_from_one_read_per_title(session, now):

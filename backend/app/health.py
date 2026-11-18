@@ -186,6 +186,21 @@ def check_lanes(now: datetime) -> list[Check]:
             level, detail = "warn", detail + " (many boards failing)"
         out.append(Check(f"{lane} polls", level, detail, {k: last.get(k) for k in
                                                           ("sources", "errors", "new_jobs", "cut_short")}))
+    # The backend restarts a stuck worker by itself (lanes._supervise). Once is repaired; again within 12 hours
+    # means the same thing keeps getting stuck, which needs a person.
+    from app.lanes import recent_restarts
+
+    restarts = recent_restarts(now)
+    if restarts:
+        per_lane: dict[str, int] = {}
+        for e in restarts:
+            per_lane[e["lane"]] = per_lane.get(e["lane"], 0) + 1
+        repeat = {lane: k for lane, k in per_lane.items() if k >= 2}
+        last = restarts[-1]
+        detail = (f"stuck workers restarted in 12 h: " + ", ".join(f"{lane} {k}x" for lane, k in per_lane.items())
+                  + f" (last: {last['lane']}, {last['why']})")
+        out.append(Check("self-repair", "warn" if repeat else "ok",
+                         detail + (" - the same lane keeps getting stuck" if repeat else ""), {"restarts": restarts}))
     return out
 
 
@@ -399,15 +414,23 @@ def check_feed_content(session) -> list[Check]:
                      + (f", e.g. {dups[0][1]!r} at {dups[0][2]} (job {dups[0][0]})" if dups else ""),
                      {"examples": dups[:10]}))
 
-    per_source: dict[int, int] = {}
+    # Per employer: a single-employer board counts as itself, and a multi-employer source (JazzHR, Workable,
+    # SimplifyJobs...) counts per employer it lists. Counting per source exempted those sources entirely and named
+    # the flood after whichever employer came first: on 2026-11-17 JazzHR's daily batch (1,331 of the newest 2,000
+    # jobs, thousands of employers) showed as "Mobomo, LLC has 67%", marked ok, while Mobomo had 2 jobs.
+    per_employer: dict[tuple, list] = {}
     for r in rows:
-        per_source[r.company_id] = per_source.get(r.company_id, 0) + 1
-    top_id, top = max(per_source.items(), key=lambda kv: kv[1])
-    top_name = next(r.company_name or r.name for r in rows if r.company_id == top_id)
-    multi = next(r.ats for r in rows if r.company_id == top_id) in _MULTI_EMPLOYER
-    flood = n >= 200 and top / n > FLOOD_SHARE and not multi  # shares mean little in a small feed
+        key = (("employer", r.company_key or (r.company_name or "").lower()) if r.ats in _MULTI_EMPLOYER
+               else ("board", r.company_id))
+        per_employer.setdefault(key, []).append(r)
+    top_key, top_rows = max(per_employer.items(), key=lambda kv: len(kv[1]))
+    top, first = len(top_rows), top_rows[0]
+    top_name = first.company_name or first.name
+    via = f" (via {first.name})" if top_key[0] == "employer" else ""
+    flood = n >= 200 and top / n > FLOOD_SHARE  # shares mean little in a small feed
     out.append(Check("one source flooding", "warn" if flood else "ok",
-                     f"the busiest source, {top_name}, has {top} of the newest {n} jobs ({top / n:.0%})", {"source": top_id}))
+                     f"the busiest employer, {top_name}{via}, has {top} of the newest {n} jobs ({top / n:.0%})",
+                     {"source": first.company_id, "employer": top_name}))
 
     # Boards still named after their slug that source_names hasn't asked for a real name yet ("Viatris" may be the
     # real name: once asked, a board counts as named either way).

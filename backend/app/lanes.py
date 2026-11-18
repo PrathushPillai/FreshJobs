@@ -304,7 +304,70 @@ def _spawn(lane: str) -> None:
     env = {**os.environ, "FRESHJOBS_PARENT_PID": str(os.getpid())}
     _procs[lane] = subprocess.Popen([sys.executable, "-m", "app.lanes", lane], stdin=subprocess.DEVNULL, env=env,
                                     cwd=str(Path(__file__).resolve().parent.parent), **kwargs)
+    _started_at[lane] = datetime.now(timezone.utc)
     log.info("started the %s worker (pid %d)", lane, _procs[lane].pid)
+
+
+# A run longer than this is stuck (several times each lane's deadline: fast 8, slow 45, bulk 30 minutes; discovery
+# has none). On 2026-11-17 one save (Dollar Tree's first Phenom scan) kept the slow worker busy for 3 hours, since
+# a deadline can't stop a save already running, and nothing was noticed until a person looked. A worker whose
+# heartbeat stops (a frozen process) is restarted too.
+STUCK_MINUTES = {"fast": 40, "slow": 150, "bulk": 150, "discovery": 360}
+FROZEN_MINUTES = 10
+RESTART_LOG = "restarts.json"  # lanes/restarts.json: [{lane, at, why}], read by the health monitor
+
+
+def _age_minutes(iso: str | None, now: datetime) -> float | None:
+    try:
+        return (now - datetime.fromisoformat(iso)).total_seconds() / 60 if iso else None
+    except ValueError:
+        return None
+
+
+def _within(iso: str | None, now: datetime, minutes: float) -> bool:
+    age = _age_minutes(iso, now)
+    return age is not None and age < minutes
+
+
+def stuck_reason(lane: str, status: dict, now: datetime, worker_started: datetime) -> str | None:
+    """Why a running worker should be restarted, or None. Only judged on a status the worker wrote after it
+    started (a new worker's file still holds its predecessor's last state)."""
+    beat = _age_minutes(status.get("heartbeat"), now)
+    alive_for = (now - worker_started).total_seconds() / 60
+    if beat is not None and beat > FROZEN_MINUTES and alive_for > FROZEN_MINUTES:
+        return f"no heartbeat for {beat:.0f} min"
+    started = status.get("started_at")
+    if status.get("polling") and started and datetime.fromisoformat(started) >= worker_started:
+        running = _age_minutes(started, now)
+        running = 0 if running is None else running
+        if running > STUCK_MINUTES.get(lane, 150):
+            return f"one run going for {running:.0f} min"
+    return None
+
+
+def record_restart(lane: str, why: str, now: datetime) -> None:
+    path = lanes_dir() / RESTART_LOG
+    try:
+        entries = json.loads(path.read_text())
+    except (OSError, ValueError):
+        entries = []
+    entries = [e for e in entries if _within(e.get("at"), now, 7 * 24 * 60)]  # a week is plenty
+    entries.append({"lane": lane, "at": now.isoformat(), "why": why})
+    try:
+        path.write_text(json.dumps(entries))
+    except OSError:
+        log.warning("couldn't write %s", path, exc_info=True)
+
+
+def recent_restarts(now: datetime, hours: float = 12) -> list[dict]:
+    try:
+        entries = json.loads((lanes_dir() / RESTART_LOG).read_text())
+    except (OSError, ValueError):
+        return []
+    return [e for e in entries if _within(e.get("at"), now, hours * 60)]
+
+
+_started_at: dict[str, datetime] = {}
 
 
 def _supervise() -> None:
@@ -312,6 +375,19 @@ def _supervise() -> None:
         for lane, proc in list(_procs.items()):
             if proc.poll() is not None:
                 log.warning("the %s worker stopped (exit %s); starting it again", lane, proc.returncode)
+                _spawn(lane)
+                continue
+            now = datetime.now(timezone.utc)
+            why = stuck_reason(lane, lane_status(lane), now, _started_at.get(lane, now))
+            if why:
+                # Saving commits as it goes, so a restart keeps what was saved; the rest stays due.
+                log.warning("the %s worker looks stuck (%s); restarting it", lane, why)
+                record_restart(lane, why, now)
+                proc.kill()
+                try:
+                    proc.wait(timeout=30)
+                except Exception:
+                    pass
                 _spawn(lane)
 
 
