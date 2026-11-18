@@ -115,7 +115,7 @@ def test_a_failure_during_a_restart_waits_for_the_next_run(monitor, monkeypatch)
     assert monitor["sent"] == []  # a deploy restarts the backend for minutes
 
 
-def _flood_feed(session, employers: list[str]):
+def _flood_feed(session, employers: list[str], title=lambda i, employer: f"Role {i}"):
     from app.models import Company, Job
 
     jazz = Company(name="JazzHR (all employers)", ats="jazzhr", slug="all", enabled=True)
@@ -123,7 +123,7 @@ def _flood_feed(session, employers: list[str]):
     session.flush()
     now = datetime.now(timezone.utc)
     for i, employer in enumerate(employers):
-        session.add(Job(company_id=jazz.id, external_id=str(i), title=f"Role {i}", url=f"https://x/{i}",
+        session.add(Job(company_id=jazz.id, external_id=str(i), title=title(i, employer), url=f"https://x/{i}",
                         company_name=employer, company_key=employer.lower(), location="Austin, TX",
                         us_eligible=True, fingerprint=f"f{i}", first_seen_at=now, last_seen_at=now))
     session.commit()
@@ -137,5 +137,35 @@ def test_a_multi_employer_source_is_counted_per_employer(session):
 
 
 def test_one_employer_flooding_through_a_multi_employer_source_is_flagged(session):
-    check = _flood_feed(session, ["Blaster Inc"] * 60 + [f"Employer {i}" for i in range(240)])
+    # 60 copies of 3 roles across towns (location blasting, like AO Garcia Agency's).
+    check = _flood_feed(session, ["Blaster Inc"] * 60 + [f"Employer {i}" for i in range(240)],
+                        title=lambda i, e: f"Sales Rep {i % 3}" if e == "Blaster Inc" else f"Role {i}")
     assert check.level == "warn" and "Blaster Inc (via JazzHR" in check.detail and "60 of the newest 300" in check.detail
+
+
+def test_a_big_employer_posting_many_different_jobs_is_not_a_flood(session):
+    # Allied Universal, 2026-11-18: 303 new jobs in one check with 290 different titles.
+    check = _flood_feed(session, ["Big Employer"] * 60 + [f"Employer {i}" for i in range(240)])
+    assert check.level == "ok"
+
+
+def test_past_the_max_share_it_is_a_flood_whatever_the_titles(session):
+    check = _flood_feed(session, ["Big Employer"] * 100 + [f"Employer {i}" for i in range(200)])
+    assert check.level == "warn"
+
+
+def test_one_outage_is_one_alert():
+    """Workday's block also makes its boards stale and the slow lane fall behind: one warning, not three."""
+    checks = [Check("job platforms", "warn", "most boards failing on: workday (3,206 of 4,976)",
+                    {"platforms": [["workday", 4976, 3206]]}),
+              Check("platform freshness", "warn", "boards not checked for hours on: workday (59 h)",
+                    {"platforms": ["workday"]}),
+              Check("slow polls", "warn", "last poll finished 29 min ago: 8,228 boards, 23 errors, 2,052 new jobs, "
+                    "4,954 cut short (the lane can't keep up)"),
+              Check("fast polls", "warn", "last poll finished 1 min ago: 19,000 boards, 1 errors, 5 new jobs, "
+                    "9,000 cut short (the lane can't keep up)")]
+    out = {c.name: c.level for c in health._one_alert_per_incident(checks)}
+    assert out == {"job platforms": "warn", "platform freshness": "ok", "slow polls": "ok", "fast polls": "warn"}
+    other = [Check("job platforms", "warn", "x", {"platforms": [["workday", 10, 9]]}),
+             Check("platform freshness", "warn", "y", {"platforms": ["workday", "greenhouse"]})]
+    assert health._one_alert_per_incident(other)[1].level == "warn"  # Greenhouse going stale is its own problem

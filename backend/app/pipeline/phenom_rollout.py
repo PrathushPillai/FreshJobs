@@ -36,7 +36,17 @@ def candidates(results: dict, tracked: set[str]) -> list[tuple[str, dict]]:
     usable = [(name, v) for name, v in results.items()
               if v.get("us_jobs") and v.get("slug") and v["slug"].lower() not in tracked
               and v["us_jobs"] >= MIN_SHARE * (v.get("workday_jobs") or 0)]
-    return sorted(usable, key=lambda nv: -nv[1]["us_jobs"])
+    # One site can belong to two DOL names ("Abbott" and "ABBOTT LABORATORIES", "Mercy" and "Mercy Clinic
+    # Springfield Communities"): each site once, under the name with the bigger Workday board. Adding both in one
+    # batch broke the (ats, slug) unique key and failed every hourly run from 2026-11-18 17:33 UTC.
+    usable.sort(key=lambda nv: (-nv[1]["us_jobs"], -(nv[1].get("workday_jobs") or 0)))
+    seen: set[str] = set()
+    out = []
+    for name, v in usable:
+        if v["slug"].lower() not in seen:
+            seen.add(v["slug"].lower())
+            out.append((name, v))
+    return out
 
 
 def waiting_on(session) -> list[str]:

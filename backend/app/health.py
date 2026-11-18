@@ -259,7 +259,8 @@ def check_platform_freshness(session, now: datetime) -> Check:
         if len(values) >= 5 and median > limit:
             stale.append(f"{ats} ({median:.0f} h)")
     if stale:
-        return Check("platform freshness", "warn", "boards not checked for hours on: " + ", ".join(stale))
+        return Check("platform freshness", "warn", "boards not checked for hours on: " + ", ".join(stale),
+                     {"platforms": [x.split(" (")[0] for x in stale]})
     return Check("platform freshness", "ok", f"every platform's boards checked within {FRESHNESS_WARN_HOURS} h")
 
 
@@ -355,7 +356,9 @@ _JUNK_TITLE = re.compile(r"&[a-z]{2,8};|&#\d+;|<[a-z/][^>]*>|\{\{|\bundefined\b|
 
 
 FEED_SAMPLE = 2000  # the newest visible jobs the content checks read
-FLOOD_SHARE = 0.08  # one source with more than this share of the newest jobs is flooding the feed
+FLOOD_SHARE = 0.08  # one employer with more than this share of the newest jobs, mostly copies, is flooding the feed
+FLOOD_DISTINCT_TITLES = 0.5  # "mostly copies": fewer different titles than half its jobs
+FLOOD_MAX_SHARE = 0.3  # past this share it's a flood even with all different titles
 FOREIGN_ALLOWED = 3  # jobs abroad in the US feed (the location rules missed a format)
 DUPLICATES_ALLOWED = 5  # one posting shown twice (from two sources)
 SLUG_NAME_SHARE = 0.15  # employers shown by a board's code name ("Tjx", "Acadiahealthcare")
@@ -427,9 +430,15 @@ def check_feed_content(session) -> list[Check]:
     top, first = len(top_rows), top_rows[0]
     top_name = first.company_name or first.name
     via = f" (via {first.name})" if top_key[0] == "employer" else ""
-    flood = n >= 200 and top / n > FLOOD_SHARE  # shares mean little in a small feed
+    # A flood is one employer's copies: AO Garcia Agency's 3,156 jobs were 156 roles blasted across towns (2026-11-15).
+    # A big employer posting many different jobs isn't: Allied Universal's 303 new jobs in one check had 290 titles
+    # (2026-11-18). Past FLOOD_MAX_SHARE it warns whatever the titles.
+    titles = len({normalize_title(r.title or "") for r in top_rows})
+    copies = titles / top < FLOOD_DISTINCT_TITLES
+    flood = n >= 200 and (top / n > FLOOD_MAX_SHARE or (top / n > FLOOD_SHARE and copies))
     out.append(Check("one source flooding", "warn" if flood else "ok",
-                     f"the busiest employer, {top_name}{via}, has {top} of the newest {n} jobs ({top / n:.0%})",
+                     f"the busiest employer, {top_name}{via}, has {top} of the newest {n} jobs ({top / n:.0%}, "
+                     f"{titles} different titles)",
                      {"source": first.company_id, "employer": top_name}))
 
     # Boards still named after their slug that source_names hasn't asked for a real name yet ("Viatris" may be the
@@ -523,7 +532,29 @@ def run_checks(previous: dict | None = None, force_portal: bool = False) -> list
     portal = check_portal(previous, now, force_portal)
     if portal:
         checks.append(portal)
-    return [c for c in checks if c.level != "skip"]
+    return _one_alert_per_incident([c for c in checks if c.level != "skip"])
+
+
+def _one_alert_per_incident(checks: list[Check]) -> list[Check]:
+    """A platform-wide outage (Workday's block, 2026-11-16 on) also shows as stale boards on that platform and as a
+    slow lane that can't keep up. Those follow from the "job platforms" warning, which stays the one alert: before,
+    all three emailed every 12 hours for the same outage. Another platform going stale, or a lane falling behind
+    with no platform-wide outage in its lane, still warns."""
+    from app.sources import ADAPTERS
+
+    outage = next((c for c in checks if c.name == "job platforms" and c.level == "warn"), None)
+    if outage is None:
+        return checks
+    failing = {p[0] for p in outage.data.get("platforms", [])}
+    lanes_hit = {getattr(ADAPTERS.get(ats), "lane", "fast") for ats in failing}
+    for c in checks:
+        if c.level != "warn":
+            continue
+        if c.name == "platform freshness" and set(c.data.get("platforms", [])) <= failing:
+            c.level, c.detail = "ok", c.detail + " (part of the job platforms outage)"
+        elif c.name.endswith(" polls") and c.name.split()[0] in lanes_hit and c.detail.endswith("(the lane can't keep up)"):
+            c.level, c.detail = "ok", c.detail + " (part of the job platforms outage)"
+    return checks
 
 
 def _problems(checks: list[Check], since: dict, now: datetime) -> list[Check]:
