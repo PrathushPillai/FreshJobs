@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { api, formatDateTime, type H1BHistory, type JobDetail as JobDetailType, type MatchDetail, money, postedText, SOURCE_LABELS, timeAgo, WINDOW_HINT } from '../api'
 import { Badge, CompanyAvatar, EmployerKindBadge, ExperienceBadge, ListingFlagBadge, MatchRing, RepeatBadge, SponsorBadge, SponsorLikelyBadge, TrackControl, VisaSignalBadges } from './ui'
@@ -122,6 +122,32 @@ function Recruiters({ jobId }: { jobId: number }) {
 }
 
 /** The job's full details: header, apply/track actions, facts, recruiter finder and description. */
+/** On a job hidden as non-IT (shown with "Show non-IT jobs"): say so, and let the user say it's IT. */
+function NotItNote({ id }: { id: number }) {
+  const queryClient = useQueryClient()
+  const mark = useMutation({
+    mutationFn: () => api.markIt(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['job', id] })
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    },
+  })
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 ring-1 ring-amber-200">
+      <span>This job is hidden from the feed as not an IT job.</span>
+      <button
+        type="button"
+        disabled={mark.isPending || mark.isSuccess}
+        onClick={() => mark.mutate()}
+        className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-800 ring-1 ring-amber-300 transition hover:bg-amber-100 disabled:opacity-60"
+      >
+        {mark.isSuccess ? '✓ Thanks, it will show in the feed' : mark.isPending ? 'Saving…' : 'This is an IT job'}
+      </button>
+      {mark.isError && <span className="text-rose-700">Couldn't save; try again.</span>}
+    </div>
+  )
+}
+
 export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawer?: boolean }) {
   const job = useQuery({ queryKey: ['job', id], queryFn: () => api.job(id) })
   const j = job.data
@@ -222,6 +248,7 @@ export function JobDetailContent({ id, inDrawer = false }: { id: number; inDrawe
           </a>
           <TrackControl job={j} />
         </div>
+        {j.it_role === 'other' && <NotItNote id={j.id} />}
         {(j.closed_at || closedNow) ? (
           <p className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700 ring-1 ring-rose-200">
             This job has closed{check.data?.detail ? ` (${check.data.detail})` : ''}. It's hidden from the feed now.

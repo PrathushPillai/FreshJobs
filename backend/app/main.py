@@ -329,6 +329,7 @@ class JobOut(BaseModel):
     h1b_filings: int | None
     employer_kind: str | None = None  # "consultancy", "staffing" or empty (h1b.job_employer_kind): a badge
     listing_flag: str | None = None  # "scam" or "mlm" (pipeline/listing_quality): a red badge
+    it_role: str | None = None  # "tech", "edge", "other" (hidden by default), "kept" (a person said it's IT)
     application: TrackedOut | None
     # How likely the employer is to sponsor (pipeline/sponsorship.sponsor_likelihood): likely, possible,
     # unlikely or ruled_out. Derived from the fields above, so it never disagrees with them.
@@ -663,6 +664,7 @@ def list_jobs(
     everify_only: bool = False,  # employers in USCIS's E-Verify list, or whose posting says they use it
     hide_consultancies: bool = False,  # opt-in: leave out consultancies and staffing firms (Job.employer_kind)
     hide_flagged: bool = False,  # opt-in: leave out possible scams and MLM recruiting (Job.listing_flag)
+    it_only: bool = True,  # FreshJobs is an IT job feed: leave out clearly non-IT jobs (Job.it_role "other")
     hide_no_sponsor: bool = True,
     show_reposts: bool = False,
     repeat_kinds: list[str] = Query([]),  # with show_reposts: which repeats to show (empty = all of REPEAT_KINDS)
@@ -738,6 +740,9 @@ def list_jobs(
             ))
         if hide_no_sponsor:
             stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
+        if it_only:
+            # IS NOT, so jobs not labelled yet (NULL) are shown. it_role is in every sort index: index-only.
+            stmt = stmt.where(flag("it_role IS NOT 'other'", Job.it_role.is_distinct_from("other")))
         if alert_roles_only:
             stmt = stmt.where(Job.role_match.is_(True))  # someone's For you (all users' roles together)
             if mine is not None:
@@ -1026,6 +1031,21 @@ async def describe_job(job_id: int):
     if not text:
         return {"description": None, "fetched": False}
     return await asyncio.to_thread(_save_description, job_id, text)
+
+
+@app.post("/api/jobs/{job_id}/it-role")
+def mark_it_job(job_id: int, session: Session = Depends(get_session), user: User = Depends(current_user)):
+    """'This is an IT job': a person says a job hidden as non-IT is IT. It's shown again, never relabelled
+    ("kept"), and logged (activity "it_role_flagged", with the title) so the rules in pipeline/tech_roles can learn
+    from it."""
+    job = session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, "No such job")
+    before = job.it_role
+    job.it_role = "kept"
+    session.commit()
+    record("it_role_flagged", user.id, f"job {job_id} ({before}): {job.title[:150]} | {(job.company_name or '')[:60]}")
+    return {"id": job_id, "it_role": "kept"}
 
 
 HUNTER_LOOKUPS_PER_DAY = 10  # per user (the admin: no limit); each spends the admin's Hunter.io credits

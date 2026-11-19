@@ -30,7 +30,7 @@ def client(session, now):
         nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
         nj("2", "Business Intelligence Developer", "Toronto, ON"),
         nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
-        nj("4", "Registered Nurse", "London, UK"),
+        nj("4", "Mainframe Programmer", "London, UK"),
         nj("5", "Data Engineer", "Remote", "Must be a US citizen."),
     ], prefs, now)
     session.commit()
@@ -45,7 +45,7 @@ def titles(resp):
 
 
 def test_any_role_searchable(client):
-    assert titles(client.get("/api/jobs", params={"q": "nurse"})) == ["Registered Nurse"]
+    assert titles(client.get("/api/jobs", params={"q": "mainframe"})) == ["Mainframe Programmer"]
 
 
 def test_related_role_search(client):
@@ -65,7 +65,7 @@ def test_location_filters(client):
     assert titles(client.get("/api/jobs", params={"countries": "United States", "states": "TX"})) == ["Data Analyst"]
     assert titles(client.get("/api/jobs", params={"countries": "United States", "cities": "Seattle"})) == ["Senior Software Engineer"]
     assert titles(client.get("/api/jobs", params=[("countries", "Canada"), ("countries", "United Kingdom")])) == [
-        "Business Intelligence Developer", "Registered Nurse"]
+        "Business Intelligence Developer", "Mainframe Programmer"]
 
 
 def test_location_facets(client):
@@ -84,16 +84,16 @@ def test_experience_filters(client):
 
 
 def test_tracker_flow(client):
-    job = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    job = client.get("/api/jobs", params={"q": "mainframe"}).json()["items"][0]
     created = client.post("/api/applications", json={"job_id": job["id"], "status": "applied"})
     assert created.status_code == 201
     app_id = created.json()["id"]
     assert created.json()["applied_at"] is not None
     assert client.post("/api/applications", json={"job_id": job["id"]}).status_code == 409
 
-    tracked = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    tracked = client.get("/api/jobs", params={"q": "mainframe"}).json()["items"][0]
     assert tracked["application"] == {"id": app_id, "status": "applied"}
-    assert titles(client.get("/api/jobs", params={"tracked": "untracked", "q": "nurse"})) == []
+    assert titles(client.get("/api/jobs", params={"tracked": "untracked", "q": "mainframe"})) == []
 
     patched = client.patch(f"/api/applications/{app_id}", json={"status": "interviewing", "notes": "Phone screen Fri"})
     assert patched.json()["status"] == "interviewing" and patched.json()["notes"] == "Phone screen Fri"
@@ -237,7 +237,7 @@ def test_verify_closes_a_job_whose_apply_page_is_gone(client):
     import httpx
     import respx
 
-    job = client.get("/api/jobs", params={"q": "nurse"}).json()["items"][0]
+    job = client.get("/api/jobs", params={"q": "mainframe"}).json()["items"][0]
     with respx.mock:
         respx.get(job["url"]).mock(return_value=httpx.Response(404))
         resp = client.post(f"/api/jobs/{job['id']}/verify").json()
@@ -254,10 +254,10 @@ def test_job_list_reports_when_its_count_is_capped(client, monkeypatch):
 
 
 def test_related_roles_are_suggested_and_only_searched_when_picked(client):
-    page = client.get("/api/jobs", params={"q": "nurse", "related": "false"}).json()
+    page = client.get("/api/jobs", params={"q": "mainframe", "related": "false"}).json()
     plain = {j["id"] for j in page["items"]}
     assert page["related_terms"] is not None  # suggestions are always returned
-    picked = client.get("/api/jobs", params={"q": "nurse", "related": "false", "also": ["data analyst"]}).json()
+    picked = client.get("/api/jobs", params={"q": "mainframe", "related": "false", "also": ["data analyst"]}).json()
     assert plain <= {j["id"] for j in picked["items"]}
     assert client.get("/api/roles/suggestions", params={"roles": ["data analyst"]}).status_code == 200
 
@@ -273,7 +273,7 @@ def test_repeat_kinds_labelled_and_filterable(client, session, now):
     process_company(session, acme, [nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
                                     nj("2", "Business Intelligence Developer", "Toronto, ON"),
                                     nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
-                                    nj("4", "Registered Nurse", "London, UK"),
+                                    nj("4", "Mainframe Programmer", "London, UK"),
                                     nj("5", "Data Engineer", "Remote", "Must be a US citizen."), old], prefs, now)
     process_company(session, agg, [], prefs, now)  # the aggregator's baseline poll
     process_company(session, agg, [nj("a1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience.", "Acme")],
@@ -318,7 +318,7 @@ def test_student_visa_and_everify_signals(client, session, now):
         nj("1", "Data Analyst", "Austin, TX", "Requires 1+ years of SQL experience."),
         nj("2", "Business Intelligence Developer", "Toronto, ON"),
         nj("3", "Senior Software Engineer", "Seattle, WA", "8+ years of professional experience."),
-        nj("4", "Registered Nurse", "London, UK"),
+        nj("4", "Mainframe Programmer", "London, UK"),
         nj("5", "Data Engineer", "Remote", "Must be a US citizen."),
         nj("7", "Analytics Engineer", "Boston, MA",
            "We're happy to sponsor international candidates (e.g., STEM OPT, OPT, H1B). We participate in E-Verify."),
@@ -337,7 +337,7 @@ def test_fresh_counts_in_one_request(client, session):
     from app.models import Job
 
     today = datetime.now(timezone.utc)
-    for title, hours in (("Data Analyst", 0.5), ("Business Intelligence Developer", 3), ("Registered Nurse", 30)):
+    for title, hours in (("Data Analyst", 0.5), ("Business Intelligence Developer", 3), ("Mainframe Programmer", 30)):
         session.query(Job).filter_by(title=title).one().listed_at = today - timedelta(hours=hours)
     session.query(Job).filter_by(title="Senior Software Engineer").one().listed_at = today - timedelta(hours=12)
     session.commit()
@@ -358,11 +358,11 @@ def test_job_lists_are_cached_until_something_changes(client, session):
 def test_adding_or_removing_a_role_updates_for_you_at_once(client):
     for_you = lambda: titles(client.get("/api/jobs", params={"alert_roles_only": True, "hide_no_sponsor": False}))  # noqa: E731
     prefs = client.get("/api/prefs").json()
-    assert "Registered Nurse" not in for_you() and "Data Analyst" in for_you()
-    client.put("/api/prefs", json={**prefs, "include_keywords": [*prefs["include_keywords"], "nurse"]})
-    assert "Registered Nurse" in for_you()  # no waiting for a background recheck
+    assert "Mainframe Programmer" not in for_you() and "Data Analyst" in for_you()
+    client.put("/api/prefs", json={**prefs, "include_keywords": [*prefs["include_keywords"], "mainframe"]})
+    assert "Mainframe Programmer" in for_you()  # no waiting for a background recheck
     client.put("/api/prefs", json={**prefs, "include_keywords": [k for k in prefs["include_keywords"] if k != "data analyst"]})
-    assert "Registered Nurse" not in for_you() and "Data Analyst" not in for_you()
+    assert "Mainframe Programmer" not in for_you() and "Data Analyst" not in for_you()
 
 
 def test_ranked_search_pages_in_the_same_order_as_one_page(client):
@@ -380,7 +380,7 @@ def test_symbols_only_search_returns_nothing_quickly(client):
 
 
 def test_tracked_only_filter(client):
-    job_id = client.get("/api/jobs", params={"q": "nurse", "countries": "United Kingdom"}).json()["items"][0]["id"]
+    job_id = client.get("/api/jobs", params={"q": "mainframe", "countries": "United Kingdom"}).json()["items"][0]["id"]
     client.post("/api/applications", json={"job_id": job_id, "status": "saved"})
     tracked = client.get("/api/jobs", params={"tracked": "tracked", "countries": "United Kingdom"}).json()["items"]
     assert [j["id"] for j in tracked] == [job_id]
@@ -423,7 +423,7 @@ def test_sponsor_likely_verdict_and_filter(client, session):
     jobs["Data Analyst"].h1b_filings = 250  # likely: 10+ filings
     jobs["Senior Software Engineer"].h1b_filings = 3  # possible: a few filings
     jobs["Business Intelligence Developer"].everify = "yes"  # possible: E-Verify only (STEM OPT)
-    jobs["Registered Nurse"].sponsors_text = True  # likely: the posting says so
+    jobs["Mainframe Programmer"].sponsors_text = True  # likely: the posting says so
     jobs["Data Engineer"].h1b_filings = 900  # ruled out by its text, whatever the filings
     session.commit()
     from app import main
@@ -432,11 +432,11 @@ def test_sponsor_likely_verdict_and_filter(client, session):
     all_jobs = client.get("/api/jobs", params={"hide_no_sponsor": False}).json()["items"]
     assert {j["title"]: j["sponsor_likely"] for j in all_jobs} == {
         "Data Analyst": "likely", "Senior Software Engineer": "possible",
-        "Business Intelligence Developer": "possible", "Registered Nurse": "likely", "Data Engineer": "ruled_out"}
+        "Business Intelligence Developer": "possible", "Mainframe Programmer": "likely", "Data Engineer": "ruled_out"}
     likely = {"hide_no_sponsor": False, "sponsor_likely": "likely"}
-    assert titles(client.get("/api/jobs", params=likely)) == ["Data Analyst", "Registered Nurse"]
+    assert titles(client.get("/api/jobs", params=likely)) == ["Data Analyst", "Mainframe Programmer"]
     assert titles(client.get("/api/jobs", params={**likely, "sponsor_likely": "possible"})) == [
-        "Business Intelligence Developer", "Data Analyst", "Registered Nurse", "Senior Software Engineer"]
+        "Business Intelligence Developer", "Data Analyst", "Mainframe Programmer", "Senior Software Engineer"]
 
 
 def test_startup_survives_a_locked_database(monkeypatch):
@@ -531,3 +531,35 @@ def test_job_employer_kind_rules():
     assert job_employer_kind("Blue Ridge Consulting Group", "lever", idx) == "consultancy"  # the name says so
     assert job_employer_kind("TekPro Staffing", "ashby", idx) == "staffing"
     assert job_employer_kind("Stripe", "greenhouse", idx) == ""
+
+
+def test_non_it_jobs_are_hidden_by_default_and_shown_with_it_only_off(session, now):
+    """FreshJobs is an IT job feed (2026-11-19): clearly non-IT jobs (pipeline/tech_roles) are hidden unless the
+    Feed's "Show non-IT jobs" sends it_only=false; jobs not labelled yet (it_role NULL) are shown."""
+    from app.models import Job
+
+    co = Company(name="Clinic", ats="greenhouse", slug="clinic")
+    session.add(co)
+    session.flush()
+    prefs = get_prefs(session)
+    process_company(session, co, [], prefs, now - timedelta(hours=1))
+    process_company(session, co, [nj("n", "Registered Nurse", "Austin, TX"), nj("d", "Data Analyst", "Austin, TX"),
+                                  nj("u", "Unlabelled Role", "Austin, TX")], prefs, now)
+    session.query(Job).filter_by(title="Unlabelled Role").update({"it_role": None})
+    session.commit()
+    with TestClient(app) as c:
+        sign_up(c)
+        shown = titles(c.get("/api/jobs"))
+        assert "Registered Nurse" not in shown and "Data Analyst" in shown and "Unlabelled Role" in shown
+        assert "Registered Nurse" in titles(c.get("/api/jobs", params={"it_only": False}))
+        nurse = next(j for j in c.get("/api/jobs", params={"it_only": False}).json()["items"]
+                     if j["title"] == "Registered Nurse")
+        assert nurse["it_role"] == "other"
+        # "This is an IT job": shown again, and never relabelled by a later re-read.
+        assert c.post(f"/api/jobs/{nurse['id']}/it-role").json()["it_role"] == "kept"
+        assert "Registered Nurse" in titles(c.get("/api/jobs"))
+    from app.pipeline.poller import apply_flags
+    job = session.get(Job, nurse["id"])
+    session.refresh(job)
+    apply_flags(session, job, prefs)
+    assert job.it_role == "kept"

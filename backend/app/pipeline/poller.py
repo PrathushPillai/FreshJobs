@@ -27,6 +27,7 @@ from app.h1b import job_employer_kind, sponsor_index
 from app.models import Company, Job, JobEvent, JobLocation, UserPrefs
 from app.pipeline.dedupe import find_original, fingerprint
 from app.pipeline.listing_quality import listing_flag
+from app.pipeline.tech_roles import classify_job
 from app.pipeline.visa_reader import apply_verdict, verdict_for
 from app.pipeline.discovery import discover
 from app.pipeline.harvest import harvest
@@ -71,7 +72,9 @@ def apply_flags(session: Session, job: Job, prefs: UserPrefs) -> None:
     job.employer_kind = job_employer_kind(job.company_name or "", job.company.ats if job.company else "",
                                           sponsor_index(session))
     job.listing_flag = listing_flag(job.title, job.description)
-    job.places = [JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
+    if job.it_role != "kept":  # a person marked it as IT ("This is an IT job"): never relabelled
+        job.it_role = classify_job(job.title, job.description)
+    job.places =[JobLocation(city=p.city, state=p.state, country=p.country) for p in parse_locations(job.location)]
     job.listed_at, job.listed_until = listed_window(job.posted_at, job.first_seen_at, job.baseline, job.listed_earliest)
 
 

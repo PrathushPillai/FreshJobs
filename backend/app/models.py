@@ -63,7 +63,7 @@ class Job(Base):
         # sort column: no-sponsorship jobs are shown by default, and with it before the sort column the
         # walk only worked while they were hidden ("All jobs" took 2.7 s instead of 0.02 s).
         Index("ix_jobs_by_found_v2", "closed_at", "is_repost", "first_seen_at", "listed_at", "no_sponsor", "remote",
-              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
+              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text", "it_role"),
         Index("ix_jobs_company_described", "company_id", "described", "closed_at"),
         # Everything a poll's save step reads about a board's existing jobs (poller.process_company), so it never
         # reads the job rows: the columns after `description` sit past its overflow pages, and loading full rows
@@ -76,14 +76,14 @@ class Job(Base):
         # Keyed by id: a search that starts from its full-text matches checks each job's filters here
         # instead of reading the job's row (whose description comes before these columns).
         Index("ix_jobs_id_feed", "id", "closed_at", "is_repost", "no_sponsor", "listed_at", "first_seen_at", "remote",
-              "exp_level", "min_years", "h1b_filings", "role_match"),
+              "exp_level", "min_years", "h1b_filings", "role_match", "it_role"),
         # "Company A-Z" and "Most H-1B filings" sorts (each was a sort of every open job: 21 s and 4 s).
         Index("ix_jobs_by_company", "closed_at", "is_repost", "company_name", "first_seen_at", "listed_at", "no_sponsor",
-              "remote", "exp_level", "min_years", "h1b_filings", "role_match"),
+              "remote", "exp_level", "min_years", "h1b_filings", "role_match", "it_role"),
         Index("ix_jobs_by_sponsor", "closed_at", "is_repost", "h1b_filings", "first_seen_at", "listed_at", "no_sponsor",
-              "remote", "exp_level", "min_years", "role_match"),
+              "remote", "exp_level", "min_years", "role_match", "it_role"),
         Index("ix_jobs_by_listed_v2", "closed_at", "is_repost", "listed_at", "first_seen_at", "no_sponsor", "remote",
-              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text"),
+              "exp_level", "min_years", "h1b_filings", "role_match", "everify", "everify_text", "it_role"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -142,6 +142,11 @@ class Job(Base):
     employer_kind: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # "scam" or "mlm" (pipeline/listing_quality.listing_flag): a red badge, and the opt-in hide filter.
     listing_flag: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    # Is it an IT job (pipeline/tech_roles.classify_job): "tech", "edge" (could be IT: kept), "other" (clearly not
+    # IT: hidden from the feed and alerts by default), "kept" (a person said it's IT: never relabelled), or NULL
+    # (not labelled yet: shown). FreshJobs is an IT job feed (the user, 2026-11-19). In the feed's sort indexes, so
+    # hiding 78% of jobs stays index-only.
+    it_role: Mapped[str | None] = mapped_column(String(8), nullable=True)
     h1b_filings: Mapped[int | None] = mapped_column(Integer, index=True)
     # Found on the very first scan of a company, so it isn't "fresh" and doesn't trigger alerts.
     baseline: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -369,7 +369,7 @@ def _feed_sample(session) -> list:
     return session.execute(text(
         "SELECT j.id, j.title, j.url, j.location, j.remote, j.company_key, j.company_name, j.company_id, "
         "c.name, c.slug, c.ats, j.baseline FROM jobs j INDEXED BY ix_jobs_by_found_v2 JOIN companies c ON c.id = j.company_id "
-        "WHERE j.closed_at IS NULL AND j.is_repost = 0 AND j.us_eligible = 1 "
+        "WHERE j.closed_at IS NULL AND j.is_repost = 0 AND j.us_eligible = 1 AND j.it_role IS NOT 'other' "
         "ORDER BY j.first_seen_at DESC LIMIT :n"), {"n": FEED_SAMPLE}).all()
 
 

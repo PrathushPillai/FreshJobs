@@ -56,7 +56,8 @@ def jobs_for(session, user: User, prefs: UserPrefs, now: datetime) -> list[Job]:
         since = since.replace(tzinfo=timezone.utc)
     candidates = session.scalars(
         select(Job).where(Job.closed_at.is_(None), Job.is_repost.is_(False), Job.first_seen_at > since,
-                          Job.role_match.is_(True), Job.us_eligible.is_(True), Job.baseline.is_(False))
+                          Job.role_match.is_(True), Job.us_eligible.is_(True), Job.baseline.is_(False),
+                          Job.it_role.is_distinct_from("other"))  # an IT job feed: never alert on clearly non-IT
         .order_by(Job.first_seen_at.desc()).limit(2000).options(selectinload(Job.company)))
     out = []
     for j in candidates:

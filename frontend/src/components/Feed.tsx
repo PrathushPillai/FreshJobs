@@ -42,7 +42,7 @@ const SPONSOR_CHOICES = [
   { value: 'possible', label: 'Likely or may sponsor', hint: 'Also employers with a few H-1Bs, or E-Verify (STEM OPT)' },
 ] as const
 
-type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_consultancies' | 'hide_flagged' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
+type Filters = Required<Pick<JobQuery, 'related' | 'sort' | 'countries' | 'states' | 'cities' | 'exp_levels' | 'remote_only' | 'sponsors_only' | 'sponsor_likely' | 'everify_only' | 'hide_consultancies' | 'hide_flagged' | 'it_only' | 'hide_no_sponsor' | 'show_reposts' | 'repeat_kinds' | 'tracked'>> &
   Pick<JobQuery, 'max_years' | 'since_hours' | 'posted_within_hours'> & { include_unstated: boolean; for_you: boolean }
 
 const DEFAULT_FILTERS: Filters = {
@@ -60,6 +60,7 @@ const DEFAULT_FILTERS: Filters = {
   everify_only: false,
   hide_consultancies: false,  // shown with a badge by default; More can hide them
   hide_flagged: false,  // possible scams and MLM recruiting: a red badge; More can hide them
+  it_only: true,  // FreshJobs is an IT job feed: clearly non-IT jobs hidden; More → "Show non-IT jobs" shows them
   // Shown by default: some employers that say they don't sponsor can still be persuaded. Each such job
   // carries a red "No sponsorship" badge, and the Visa pill can hide them.
   hide_no_sponsor: false,
@@ -534,7 +535,7 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
   const expLabel = filters.exp_levels.length
     ? filters.exp_levels.map((l) => EXP_LABELS[l].split(' ')[0]).join(', ')
     : filters.max_years !== undefined ? `≤ ${filters.max_years} yrs` : 'Experience'
-  const moreActive = filters.show_reposts || filters.tracked !== 'any' || filters.hide_consultancies || filters.hide_flagged
+  const moreActive = filters.show_reposts || filters.tracked !== 'any' || filters.hide_consultancies || filters.hide_flagged || !filters.it_only
 
   return (
     <div className="space-y-4">
@@ -754,8 +755,13 @@ export default function Feed({ stats, onOpenProfile }: { stats?: Status; onOpenP
             ))}
           </FilterPill>
 
-          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any', hide_consultancies: false, hide_flagged: false })}>
+          <FilterPill {...staging} label="More" active={moreActive} onClear={() => set({ show_reposts: false, repeat_kinds: REPEAT_KINDS, tracked: 'any', hide_consultancies: false, hide_flagged: false, it_only: true })}>
             <div className="space-y-2">
+              <Toggle
+                label="Show non-IT jobs too (stores, field, clinical…)"
+                checked={!f.it_only}
+                onChange={(v) => stage({ it_only: !v })}
+              />
               <Toggle
                 label="Hide consultancies & staffing firms"
                 checked={f.hide_consultancies}

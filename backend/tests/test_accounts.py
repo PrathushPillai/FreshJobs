@@ -157,11 +157,11 @@ def test_users_cannot_see_or_change_each_others_data(session, jobs, mail):
         assert [j["application"]["status"] for j in tracked_b] == ["saved"]  # the cache never mixes users
         # Each user's For you follows their own roles.
         a.put("/api/prefs", json={"include_keywords": ["data analyst"], "exclude_keywords": []})
-        b.put("/api/prefs", json={"include_keywords": ["nurse"], "exclude_keywords": []})
+        b.put("/api/prefs", json={"include_keywords": ["software engineer"], "exclude_keywords": []})
         mine = lambda c: sorted(j["title"] for j in c.get(  # noqa: E731
             "/api/jobs", params={"alert_roles_only": True, "hide_no_sponsor": False}).json()["items"])
-        assert mine(a) == ["Data Analyst"] and mine(b) == ["Registered Nurse"]
-        assert b.get("/api/prefs").json()["include_keywords"] == ["nurse"]
+        assert mine(a) == ["Data Analyst"] and mine(b) == ["Software Engineer"]
+        assert b.get("/api/prefs").json()["include_keywords"] == ["software engineer"]
 
 
 def test_only_the_admin_changes_sources_or_starts_a_check(session):

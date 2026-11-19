@@ -50,6 +50,8 @@ export interface Job {
   employer_kind: 'consultancy' | 'staffing' | '' | null
   /** "scam" or "mlm" (backend pipeline/listing_quality): a red badge, and the opt-in hide filter. */
   listing_flag?: 'scam' | 'mlm' | null
+  /** Is it an IT job (backend pipeline/tech_roles): 'other' is hidden by default; 'kept' = a person said it's IT. */
+  it_role?: 'tech' | 'edge' | 'other' | 'kept' | null
   /** How likely the employer is to sponsor (backend sponsorship.sponsor_likelihood). */
   sponsor_likely: SponsorLikely
   application: { id: number; status: AppStatus } | null
@@ -377,6 +379,8 @@ export interface JobQuery {
   /** Leave out consultancies and staffing firms (off by default: they get a badge instead). */
   hide_consultancies?: boolean
   hide_flagged?: boolean
+  /** FreshJobs is an IT job feed: leave out clearly non-IT jobs (on by default; More can show them). */
+  it_only?: boolean
   /** Instead of a page: how many matches were posted in the last 1, 6 and 24 hours (JobPage.fresh). */
   fresh_counts?: boolean
   hide_no_sponsor?: boolean
@@ -443,6 +447,8 @@ export const api = {
     request<{ open: boolean | null; detail: string; checked_at: string; closed_at: string | null }>(`/api/jobs/${id}/verify`, { method: 'POST' }),
   /** Fetch a job's description from its source when it was saved without one. */
   describe: (id: number) => request<{ description: string | null; fetched: boolean }>(`/api/jobs/${id}/describe`, { method: 'POST' }),
+  /** "This is an IT job": show a job hidden as non-IT again, and tell the rules they were wrong. */
+  markIt: (id: number) => request<{ id: number; it_role: string }>(`/api/jobs/${id}/it-role`, { method: 'POST' }),
   recruiters: (id: number, lookup = false, refresh = false) =>
     request<RecruiterInfo>(`/api/jobs/${id}/recruiters?${toParams({ lookup, refresh })}`),
   locationFacets: (country?: string, state?: string) =>

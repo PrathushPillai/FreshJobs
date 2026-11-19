@@ -68,15 +68,15 @@ def client(session, now, monkeypatch):
     session.add(acme)
     session.flush()
     prefs = get_prefs(session)
-    prefs.include_keywords = ["data engineer", "nurse"]
+    prefs.include_keywords = ["data engineer", "mainframe"]
     process_company(session, acme, [], prefs, now)
     process_company(session, acme, [
         NormalizedJob(external_id="1", title="Data Engineer", url="u1", locations=["Boston, MA"],
                       description="Python, SQL, Airflow, dbt, Snowflake, AWS. 2+ years of experience."),
         NormalizedJob(external_id="2", title="Senior Data Engineer", url="u2", locations=["Boston, MA"],
                       description="Scala, Kafka, Flink, Kubernetes, Go. 8+ years of experience."),
-        NormalizedJob(external_id="3", title="Registered Nurse", url="u3", locations=["Boston, MA"],
-                      description="Patient care and charting. Must be a US citizen."),
+        NormalizedJob(external_id="3", title="Mainframe Programmer", url="u3", locations=["Boston, MA"],
+                      description="COBOL, JCL and CICS batch jobs. Must be a US citizen."),
     ], prefs, now)
     session.commit()
     with TestClient(app) as c:
@@ -93,7 +93,7 @@ def test_upload_scores_and_sorts_by_match(client, monkeypatch):
     page = client.get("/api/jobs", params={"sort": "match", "alert_roles_only": True, "hide_no_sponsor": False,
                                           "countries": "United States"}).json()["items"]
     titles = [j["title"] for j in page]
-    assert titles[0] == "Data Engineer" and titles[-1] == "Registered Nurse"
+    assert titles[0] == "Data Engineer" and titles[-1] == "Mainframe Programmer"
     best = page[0]["match"]
     assert best["score"] >= 70 and "Airflow" in best["matched"]
     assert page[-1]["match"]["score"] < 40
@@ -103,7 +103,7 @@ def test_upload_scores_and_sorts_by_match(client, monkeypatch):
     nurse_before = page[-1]["match"]["score"]
     client.put("/api/profile", json={"needs_sponsorship": False})
     nurse = next(j for j in client.get("/api/jobs", params={"sort": "match", "alert_roles_only": True, "hide_no_sponsor": False,
-                                                           "countries": "United States"}).json()["items"] if j["title"] == "Registered Nurse")
+                                                           "countries": "United States"}).json()["items"] if j["title"] == "Mainframe Programmer")
     assert nurse["match"]["score"] > nurse_before
     # Deleting the resume removes the scores.
     assert client.delete("/api/profile/resume").json()["has_resume"] is False

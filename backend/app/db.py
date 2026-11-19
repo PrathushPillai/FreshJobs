@@ -90,8 +90,15 @@ def _add_missing_columns() -> None:
                 if default is not None:
                     ddl += f" DEFAULT {int(default) if isinstance(default, bool) else repr(default)}"
                 conn.execute(text(ddl))
+            have = {i["name"]: i["column_names"] for i in insp.get_indexes(table.name)}
             for index in table.indexes:
-                if index.name not in {i["name"] for i in insp.get_indexes(table.name)}:
+                wanted = [c.name for c in index.columns]
+                if index.name in have and have[index.name] != wanted:
+                    # Same name, new columns (2026-11-19: it_role appended to the feed's sort indexes, so hiding
+                    # non-IT jobs stays index-only): rebuilt here, which takes minutes on a big jobs table.
+                    conn.execute(text(f'DROP INDEX "{index.name}"'))
+                    have.pop(index.name)
+                if index.name not in have:
                     index.create(conn, checkfirst=True)
         for name in _OBSOLETE_INDEXES:  # replaced by a _v2; each copy costs write time on every insert
             conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
