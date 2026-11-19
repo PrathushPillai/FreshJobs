@@ -368,7 +368,7 @@ def _feed_sample(session) -> list:
     """The newest jobs the US feed shows, as people see them."""
     return session.execute(text(
         "SELECT j.id, j.title, j.url, j.location, j.remote, j.company_key, j.company_name, j.company_id, "
-        "c.name, c.slug, c.ats FROM jobs j INDEXED BY ix_jobs_by_found_v2 JOIN companies c ON c.id = j.company_id "
+        "c.name, c.slug, c.ats, j.baseline FROM jobs j INDEXED BY ix_jobs_by_found_v2 JOIN companies c ON c.id = j.company_id "
         "WHERE j.closed_at IS NULL AND j.is_repost = 0 AND j.us_eligible = 1 "
         "ORDER BY j.first_seen_at DESC LIMIT :n"), {"n": FEED_SAMPLE}).all()
 
@@ -421,25 +421,30 @@ def check_feed_content(session) -> list[Check]:
     # SimplifyJobs...) counts per employer it lists. Counting per source exempted those sources entirely and named
     # the flood after whichever employer came first: on 2026-11-17 JazzHR's daily batch (1,331 of the newest 2,000
     # jobs, thousands of employers) showed as "Mobomo, LLC has 67%", marked ok, while Mobomo had 2 jobs.
+    # Only jobs found as new: a board's first scan lists everything it already had (Join Parachute, a plasma-center
+    # chain added 2026-11-19: 492 jobs in 77 towns at once, all baseline), which isn't the employer flooding the feed.
     per_employer: dict[tuple, list] = {}
-    for r in rows:
+    for r in (r for r in rows if not getattr(r, "baseline", False)):
         key = (("employer", r.company_key or (r.company_name or "").lower()) if r.ats in _MULTI_EMPLOYER
                else ("board", r.company_id))
         per_employer.setdefault(key, []).append(r)
-    top_key, top_rows = max(per_employer.items(), key=lambda kv: len(kv[1]))
-    top, first = len(top_rows), top_rows[0]
-    top_name = first.company_name or first.name
-    via = f" (via {first.name})" if top_key[0] == "employer" else ""
-    # A flood is one employer's copies: AO Garcia Agency's 3,156 jobs were 156 roles blasted across towns (2026-11-15).
-    # A big employer posting many different jobs isn't: Allied Universal's 303 new jobs in one check had 290 titles
-    # (2026-11-18). Past FLOOD_MAX_SHARE it warns whatever the titles.
-    titles = len({normalize_title(r.title or "") for r in top_rows})
-    copies = titles / top < FLOOD_DISTINCT_TITLES
-    flood = n >= 200 and (top / n > FLOOD_MAX_SHARE or (top / n > FLOOD_SHARE and copies))
-    out.append(Check("one source flooding", "warn" if flood else "ok",
-                     f"the busiest employer, {top_name}{via}, has {top} of the newest {n} jobs ({top / n:.0%}, "
-                     f"{titles} different titles)",
-                     {"source": first.company_id, "employer": top_name}))
+    if not per_employer:
+        out.append(Check("one source flooding", "ok", f"none of the newest {n} jobs is new (first scans only)"))
+    else:
+        top_key, top_rows = max(per_employer.items(), key=lambda kv: len(kv[1]))
+        top, first = len(top_rows), top_rows[0]
+        top_name = first.company_name or first.name
+        via = f" (via {first.name})" if top_key[0] == "employer" else ""
+        # A flood is one employer's copies: AO Garcia Agency's 3,156 jobs were 156 roles blasted across towns
+        # (2026-11-15). A big employer posting many different jobs isn't: Allied Universal's 303 new jobs in one
+        # check had 290 titles (2026-11-18). Past FLOOD_MAX_SHARE it warns whatever the titles.
+        titles = len({normalize_title(r.title or "") for r in top_rows})
+        copies = titles / top < FLOOD_DISTINCT_TITLES
+        flood = n >= 200 and (top / n > FLOOD_MAX_SHARE or (top / n > FLOOD_SHARE and copies))
+        out.append(Check("one source flooding", "warn" if flood else "ok",
+                         f"the busiest employer, {top_name}{via}, has {top} of the newest {n} jobs ({top / n:.0%}, "
+                         f"{titles} different titles)",
+                         {"source": first.company_id, "employer": top_name}))
 
     # Boards still named after their slug that source_names hasn't asked for a real name yet ("Viatris" may be the
     # real name: once asked, a board counts as named either way).

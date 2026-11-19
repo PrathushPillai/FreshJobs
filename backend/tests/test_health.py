@@ -169,3 +169,21 @@ def test_one_outage_is_one_alert():
     other = [Check("job platforms", "warn", "x", {"platforms": [["workday", 10, 9]]}),
              Check("platform freshness", "warn", "y", {"platforms": ["workday", "greenhouse"]})]
     assert health._one_alert_per_incident(other)[1].level == "warn"  # Greenhouse going stale is its own problem
+
+
+def test_a_new_boards_first_scan_is_not_a_flood(session):
+    """Join Parachute, 2026-11-19: a plasma-center chain's first scan put 492 jobs (21 roles in 77 towns) at the top
+    of the newest found. They were all baseline jobs: what the board already had, not a flood."""
+    from app.models import Company, Job
+
+    chain = Company(name="Chain Co", ats="pinpoint", slug="chain", enabled=True)
+    session.add(chain)
+    session.flush()
+    now = datetime.now(timezone.utc)
+    for i in range(300):
+        session.add(Job(company_id=chain.id, external_id=str(i), title=f"Paramedic {i % 5}", url=f"https://c/{i}",
+                        company_name="Chain Co", company_key="chain co", location="Austin, TX", us_eligible=True,
+                        baseline=i < 280, fingerprint=f"c{i}", first_seen_at=now, last_seen_at=now))
+    session.commit()
+    check = next(c for c in health.check_feed_content(session) if c.name == "one source flooding")
+    assert check.level == "ok" and "20 of the newest 300" in check.detail
