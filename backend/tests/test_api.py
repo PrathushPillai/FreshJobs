@@ -563,3 +563,25 @@ def test_non_it_jobs_are_hidden_by_default_and_shown_with_it_only_off(session, n
     session.refresh(job)
     apply_flags(session, job, prefs)
     assert job.it_role == "kept"
+
+
+def test_a_big_state_is_walked_in_the_sort_index(client, session, monkeypatch):
+    """A state or city with many jobs is checked while walking the sort index ("+jobs.id"), never by looking each
+    job up: a lookup reads the row past its description, where it_role is (state CA took 54 s, 2026-11-19)."""
+    from sqlalchemy import event
+
+    import app.main as m
+
+    monkeypatch.setattr(m, "PLACE_WALK_MIN", 0)
+    statements = []
+
+    def seen(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", seen)
+    try:
+        assert titles(client.get("/api/jobs", params={"countries": "United States", "states": "TX"})) == ["Data Analyst"]
+    finally:
+        event.remove(engine, "before_cursor_execute", seen)
+    assert any("+jobs.id IN" in st for st in statements)

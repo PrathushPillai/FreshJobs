@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
 from app.pipeline.sponsorship import LIKELY_FILINGS, sponsor_likelihood
-from sqlalchemy import Integer, and_, case, column, exists, false, func, or_, select, text, true
+from sqlalchemy import Integer, and_, case, column, exists, false, func, literal_column, or_, select, text, true
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, defer, selectinload
 
@@ -623,6 +623,9 @@ def _fts(name: str, match: str):
 
 
 FTS_FIRST_MAX = 20_000
+# A state or city with more jobs than this is walked in the sort index instead of looked up job by job: lookups read
+# each job's row past its description (it_role is stored after it), so California took 54 s (2026-11-19).
+PLACE_WALK_MIN = 3_000
 
 
 def _title_search(q: str, related: list[str]):
@@ -715,6 +718,16 @@ def list_jobs(
     if fresh_counts:
         posted_within_hours = 24  # the strip's widest window; the 1 h and 6 h counts are taken inside it
 
+    # A state or city with many jobs is walked in the sort index rather than looked up job by job (see in_place).
+    # Counted, capped, from the covering index of job_locations: cheap.
+    place_walk = False
+    if (states or cities) and not fts_first:
+        where = [JobLocation.country.in_(countries)] if countries else []
+        where += [JobLocation.state.in_(states)] if states else []
+        where += [JobLocation.city.in_(cities)] if cities else []
+        sized = select(JobLocation.job_id).where(*where).limit(PLACE_WALK_MIN + 1).subquery()
+        place_walk = session.scalar(select(func.count()).select_from(sized)) > PLACE_WALK_MIN
+
     def build(fts_first: bool, with_search: bool = True, repeats_part: str = ""):
         """The filtered query. With fts_first, status filters are written so SQLite starts from the search's
         full-text matches instead of walking the open-jobs index (see FTS_FIRST_MAX)."""
@@ -732,11 +745,14 @@ def list_jobs(
         if repeats_part == "normal" or not show_reposts:
             stmt = stmt.where(flag("is_repost IS 0", Job.is_repost.is_(False)))
         elif repeats_part == "chosen":
-            stmt = stmt.where(Job.is_repost.is_(True), Job.id.in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))))
+            # "+jobs.id": walk the sort index and check each job against the events, never look the event's jobs up
+            # by id (that reads each row past its description, where it_role is: 47 s for 170k reposts, 2026-11-19).
+            stmt = stmt.where(Job.is_repost.is_(True), literal_column("+jobs.id").in_(
+                select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))))
         elif split_repeats:
             stmt = stmt.where(or_(
                 Job.is_repost.is_(False),
-                Job.id.in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))),
+                literal_column("+jobs.id").in_(select(JobEvent.job_id).where(JobEvent.kind.in_(shown_kinds))),
             ))
         if hide_no_sponsor:
             stmt = stmt.where(flag("no_sponsor IS 0", Job.no_sponsor.is_(False)))
@@ -787,7 +803,11 @@ def list_jobs(
                 place.append(JobLocation.city.in_(cities))
             # A state or city matches few jobs: look those up first (Boston: 15 s -> 0.5 s). A country matches
             # most, so check each job as the feed's index walks them, and stop after a page.
-            in_place = (Job.id.in_(select(JobLocation.job_id).where(*place)) if states or cities
+            # But a big state or city (California: ~150k jobs) is better walked: looking each job up by id reads
+            # its row, and it_role sits past the description, so every lookup read the whole description
+            # (state CA: 54 s, 2026-11-19). "+jobs.id" makes SQLite walk the sort index, index-only (0.2 s).
+            job_id = literal_column("+jobs.id") if place_walk else Job.id
+            in_place = (job_id.in_(select(JobLocation.job_id).where(*place)) if states or cities
                         else exists().where(JobLocation.job_id == Job.id, *place))
             if include_unplaced_remote and not (states or cities):
                 # "Remote" with no stated country: keep it, the country may still fit.
