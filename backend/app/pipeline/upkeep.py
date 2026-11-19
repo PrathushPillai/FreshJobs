@@ -26,6 +26,7 @@ def run() -> dict:
     for key, fn in (("visa_reader", lambda s: visa_reader.run_once(s)),
                     ("closed_from_disabled", lambda s: close_stale_of_disabled(s, datetime.now(timezone.utc))),
                     ("phenom_rollout", lambda s: phenom_rollout.step(s)),
+                    ("radancy_rollout", lambda s: phenom_rollout.step(s, platform="radancy")),
                     ("named", lambda s: source_names.name_some(s, limit=100))):
         try:
             with SessionLocal() as session:

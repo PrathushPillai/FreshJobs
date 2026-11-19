@@ -66,10 +66,11 @@ def _workday_robots_allow(request, monkeypatch):
     have no robots.txt, so it allows everything."""
     if "robots" in request.node.name:
         return
-    from app.sources import phenom, workday
+    from app.sources import http_util, phenom, workday
 
     async def allow(*a, **k):
         return True
 
     monkeypatch.setattr(workday, "robots_allows", allow)
     monkeypatch.setattr(phenom, "robots_allows", allow)
+    monkeypatch.setattr(http_util, "robots_allows", allow)  # Radancy calls it through the module

@@ -383,3 +383,29 @@ def test_avature_dates():
     assert avature.parse_date("2026-10-30") == datetime(2026, 10, 30, tzinfo=timezone.utc)
     assert avature.parse_date("January 5, 2026") == datetime(2026, 1, 5, tzinfo=timezone.utc)
     assert avature.parse_date("soon") is None and avature.parse_date("") is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_radancy_first_scan_reads_only_a_budget_of_job_pages(monkeypatch):
+    """A big site's first scan reads FIRST_SCAN_DETAILS job pages; the rest are saved from the sitemap."""
+    monkeypatch.setattr(radancy, "FIRST_SCAN_DETAILS", 1)
+    respx.get(f"{ARM}/sitemap.xml").mock(return_value=httpx.Response(200, text=ARM_SITEMAP))
+    pages = respx.get(url__regex=rf"{ARM}/job/.*").mock(return_value=httpx.Response(200, text=_radancy_page(ARM_POSTING)))
+    async with httpx.AsyncClient() as client:
+        jobs = await RadancyAdapter().fetch(client, "careers.arm.com", first_scan=True)
+    assert pages.call_count == 1
+    assert len(jobs) == 3  # Austin x2 and Remote: every US job is listed, with or without its page read
+    assert sum(1 for j in jobs if j.description) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_radancy_robots_disallowed_site_is_not_read():
+    respx.get(f"{ARM}/robots.txt").mock(return_value=httpx.Response(200, text="User-agent: *\nDisallow: /job/\n"))
+    sitemap = respx.get(f"{ARM}/sitemap.xml").mock(return_value=httpx.Response(200, text=ARM_SITEMAP))
+    http_util._robots.clear()
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="robots.txt"):
+            await RadancyAdapter().fetch(client, "careers.arm.com")
+    assert sitemap.call_count == 0

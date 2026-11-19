@@ -13,7 +13,7 @@ from app.pipeline import phenom_rollout
 def sites(tmp_path, monkeypatch):
     monkeypatch.setattr(lanes, "lanes_dir", lambda: tmp_path)
     path = tmp_path / "phenom_sites.json"
-    monkeypatch.setattr(phenom_rollout, "results_file", lambda: path)
+    monkeypatch.setattr(phenom_rollout, "results_file", lambda platform="phenom", review=False: tmp_path / f"{platform}_sites.json")
     results = {f"Employer {i}": {"slug": f"careers.e{i}.com/us/en", "us_jobs": 1000 - i, "workday_jobs": 1000}
                for i in range(8)}
     results["Circle K"] = {"slug": "careers.circle.com/us/en", "us_jobs": 39, "workday_jobs": 6106}  # another company
@@ -62,3 +62,16 @@ def test_one_site_under_two_employer_names_is_added_once(session, sites):
     phenom_rollout.results_file().write_text(_json.dumps(results))
     added = phenom_rollout.step(session, max_add=20, force=True)["added"]  # no UNIQUE (ats, slug) error
     assert "Mercy" in added and "Mercy Clinic Springfield Communities" not in added
+
+
+def test_radancy_sites_roll_out_and_old_boards_dont_hold_them(session, sites, tmp_path):
+    import json as _json
+
+    (tmp_path / "radancy_sites.json").write_text(_json.dumps(
+        {"Big Co": {"slug": "jobs.bigco.com", "us_jobs": 900, "workday_jobs": 1000}}))
+    session.add(Company(name="Old Radancy Board", ats="radancy", slug="careers.old.com", enabled=True,
+                        poll_count=0, fail_streak=12))  # found by discovery long ago, failing: not this rollout's
+    session.commit()
+    out = phenom_rollout.step(session, platform="radancy")
+    assert out["added"] == ["Big Co"] and out["waiting_on"] == []
+    assert session.query(Company).filter_by(ats="radancy", slug="jobs.bigco.com").one()

@@ -32,6 +32,11 @@ from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 US_GEONAME = "6252001"
 DETAIL_CONCURRENCY = 4
+# New jobs whose page is read in one fetch; the rest are saved from the sitemap (title, city) and enrichment fills
+# their descriptions later. Without a cap, a first scan of a big site (jobs.aus.com: ~10,000 jobs) read every job
+# page in one go (2026-11-19, when the Radancy finder began adding big Workday employers' sites).
+FIRST_SCAN_DETAILS = 300
+DETAILS_PER_FETCH = 600
 
 _JOB_URL = re.compile(r"<loc>\s*(https?://[^<\s]+?/job/([^/<]+)/([^/<]+)/(\d+)/(\d+))\s*</loc>", re.I)
 _PLACE_URL = re.compile(r"<loc>\s*https?://[^<\s]+?/location/([^/<]+)-jobs/\d+/([\d-]+)/\d+\s*</loc>", re.I)
@@ -121,12 +126,17 @@ class RadancyAdapter(Adapter):
         first_scan: bool = False,
     ) -> list[NormalizedJob]:
         base = base_url(slug)
+        prefix = urlsplit(base).path.rstrip("/")
+        for path in ("/sitemap.xml", f"{prefix}/job/"):
+            if not await http_util.robots_allows(client, f"https://{urlsplit(base).hostname}", path):
+                raise ValueError(f"robots.txt on {urlsplit(base).hostname} disallows {path}: not read")
         resp = await http_util.get(client, f"{base}/sitemap.xml", follow_redirects=True)
         if "<urlset" not in resp.text[:2000]:
             # An error or challenge page: treat it as a failed fetch rather than "no jobs", which would close them all.
             raise ValueError(f"{base}/sitemap.xml is not a sitemap")
         listed, places = parse_sitemap(resp.text)
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
+        budget = [FIRST_SCAN_DETAILS if first_scan else DETAILS_PER_FETCH]
 
         async def build(j: dict) -> NormalizedJob | None:
             city = _slug_words(j["city"])
@@ -139,6 +149,9 @@ class RadancyAdapter(Adapter):
             )
             if j["id"] in known_ids:
                 return job
+            if budget[0] <= 0:
+                return job  # saved from the sitemap; enrichment reads its page in a later poll
+            budget[0] -= 1
             async with sem:
                 try:
                     page = await http_util.get(client, j["url"], follow_redirects=True)

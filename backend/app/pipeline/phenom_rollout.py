@@ -1,4 +1,4 @@
-"""Add the Phenom careers sites that `scripts/find_phenom_sites.py find` found, a few at a time, by itself.
+"""Add the Phenom and Radancy careers sites that `scripts/find_phenom_sites.py find` found, a few at a time, by itself.
 
 Each new site's first scan saves thousands of jobs in the slow lane, so they go in batches: the next batch is added
 only when every Phenom site already tracked has finished a clean check (at least one poll, no failure streak) and
@@ -24,10 +24,15 @@ BATCH = 5
 MIN_SHARE = 0.1  # a site with under a tenth of the employer's Workday jobs is probably another company's
 
 
-def results_file() -> Path:
+PLATFORMS = ("phenom", "radancy")  # careers-site platforms that carry big Workday employers' jobs
+
+
+def results_file(platform: str = "phenom", review: bool = False) -> Path:
+    """{platform}_sites.json next to the database (what the rollout adds from), or the *_review.json a find run
+    writes for a person to look at first (`find_phenom_sites.py merge` moves it over)."""
     from app.matching import _models_dir
 
-    return Path(_models_dir()).parent / "phenom_sites.json"
+    return Path(_models_dir()).parent / f"{platform}_sites{'_review' if review else ''}.json"
 
 
 def candidates(results: dict, tracked: set[str]) -> list[tuple[str, dict]]:
@@ -49,15 +54,19 @@ def candidates(results: dict, tracked: set[str]) -> list[tuple[str, dict]]:
     return out
 
 
-def waiting_on(session) -> list[str]:
-    """Why the next batch can't go in yet (empty: it can)."""
+def waiting_on(session, platform: str = "phenom", results: dict | None = None) -> list[str]:
+    """Why the next batch can't go in yet (empty: it can). Only the sites this rollout adds count: older boards of
+    the platform (Radancy's, found by discovery since 2026-11-09) failing shouldn't hold the new ones."""
     from app.lanes import recent_restarts
 
+    ours = {v["slug"].lower() for v in (results or {}).values() if v.get("slug")}
     out = []
-    for name, polls, streak in session.execute(
-        select(Company.name, Company.poll_count, Company.fail_streak).where(Company.ats == "phenom",
-                                                                            Company.enabled.is_(True))
+    for name, slug, polls, streak in session.execute(
+        select(Company.name, Company.slug, Company.poll_count, Company.fail_streak).where(
+            Company.ats == platform, Company.enabled.is_(True))
     ):
+        if results is not None and slug.lower() not in ours:
+            continue
         if not polls:
             out.append(f"{name} not checked yet")
         elif streak:
@@ -67,22 +76,22 @@ def waiting_on(session) -> list[str]:
     return out
 
 
-def step(session, max_add: int = BATCH, dry_run: bool = False, force: bool = False) -> dict:
-    path = results_file()
+def step(session, max_add: int = BATCH, dry_run: bool = False, force: bool = False, platform: str = "phenom") -> dict:
+    path = results_file(platform)
     if not path.exists():
-        return {"added": [], "left": 0, "waiting_on": ["no phenom_sites.json (run find_phenom_sites.py find)"]}
+        return {"added": [], "left": 0, "waiting_on": [f"no {path.name} (run find_phenom_sites.py find)"]}
     results = json.loads(path.read_text())
-    tracked = {s.lower() for (s,) in session.execute(select(Company.slug).where(Company.ats == "phenom"))}
+    tracked = {s.lower() for (s,) in session.execute(select(Company.slug).where(Company.ats == platform))}
     todo = candidates(results, tracked)
-    blocked = [] if force else waiting_on(session)
+    blocked = [] if force else waiting_on(session, platform, results)
     if not todo or blocked:
         return {"added": [], "left": len(todo), "waiting_on": blocked}
     batch = todo[:max_add]
     for name, v in batch:
-        log.info("%s Phenom site for %s: %s (%s US jobs)", "would add" if dry_run else "adding", name, v["slug"],
-                 v["us_jobs"])
+        log.info("%s %s site for %s: %s (%s US jobs)", "would add" if dry_run else "adding", platform, name,
+                 v["slug"], v["us_jobs"])
         if not dry_run:
-            session.add(Company(name=name, ats="phenom", slug=v["slug"], enabled=True))
+            session.add(Company(name=name, ats=platform, slug=v["slug"], enabled=True))
     if not dry_run:
         session.commit()
     return {"added": [name for name, _ in batch], "left": len(todo) - len(batch), "waiting_on": []}
@@ -95,10 +104,11 @@ def main() -> None:
     ap.add_argument("--max", type=int, default=BATCH)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="add even if the last batch hasn't loaded cleanly")
+    ap.add_argument("--platform", choices=PLATFORMS, default="phenom")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with SessionLocal() as session:
-        print(step(session, args.max, args.dry_run, args.force))
+        print(step(session, args.max, args.dry_run, args.force, args.platform))
 
 
 if __name__ == "__main__":
