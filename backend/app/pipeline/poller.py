@@ -747,6 +747,14 @@ async def poll_once(lane: str | None = None) -> dict:
                         log.warning("%s (%s/%s) is gone: switched off, %d open jobs closed",
                                     company.name, company.ats, company.slug, closed)
                     log.warning("%s (%s/%s): %s", company.name, company.ats, company.slug, error)
+                    # Commit now (in the save thread, like a save): reading company.fail_streak can autoflush
+                    # earlier failed boards' status changes, which takes the write lock, and nothing committed it
+                    # until the next successful save. In the slow lane, with ~3,000 Workday boards refused, that
+                    # held the lock for many minutes and every other writer got "database is locked" (2026-11-19).
+                    try:
+                        await asyncio.to_thread(session.commit)
+                    except SQLAlchemyError:
+                        await asyncio.to_thread(session.rollback)  # still locked: the status waits for the next save
                     continue
                 # Read before saving: after a failed save, touching the board's attributes would flush it.
                 label = f"{company.name} ({company.ats}/{company.slug})"
