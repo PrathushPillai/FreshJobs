@@ -45,7 +45,10 @@ PAUSE_SECONDS = 1.0
 _CHALLENGE = ("challenge-platform", "Just a moment", "cf-chl")
 
 
-def biggest_workday_employers(session, top: int) -> list[tuple[str, int]]:
+def biggest_workday_employers(session, top: int, rank: str = "all") -> list[tuple[str, int]]:
+    """(employer, open Workday jobs), biggest first. rank="it" orders them by IT jobs instead (titles that
+    `tech_roles.classify` doesn't call clearly non-IT), read index-only from ix_jobs_company_titles: FreshJobs is an
+    IT job feed (2026-11-19), and the biggest employers overall are store chains."""
     boards = session.execute(select(Company.id, Company.name).where(Company.ats == "workday",
                                                                     Company.enabled.is_(True))).all()
     counts = dict(session.execute(text(
@@ -54,7 +57,19 @@ def biggest_workday_employers(session, top: int) -> list[tuple[str, int]]:
     per_name: dict[str, int] = {}
     for cid, name in boards:
         per_name[name] = per_name.get(name, 0) + counts.get(cid, 0)
-    return sorted(per_name.items(), key=lambda kv: -kv[1])[:top]
+    if rank != "it":
+        return sorted(per_name.items(), key=lambda kv: -kv[1])[:top]
+    from app.pipeline.tech_roles import classify
+
+    names = dict(boards)
+    it_jobs: dict[str, int] = {}
+    for cid, title in session.execute(text(
+            "SELECT company_id, title FROM jobs INDEXED BY ix_jobs_company_titles WHERE closed_at IS NULL "
+            "AND company_id IN (SELECT id FROM companies WHERE ats = 'workday' AND enabled = 1)")):
+        if classify(title or "") != "other":
+            it_jobs[names[cid]] = it_jobs.get(names[cid], 0) + 1
+    ranked = sorted(it_jobs.items(), key=lambda kv: -kv[1])[:top]
+    return [(name, per_name.get(name, 0)) for name, _ in ranked]
 
 
 async def _page(client, url: str) -> httpx.Response | None:
@@ -111,12 +126,12 @@ async def try_radancy(client, url: str, name: str) -> dict | None:
 CHECKS = {"phenom": try_phenom, "radancy": try_radancy}
 
 
-async def find(top: int, platform: str = "phenom", review: bool = True) -> None:
+async def find(top: int, platform: str = "phenom", review: bool = True, rank: str = "all") -> None:
     main_file, out_file = results_file(platform), results_file(platform, review=review)
     main = json.loads(main_file.read_text()) if main_file.exists() else {}
     results = json.loads(out_file.read_text()) if out_file.exists() else {}
     with SessionLocal() as session:
-        employers = biggest_workday_employers(session, top)
+        employers = biggest_workday_employers(session, top, rank)
         tracked = {s.lower() for (s,) in session.execute(select(Company.slug).where(Company.ats == platform))}
     check = CHECKS[platform]
     async with http_util.client(timeout=20, follow_redirects=True,
@@ -168,6 +183,7 @@ def main() -> None:
     f.add_argument("--top", type=int, default=300)
     f.add_argument("--platform", choices=PLATFORMS, default="phenom")
     f.add_argument("--no-review", action="store_true", help="write straight to the file the rollout reads")
+    f.add_argument("--rank", choices=("all", "it"), default="all", help="it: employers with the most IT jobs first")
     m = sub.add_parser("merge")
     m.add_argument("--platform", choices=PLATFORMS, default="phenom")
     a = sub.add_parser("add")
@@ -177,7 +193,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.cmd == "find":
         t = time.time()
-        asyncio.run(find(args.top, args.platform, review=not args.no_review))
+        asyncio.run(find(args.top, args.platform, review=not args.no_review, rank=args.rank))
         print(f"{time.time() - t:.0f} s")
     elif args.cmd == "merge":
         merge(args.platform)
