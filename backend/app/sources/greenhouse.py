@@ -12,10 +12,36 @@ from collections.abc import Set
 import httpx
 
 from app.pipeline.normalize import html_to_text
+from app.sources import http_util
 from app.sources.base import Adapter, NormalizedJob, parse_iso
 
 API = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
 DETAIL_CONCURRENCY = 4
+
+# Greenhouse rate-limits by volume (2026-11-23, from 16:00 UTC: ~13,000 HTTP 429s an hour and ~3,900 of 6,000
+# boards refused, while a single request from the server still got 200). We kept sending 25 at a time through every
+# refusal. Now a 429 pauses every Greenhouse request in the lane for PAUSE_AFTER_429 seconds, then requests go out
+# one at a time GENTLE_SPACING apart until GENTLE_SUCCESSES in a row succeed (as Workday does, sources/workday.py).
+PAUSE_AFTER_429 = 60.0
+GENTLE_SPACING = 0.5
+GENTLE_SUCCESSES = 40
+_PAUSE = http_util.Spacer(0.0)
+_gentle = {"left": 0}
+
+
+async def _get(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """A Greenhouse request that waits out a pause, starts one on a 429, and comes back gently."""
+    await _PAUSE.wait()
+    resp = await client.get(url, **kwargs)
+    if resp.status_code == 429:
+        _PAUSE.pause(PAUSE_AFTER_429)
+        _PAUSE.seconds = GENTLE_SPACING
+        _gentle["left"] = GENTLE_SUCCESSES
+    elif _gentle["left"] and resp.status_code < 400:
+        _gentle["left"] -= 1
+        if not _gentle["left"]:
+            _PAUSE.seconds = 0.0  # answering normally again: full speed
+    return resp
 
 
 def _job(j: dict, content: dict | None = None) -> NormalizedJob:
@@ -38,17 +64,19 @@ def _job(j: dict, content: dict | None = None) -> NormalizedJob:
 
 class GreenhouseAdapter(Adapter):
     ats = "greenhouse"
-    max_concurrency = 25  # a public CDN-backed API; 10 at once made a pass over ~2,700 boards take ~30 min
+    # 10 at once made a pass over ~2,700 boards take ~30 min (2026-11); 25 drew rate limits once there were ~6,000
+    # boards (2026-11-23). A pass over 6,000 at 12 is a couple of minutes.
+    max_concurrency = 12
 
     async def fetch(
         self, client: httpx.AsyncClient, slug: str, *, known_ids: Set[str] = frozenset(), **_
     ) -> list[NormalizedJob]:
         if not known_ids:  # first scan: one request with every description
-            resp = await client.get(API.format(slug=slug), params={"content": "true"})
+            resp = await _get(client, API.format(slug=slug), params={"content": "true"})
             resp.raise_for_status()
             return [_job(j) for j in resp.json().get("jobs", [])]
 
-        resp = await client.get(API.format(slug=slug))
+        resp = await _get(client, API.format(slug=slug))
         resp.raise_for_status()
         listed = resp.json().get("jobs", [])
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
@@ -58,7 +86,7 @@ class GreenhouseAdapter(Adapter):
                 return _job(j, {})
             async with sem:
                 try:
-                    r = await client.get(f"{API.format(slug=slug)}/{j['id']}")
+                    r = await _get(client, f"{API.format(slug=slug)}/{j['id']}")
                     r.raise_for_status()
                 except httpx.HTTPError:
                     return None  # taken down since the list call, or transient: it's still new next poll

@@ -40,7 +40,10 @@ _HOST = r"([a-z0-9-]+)\.(zohorecruit\.(?:com|in|eu|com\.au|jp|com\.cn|ca|sa|uk))
 _DETECT = re.compile(rf"^https?://{_HOST}(?:/(?:jobs/([A-Za-z0-9_-]+)|careers|recruit/Portal\.na)\b.*)?/?$", re.I)
 _RESERVED = {"www", "recruit", "static", "accounts", "help"}
 
-PAGE_MARKER = re.compile(r"[a-z0-9-]+\.zohorecruit\.[a-z.]+|static\.zohocdn\.com/recruit", re.I)
+# The host label is bounded and must start a word: an unbounded `[a-z0-9-]+` retried from every position of a long
+# run of letters and digits (wmu.com's home page carries a 224,591-character one), which took hours and froze the
+# discovery worker on every run from 2026-11-22 23:22 UTC (31 watchdog restarts in 12 h).
+PAGE_MARKER = re.compile(r"(?<![a-z0-9-])[a-z0-9-]{1,63}\.zohorecruit\.[a-z.]+|static\.zohocdn\.com/recruit", re.I)
 
 
 def parse_slug(slug: str) -> tuple[str, str]:
