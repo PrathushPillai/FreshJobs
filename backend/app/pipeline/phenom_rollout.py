@@ -37,9 +37,10 @@ def results_file(platform: str = "phenom", review: bool = False) -> Path:
 
 def candidates(results: dict, tracked: set[str]) -> list[tuple[str, dict]]:
     """Usable sites not tracked yet, most US jobs first. careers.circle.com (39 jobs) isn't Circle K's (6,106 on
-    Workday), hence the share test."""
+    Workday), hence the share test. A "skip" note (the finder's, or one written by hand: 7-Eleven's Radancy site,
+    4,651 mostly franchise store jobs, 2026-11-26) keeps a site out."""
     usable = [(name, v) for name, v in results.items()
-              if v.get("us_jobs") and v.get("slug") and v["slug"].lower() not in tracked
+              if v.get("us_jobs") and v.get("slug") and not v.get("skip") and v["slug"].lower() not in tracked
               and v["us_jobs"] >= MIN_SHARE * (v.get("workday_jobs") or 0)]
     # One site can belong to two DOL names ("Abbott" and "ABBOTT LABORATORIES", "Mercy" and "Mercy Clinic
     # Springfield Communities"): each site once, under the name with the bigger Workday board. Adding both in one

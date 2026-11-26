@@ -75,3 +75,12 @@ def test_radancy_sites_roll_out_and_old_boards_dont_hold_them(session, sites, tm
     out = phenom_rollout.step(session, platform="radancy")
     assert out["added"] == ["Big Co"] and out["waiting_on"] == []
     assert session.query(Company).filter_by(ats="radancy", slug="jobs.bigco.com").one()
+
+
+def test_a_site_with_a_skip_note_is_never_added(session, sites):
+    results = json.loads(phenom_rollout.results_file().read_text())
+    results["Store chain"] = {"slug": "careers.store.com", "us_jobs": 5000, "workday_jobs": 600,
+                              "skip": "left out by hand: mostly store jobs"}
+    phenom_rollout.results_file().write_text(json.dumps(results))
+    added = phenom_rollout.step(session, max_add=20, force=True)["added"]
+    assert "Store chain" not in added and len(added) == 8
