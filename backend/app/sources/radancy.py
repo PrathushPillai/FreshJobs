@@ -45,6 +45,11 @@ _DETECT = re.compile(
     r"^https?://([^/?#]+)(/[a-z]{2}(?:-[a-z]{2})?)?/(?:job/[^/]+/[^/]+/\d+/\d+|search-jobs(?:/|$|\?)|"
     r"category/[^/]+/\d+/\d+|location/[^/]+/\d+/[\d-]+)", re.I)
 _H1 = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S | re.I)
+# Job pages with no JSON-LD (Jabil, The University of Kansas Health System, 2026-11-26): the description is the
+# "ats-description" block inside the job-description section, and some templates list the places in a
+# "job-detail-location" field ("Albuquerque, New Mexico, United States of America; Baja, Mexico; Remote - USA").
+_ATS_DESCRIPTION = re.compile(r'<div class="ats-description">(.*?)</section>', re.S | re.I)
+_DETAIL_LOCATION = re.compile(r'<dd class="[^"]*job-detail-location[^"]*">(.*?)</dd>', re.S | re.I)
 
 # Radancy's CDN and its site id attribute appear on every page of a Radancy career site.
 PAGE_MARKER = re.compile(r"tbcdn\.talentbrew\.com|data-company-site-id=|radancy\.net", re.I)
@@ -107,6 +112,28 @@ def city_countries(city: str, places: dict[str, set[str]]) -> set[str]:
     return found
 
 
+def us_place_names(xml: str) -> dict[str, str]:
+    """{city slug: "City, State, United States"} from a sitemap's US city pages
+    (/location/olathe-kansas-united-states-jobs/38901/6252001-4273857-4276614/4). A job's own URL carries only the
+    city ("olathe"), which the place parser can't place, so such jobs left the US feed: 561 of KU Health System's
+    977 on its first scan. A city slug found in two states is left alone."""
+    found: dict[str, set[str]] = {}
+    for place, geonames in _PLACE_URL.findall(xml):
+        ids = geonames.split("-")
+        place = place.lower()
+        if len(ids) != 3 or ids[0] != US_GEONAME or not place.endswith("-united-states"):
+            continue
+        words = place[: -len("-united-states")].split("-")
+        for n in range(1, len(words)):  # the city is some leading words, the state the rest
+            found.setdefault("-".join(words[:n]), set()).add(" ".join(words[n:]))
+    out = {}
+    for city, states in found.items():
+        if len(states) == 1:
+            state = next(iter(states))
+            out[city] = f"{_slug_words(city)}, {_slug_words(state)}, United States"
+    return out
+
+
 def maybe_us(city: str, places: dict[str, set[str]]) -> bool:
     """False only when the city matches listed places and none of them is in the US."""
     countries = city_countries(city, places)
@@ -135,11 +162,12 @@ class RadancyAdapter(Adapter):
             # An error or challenge page: treat it as a failed fetch rather than "no jobs", which would close them all.
             raise ValueError(f"{base}/sitemap.xml is not a sitemap")
         listed, places = parse_sitemap(resp.text)
+        us_names = us_place_names(resp.text)
         sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
         budget = [FIRST_SCAN_DETAILS if first_scan else DETAILS_PER_FETCH]
 
         async def build(j: dict) -> NormalizedJob | None:
-            city = _slug_words(j["city"])
+            city = us_names.get(j["city"]) or _slug_words(j["city"])
             job = NormalizedJob(
                 external_id=j["id"],
                 title=_slug_words(j["title"]),
@@ -160,9 +188,17 @@ class RadancyAdapter(Adapter):
             posting = http_util.json_ld_job(page.text)
             if not posting:
                 h1 = _H1.search(page.text)
-                if not h1:
+                described = _ATS_DESCRIPTION.search(page.text)
+                if not h1 and not described:
                     return None
-                job.title = html_to_text(h1.group(1)) or job.title
+                if h1:
+                    job.title = html_to_text(h1.group(1)) or job.title
+                if described:
+                    job.description = html_to_text(described.group(1))
+                listed_places = _DETAIL_LOCATION.search(page.text)
+                if listed_places:
+                    names = [p.strip() for p in html_to_text(listed_places.group(1)).split(";") if p.strip()]
+                    job.locations = names or job.locations
                 return job
             job.title = htmllib.unescape(posting.get("title") or "").strip() or job.title
             job.description = html_to_text(htmllib.unescape(posting.get("description") or ""))

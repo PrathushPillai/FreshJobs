@@ -99,7 +99,7 @@ async def test_radancy_lists_us_jobs_from_the_sitemap_and_reads_new_ones():
     assert tpm.url.endswith("/33099/102874076256") and tpm.company_name == ""
 
     known_job = by_id["102860632272"]
-    assert known_job.title == "Staff Cpu Verification Engineer" and known_job.locations == ["Austin"]
+    assert known_job.title == "Staff Cpu Verification Engineer" and known_job.locations == ["Austin, Texas, United States"]
     # No JSON-LD: the page's <h1> gives the title, and the city slug says remote.
     assert by_id["103000000001"].title == "Field Applications Engineer" and by_id["103000000001"].remote
 
@@ -409,3 +409,36 @@ async def test_radancy_robots_disallowed_site_is_not_read():
         with pytest.raises(ValueError, match="robots.txt"):
             await RadancyAdapter().fetch(client, "careers.arm.com")
     assert sitemap.call_count == 0
+
+
+KU = "https://jobs.kansashealthsystem.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_radancy_page_without_json_ld_and_city_only_urls():
+    """KU Health System and Jabil: job URLs carry only the city, and pages have no JSON-LD (2026-11-26)."""
+    sitemap = ('<?xml version="1.0" encoding="utf-8"?><urlset>'
+               + _url(f"{KU}/location/kansas-united-states-jobs/38901/6252001-4273857/3")
+               + _url(f"{KU}/location/olathe-kansas-united-states-jobs/38901/6252001-4273857-4276614/4")
+               + _url(f"{KU}/location/kansas-city-kansas-united-states-jobs/38901/6252001-4273857-4273837/4")
+               + _url(f"{KU}/location/kansas-city-missouri-united-states-jobs/38901/6252001-4398678-4393217/4")
+               + _url(f"{KU}/job/olathe/rn-emergency-room/38901/1001")
+               + _url(f"{KU}/job/kansas-city/patient-access-rep/38901/1002")
+               + _url(f"{KU}/job/albuquerque/operations-project-manager/38901/1003") + "</urlset>")
+    respx.get(f"{KU}/sitemap.xml").mock(return_value=httpx.Response(200, text=sitemap))
+    page = ('<html><body data-company-site-id="1"><section class="job-description">'
+            '<h1 class="module-title">RN - Emergency Room</h1><dl><dd class="job-description__desc-detail '
+            'job-detail-location">Albuquerque, New Mexico, United States of America; Baja, Mexico</dd></dl>'
+            '<div class="ats-description"><p><b>Summary</b><br>Cares for patients in the emergency room.</p></div>'
+            '</section><footer>Share on Facebook</footer></body></html>')
+    respx.get(f"{KU}/job/albuquerque/operations-project-manager/38901/1003").mock(
+        return_value=httpx.Response(200, text=page))
+    async with httpx.AsyncClient() as client:
+        jobs = await RadancyAdapter().fetch(client, "jobs.kansashealthsystem.com", known_ids={"1001", "1002"})
+    by_id = {j.external_id: j for j in jobs}
+    assert by_id["1001"].locations == ["Olathe, Kansas, United States"]
+    assert by_id["1002"].locations == ["Kansas City"]  # in two states: left as the city
+    new = by_id["1003"]
+    assert new.title == "RN - Emergency Room" and "emergency room" in new.description and "Facebook" not in new.description
+    assert new.locations == ["Albuquerque, New Mexico, United States of America", "Baja, Mexico"]
